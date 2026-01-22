@@ -28,17 +28,17 @@
 
 func main() int {
     # Initialize template directory
-    Template_init("examples/templates");
+    Cannoli::Template::init("examples/templates");
 
     # Disable template caching for debugging
-    Template_set_cache(0);
+    Cannoli::Template::set_cache(0);
 
     # Create the application
-    my scalar $app = App_new();
+    my scalar $app = Cannoli::App::new();
     my scalar $router = $app->{"router"};
 
     # Home page - variable substitution, loops, and conditionals
-    Router_get_c($router, "/", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/", func (scalar $c) {
         my scalar $features = [
             {"name" => "Variables", "description" => "Simple {{var}} substitution"},
             {"name" => "Nested Access", "description" => "Access {{user.name}} style paths"},
@@ -57,7 +57,7 @@ func main() int {
     });
 
     # Admin home page - shows admin panel
-    Router_get_c($router, "/admin", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/admin", func (scalar $c) {
         my scalar $features = [
             {"name" => "Variables", "description" => "Simple {{var}} substitution"},
             {"name" => "Loops", "description" => "Iterate with {{#each}}...{{/each}}"},
@@ -75,7 +75,7 @@ func main() int {
     });
 
     # User profile - nested object access with roles list
-    Router_get_c($router, "/user/:id", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/user/:id", func (scalar $c) {
         my str $user_id = $c->param("id");
 
         # Simulate fetching user data
@@ -104,7 +104,7 @@ func main() int {
     });
 
     # Blog post - demonstrates layout
-    Router_get_c($router, "/blog/:slug", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/blog/:slug", func (scalar $c) {
         my str $slug = $c->param("slug");
 
         my scalar $post = {
@@ -124,7 +124,7 @@ func main() int {
     });
 
     # Form with safe rendering (XSS protection)
-    Router_get_c($router, "/search", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/search", func (scalar $c) {
         my str $query = $c->param("q");
 
         if (length($query) == 0) {
@@ -141,7 +141,7 @@ func main() int {
     });
 
     # Inline template example
-    Router_get_c($router, "/inline", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/inline", func (scalar $c) {
         my str $template = "<html><body><h1>Hello, {{name}}!</h1><p>This template was defined inline.</p><p><a href='/'>Back to home</a></p></body></html>";
 
         my scalar $vars = {
@@ -152,7 +152,7 @@ func main() int {
     });
 
     # JSON API example
-    Router_get_c($router, "/api/users", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/api/users", func (scalar $c) {
         my scalar $users = [
             {"id" => 1, "name" => "Alice"},
             {"id" => 2, "name" => "Bob"},
@@ -164,7 +164,7 @@ func main() int {
     });
 
     # Variable features demo (set, with, dump)
-    Router_get_c($router, "/debug", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/debug", func (scalar $c) {
         my scalar $user = {
             "name" => "Alice",
             "email" => "alice@example.com",
@@ -184,7 +184,7 @@ func main() int {
     });
 
     # Named loop variable example
-    Router_get_c($router, "/products", func (scalar $c) {
+    Cannoli::Router::get_c($router, "/products", func (scalar $c) {
         my scalar $products = [
             {"name" => "Laptop", "price" => 999, "in_stock" => 1},
             {"name" => "Mouse", "price" => 29, "in_stock" => 1},
@@ -217,6 +217,6 @@ func main() int {
     say("  GET /api/users  - JSON API");
     say("");
 
-    App_run($app);
+    Cannoli::App::run($app);
     return 0;
 }

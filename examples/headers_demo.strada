@@ -54,12 +54,12 @@ func handle_home(hash %req) hash {
     $html = $html . "<h2>Your Request Headers</h2>\n";
     $html = $html . "<table>\n<tr><th>Header</th><th>Value</th></tr>\n";
 
-    my array @names = Request_header_names(%req);
+    my array @names = Cannoli::Request::header_names(%req);
     my int $i = 0;
     while ($i < scalar(@names)) {
         my str $name = @names[$i];
-        my str $value = Request_get_header(%req, $name);
-        $html = $html . "<tr><td><code>" . $name . "</code></td><td>" . Response_html_escape($value) . "</td></tr>\n";
+        my str $value = Cannoli::Request::get_header(%req, $name);
+        $html = $html . "<tr><td><code>" . $name . "</code></td><td>" . Cannoli::Response::html_escape($value) . "</td></tr>\n";
         $i = $i + 1;
     }
     $html = $html . "</table>\n";
@@ -67,24 +67,24 @@ func handle_home(hash %req) hash {
     # Show some convenient accessor results
     $html = $html . "<h2>Convenience Functions</h2>\n";
     $html = $html . "<table>\n<tr><th>Function</th><th>Result</th></tr>\n";
-    $html = $html . "<tr><td><code>Request_user_agent()</code></td><td>" . Response_html_escape(Request_user_agent(%req)) . "</td></tr>\n";
-    $html = $html . "<tr><td><code>Request_host()</code></td><td>" . Request_host(%req) . "</td></tr>\n";
-    $html = $html . "<tr><td><code>Request_accepts_json()</code></td><td>" . Request_accepts_json(%req) . "</td></tr>\n";
-    $html = $html . "<tr><td><code>Request_is_ajax()</code></td><td>" . Request_is_ajax(%req) . "</td></tr>\n";
+    $html = $html . "<tr><td><code>Cannoli::Request::user_agent()</code></td><td>" . Cannoli::Response::html_escape(Cannoli::Request::user_agent(%req)) . "</td></tr>\n";
+    $html = $html . "<tr><td><code>Cannoli::Request::host()</code></td><td>" . Cannoli::Request::host(%req) . "</td></tr>\n";
+    $html = $html . "<tr><td><code>Cannoli::Request::accepts_json()</code></td><td>" . Cannoli::Request::accepts_json(%req) . "</td></tr>\n";
+    $html = $html . "<tr><td><code>Cannoli::Request::is_ajax()</code></td><td>" . Cannoli::Request::is_ajax(%req) . "</td></tr>\n";
     $html = $html . "</table>\n";
 
     $html = $html . "</body>\n</html>\n";
-    return Response_html(200, $html);
+    return Cannoli::Response::html(200, $html);
 }
 
 # Custom response headers
 func handle_custom_headers(hash %req) hash {
-    my hash %res = Response_html(200, "<h1>Custom Headers</h1><p>Check the response headers in your browser's dev tools!</p>");
+    my hash %res = Cannoli::Response::html(200, "<h1>Custom Headers</h1><p>Check the response headers in your browser's dev tools!</p>");
 
     # Set individual headers
-    Response_header(%res, "X-Custom-Header", "Hello from Cannoli!");
-    Response_header(%res, "X-Powered-By", "Strada");
-    Response_header(%res, "X-Request-Id", "12345");
+    Cannoli::Response::header(%res, "X-Custom-Header", "Hello from Cannoli!");
+    Cannoli::Response::header(%res, "X-Powered-By", "Strada");
+    Cannoli::Response::header(%res, "X-Request-Id", "12345");
 
     return %res;
 }
@@ -92,31 +92,31 @@ func handle_custom_headers(hash %req) hash {
 # JSON API with CORS headers
 func handle_json_api(hash %req) hash {
     my str $json = "{\"message\":\"Hello from the API\",\"timestamp\":\"2024-01-01T00:00:00Z\"}";
-    my hash %res = Response_json(200, $json);
+    my hash %res = Cannoli::Response::json(200, $json);
 
     # Enable CORS for all origins
-    Response_cors(%res, "*");
+    Cannoli::Response::cors(%res, "*");
 
     return %res;
 }
 
 # Set a cookie
 func handle_set_cookie(hash %req) hash {
-    my hash %res = Response_html(200, "<h1>Cookie Set!</h1><p>A cookie named 'session' has been set.</p><p><a href=\"/read-cookie\">Read Cookie</a></p>");
+    my hash %res = Cannoli::Response::html(200, "<h1>Cookie Set!</h1><p>A cookie named 'session' has been set.</p><p><a href=\"/read-cookie\">Read Cookie</a></p>");
 
     # Set a session cookie
-    Response_set_cookie(%res, "session", "abc123", "Path=/; HttpOnly");
+    Cannoli::Response::set_cookie(%res, "session", "abc123", "Path=/; HttpOnly");
 
     # Set a persistent cookie (expires in 1 hour)
-    Response_set_cookie(%res, "user_pref", "dark_mode", "Path=/; Max-Age=3600");
+    Cannoli::Response::set_cookie(%res, "user_pref", "dark_mode", "Path=/; Max-Age=3600");
 
     return %res;
 }
 
 # Read cookies from request
 func handle_read_cookie(hash %req) hash {
-    my str $session = Request_get_cookie(%req, "session");
-    my str $pref = Request_get_cookie(%req, "user_pref");
+    my str $session = Cannoli::Request::get_cookie(%req, "session");
+    my str $pref = Cannoli::Request::get_cookie(%req, "user_pref");
 
     my str $html = "<h1>Cookies</h1>\n";
     $html = $html . "<p>session: <code>" . $session . "</code></p>\n";
@@ -127,7 +127,7 @@ func handle_read_cookie(hash %req) hash {
     }
 
     # Show all cookies
-    my hash %cookies = Request_cookies(%req);
+    my hash %cookies = Cannoli::Request::cookies(%req);
     my array @names = keys(%cookies);
     if (scalar(@names) > 0) {
         $html = $html . "<h2>All Cookies</h2>\n<ul>\n";
@@ -140,49 +140,49 @@ func handle_read_cookie(hash %req) hash {
         $html = $html . "</ul>\n";
     }
 
-    return Response_html(200, $html);
+    return Cannoli::Response::html(200, $html);
 }
 
 # Cached response
 func handle_cached(hash %req) hash {
-    my hash %res = Response_html(200, "<h1>Cached Response</h1><p>This response is cacheable for 1 hour (3600 seconds).</p>");
+    my hash %res = Cannoli::Response::html(200, "<h1>Cached Response</h1><p>This response is cacheable for 1 hour (3600 seconds).</p>");
 
     # Cache for 1 hour
-    Response_cache(%res, 3600);
+    Cannoli::Response::cache(%res, 3600);
 
     return %res;
 }
 
 # No-cache response
 func handle_no_cache(hash %req) hash {
-    my hash %res = Response_html(200, "<h1>No Cache</h1><p>This response should not be cached.</p>");
+    my hash %res = Cannoli::Response::html(200, "<h1>No Cache</h1><p>This response should not be cached.</p>");
 
     # Disable caching
-    Response_cache(%res, 0);
+    Cannoli::Response::cache(%res, 0);
 
     return %res;
 }
 
-# Using Response_*_with_headers convenience function
+# Using Cannoli::Response::*_with_headers convenience function
 func handle_with_headers_demo(hash %req) hash {
     my hash %custom_headers = ();
     $custom_headers{"X-Demo"} = "true";
     $custom_headers{"X-Version"} = "1.0";
 
-    return Response_text_with_headers(200, "Response with custom headers", %custom_headers);
+    return Cannoli::Response::text_with_headers(200, "Response with custom headers", %custom_headers);
 }
 
 func main(int $argc, array @argv) int {
-    my scalar $app = App_new();
+    my scalar $app = Cannoli::App::new();
 
-    App_get($app, "/", \&handle_home);
-    App_get($app, "/custom-headers", \&handle_custom_headers);
-    App_get($app, "/json-api", \&handle_json_api);
-    App_get($app, "/set-cookie", \&handle_set_cookie);
-    App_get($app, "/read-cookie", \&handle_read_cookie);
-    App_get($app, "/cached", \&handle_cached);
-    App_get($app, "/no-cache", \&handle_no_cache);
-    App_get($app, "/with-headers", \&handle_with_headers_demo);
+    Cannoli::App::get($app, "/", \&handle_home);
+    Cannoli::App::get($app, "/custom-headers", \&handle_custom_headers);
+    Cannoli::App::get($app, "/json-api", \&handle_json_api);
+    Cannoli::App::get($app, "/set-cookie", \&handle_set_cookie);
+    Cannoli::App::get($app, "/read-cookie", \&handle_read_cookie);
+    Cannoli::App::get($app, "/cached", \&handle_cached);
+    Cannoli::App::get($app, "/no-cache", \&handle_no_cache);
+    Cannoli::App::get($app, "/with-headers", \&handle_with_headers_demo);
 
     say("Headers Demo - http://localhost:8080");
     say("Routes:");
@@ -194,5 +194,5 @@ func main(int $argc, array @argv) int {
     say("  /cached        - Cached response");
     say("  /no-cache      - No-cache response");
 
-    return App_run_dev($app);
+    return Cannoli::App::run_dev($app);
 }

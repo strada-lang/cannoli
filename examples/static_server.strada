@@ -24,7 +24,7 @@ my scalar $g_static = undef;
 func handle_static(hash %req) hash {
     my str $method = $req{"method"};
     my str $path = $req{"path"};
-    return Static_handle_request($g_static, $method, $path);
+    return Cannoli::Static::handle_request($g_static, $method, $path);
 }
 
 func main(int $argc, array @argv) int {
@@ -41,21 +41,21 @@ func main(int $argc, array @argv) int {
     }
 
     # Create static file server
-    $g_static = Static_new();
+    $g_static = Cannoli::Static::new();
     $g_static->{"document_root"} = $root;
     $g_static->{"directory_listing"} = 1;
 
     # Create app
-    my scalar $app = App_new();
+    my scalar $app = Cannoli::App::new();
     $app->{"port"} = $port;
 
     # Handle all GET requests with static server
-    App_get($app, "/.*", \&handle_static);
+    Cannoli::App::get($app, "/.*", \&handle_static);
 
     say("Serving files from: " . $root);
     say("Directory listing: enabled");
     say("Listening on http://localhost:" . $port);
     say("");
 
-    return App_run($app);
+    return Cannoli::App::run($app);
 }

@@ -14,10 +14,12 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Static;
+
 
 # cannoli/src/static.strada - Static file server
 
-func Static_new() scalar {
+func Cannoli_Static_new() scalar {
     my hash %s = ();
     $s{"document_root"} = ".";
     $s{"index_files"} = "index.html,index.htm";
@@ -27,7 +29,7 @@ func Static_new() scalar {
     return \%s;
 }
 
-func Static_resolve_path(scalar $srv, str $url) str {
+func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
     my scalar $aliases = $srv->{"aliases"};
     my array @keys = keys(%{$aliases});
     my str $best = "";
@@ -61,13 +63,13 @@ func Static_resolve_path(scalar $srv, str $url) str {
     return $srv->{"document_root"} . $url;
 }
 
-func Static_is_safe(str $path) int {
+func Cannoli_Static_is_safe(str $path) int {
     my int $dotdot = index($path, "..");
     if ($dotdot >= 0) { return 0; }
     return 1;
 }
 
-func Static_find_index(scalar $srv, str $dir) str {
+func Cannoli_Static_find_index(scalar $srv, str $dir) str {
     my str $idx_list = $srv->{"index_files"};
     my array @idx = split(",", $idx_list);
     my int $i = 0;
@@ -80,7 +82,7 @@ func Static_find_index(scalar $srv, str $dir) str {
     return "";
 }
 
-func Static_format_size(int $size) str {
+func Cannoli_Static_format_size(int $size) str {
     if ($size < 1024) {
         return $size . " B";
     }
@@ -96,7 +98,7 @@ func Static_format_size(int $size) str {
     return $gb . " GB";
 }
 
-func Static_dir_listing(str $dir, str $url) str {
+func Cannoli_Static_dir_listing(str $dir, str $url) str {
     my str $html = "<!DOCTYPE html>\n<html>\n<head>\n";
     $html = $html . "<title>Index of " . $url . "</title>\n";
     $html = $html . "<style>\n";
@@ -139,7 +141,7 @@ func Static_dir_listing(str $dir, str $url) str {
                 $href = $name . "/";
             } else {
                 my int $size = sys::file_size($full_entry);
-                $size_str = Static_format_size($size);
+                $size_str = ::format_size($size);
             }
 
             $html = $html . "<tr><td><span class=\"icon\">" . $icon . "</span>";
@@ -153,17 +155,17 @@ func Static_dir_listing(str $dir, str $url) str {
     return $html;
 }
 
-func Static_handle_request(scalar $srv, str $method, str $url) hash {
+func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
     my hash %res = ();
     if ($method ne "GET" && $method ne "HEAD") { return %res; }
 
-    my int $safe = Static_is_safe($url);
-    if ($safe == 0) { return Response_error_page(403, "Forbidden"); }
+    my int $safe = ::is_safe($url);
+    if ($safe == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
 
-    my str $fs = Static_resolve_path($srv, $url);
+    my str $fs = ::resolve_path($srv, $url);
 
     if (sys::is_dir($fs)) {
-        my str $idx = Static_find_index($srv, $fs);
+        my str $idx = ::find_index($srv, $fs);
         my int $idx_len = length($idx);
         if ($idx_len > 0) {
             $fs = $idx;
@@ -171,20 +173,20 @@ func Static_handle_request(scalar $srv, str $method, str $url) hash {
             # Check if directory listing is enabled
             my int $listing_enabled = $srv->{"directory_listing"};
             if ($listing_enabled == 1) {
-                my str $listing = Static_dir_listing($fs, $url);
+                my str $listing = ::dir_listing($fs, $url);
                 $res{"status"} = 200;
                 $res{"content_type"} = "text/html";
                 $res{"body"} = $listing;
                 return %res;
             }
-            return Response_error_page(403, "Directory listing disabled");
+            return Cannoli::Response::error_page(403, "Directory listing disabled");
         }
     }
 
-    if (!sys::is_file($fs)) { return Response_not_found(); }
+    if (!sys::is_file($fs)) { return Cannoli::Response::not_found(); }
 
     my str $content = slurp($fs);
-    my str $mime = Mime_type($fs);
+    my str $mime = Cannoli::Mime::type($fs);
     $res{"status"} = 200;
     $res{"content_type"} = $mime;
     $res{"body"} = $content;

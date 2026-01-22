@@ -14,6 +14,8 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Main;
+
 
 # cannoli/src/main.strada - Main entry point
 #
@@ -33,7 +35,7 @@
 #   --help              Show help message
 #   --version           Show version
 
-func print_help() void {
+func Cannoli_Main_print_help() void {
     say("Cannoli - Preforking Web Server & Framework for Strada");
     say("");
     say("Usage: cannoli [options]");
@@ -109,7 +111,7 @@ func print_help() void {
     say("  cannoli --ssl --ssl-cert cert.pem --ssl-key key.pem");
 }
 
-func print_version() void {
+func Cannoli_Main_print_version() void {
     say("Cannoli 1.0.0");
     say("A preforking web server and framework for Strada");
     say("Built with Strada");
@@ -117,7 +119,7 @@ func print_version() void {
 
 # Handler functions for the demo app
 
-func handle_home(hash %req) hash {
+func Cannoli_Main_handle_home(hash %req) hash {
     my str $html = "<!DOCTYPE html>\n";
     $html = $html . "<html>\n<head>\n";
     $html = $html . "<title>Welcome to Cannoli</title>\n";
@@ -139,28 +141,28 @@ func handle_home(hash %req) hash {
     $html = $html . "<div class=\"route\"><a href=\"/headers\">/headers</a> - HTTP headers demo</div>\n";
     $html = $html . "</body>\n</html>\n";
 
-    return Response_html(200, $html);
+    return Cannoli::Response::html(200, $html);
 }
 
-func handle_hello(hash %req) hash {
-    return Response_text(200, "Hello, World!");
+func Cannoli_Main_handle_hello(hash %req) hash {
+    return Cannoli::Response::text(200, "Hello, World!");
 }
 
 # Global static server config (for static file mode)
 my scalar $g_static_server = undef;
 
-func handle_static_request(hash %req) hash {
+func Cannoli_Main_handle_static_request(hash %req) hash {
     my str $method = $req{"method"};
     my str $path = $req{"path"};
-    return Static_handle_request($g_static_server, $method, $path);
+    return Cannoli::Static::handle_request($g_static_server, $method, $path);
 }
 
-func handle_json(hash %req) hash {
+func Cannoli_Main_handle_json(hash %req) hash {
     my str $json = "{\"message\":\"Hello from Cannoli\",\"status\":\"ok\",\"version\":\"1.0.0\"}";
-    return Response_json(200, $json);
+    return Cannoli::Response::json(200, $json);
 }
 
-func handle_user(hash %req) hash {
+func Cannoli_Main_handle_user(hash %req) hash {
     my scalar $captures = $req{"captures"};
     my str $user_id = "unknown";
 
@@ -169,27 +171,27 @@ func handle_user(hash %req) hash {
     }
 
     my str $json = "{\"user_id\":\"" . $user_id . "\",\"name\":\"User " . $user_id . "\"}";
-    return Response_json(200, $json);
+    return Cannoli::Response::json(200, $json);
 }
 
-func handle_echo(hash %req) hash {
-    my str $message = Request_get_param(%req, "message");
+func Cannoli_Main_handle_echo(hash %req) hash {
+    my str $message = Cannoli::Request::get_param(%req, "message");
 
     if (length($message) == 0) {
         $message = "(no message provided)";
     }
 
-    return Response_text(200, "Echo: " . $message);
+    return Cannoli::Response::text(200, "Echo: " . $message);
 }
 
-func handle_submit(hash %req) hash {
+func Cannoli_Main_handle_submit(hash %req) hash {
     my str $body = $req{"body"};
     my str $json = "{\"received\":\"true\",\"body_length\":\"" . length($body) . "\"}";
-    return Response_json(200, $json);
+    return Cannoli::Response::json(200, $json);
 }
 
 # Headers demo - shows request headers and sets custom response headers
-func handle_headers(hash %req) hash {
+func Cannoli_Main_handle_headers(hash %req) hash {
     my str $html = "<!DOCTYPE html>\n<html>\n<head>\n";
     $html = $html . "<title>Headers Demo</title>\n";
     $html = $html . "<style>body { font-family: sans-serif; max-width: 800px; margin: 50px auto; }\n";
@@ -202,22 +204,22 @@ func handle_headers(hash %req) hash {
     $html = $html . "<h2>Your Request Headers</h2>\n<table>\n";
     $html = $html . "<tr><th>Header</th><th>Value</th></tr>\n";
 
-    my array @names = Request_header_names(%req);
+    my array @names = Cannoli::Request::header_names(%req);
     my int $i = 0;
     while ($i < scalar(@names)) {
         my str $name = @names[$i];
-        my str $value = Request_get_header(%req, $name);
-        $html = $html . "<tr><td>" . $name . "</td><td>" . Response_html_escape($value) . "</td></tr>\n";
+        my str $value = Cannoli::Request::get_header(%req, $name);
+        $html = $html . "<tr><td>" . $name . "</td><td>" . Cannoli::Response::html_escape($value) . "</td></tr>\n";
         $i = $i + 1;
     }
     $html = $html . "</table>\n";
 
     # Show cookies if present
-    my str $cookie_header = Request_get_header(%req, "Cookie");
+    my str $cookie_header = Cannoli::Request::get_header(%req, "Cookie");
     if (length($cookie_header) > 0) {
         $html = $html . "<h2>Cookies</h2>\n<table>\n";
         $html = $html . "<tr><th>Name</th><th>Value</th></tr>\n";
-        my hash %cookies = Request_cookies(%req);
+        my hash %cookies = Cannoli::Request::cookies(%req);
         my array @cookie_names = keys(%cookies);
         my int $j = 0;
         while ($j < scalar(@cookie_names)) {
@@ -231,51 +233,51 @@ func handle_headers(hash %req) hash {
     # Show convenience function results
     $html = $html . "<h2>Convenience Functions</h2>\n<table>\n";
     $html = $html . "<tr><th>Function</th><th>Result</th></tr>\n";
-    $html = $html . "<tr><td>Request_user_agent()</td><td>" . Response_html_escape(Request_user_agent(%req)) . "</td></tr>\n";
-    $html = $html . "<tr><td>Request_host()</td><td>" . Request_host(%req) . "</td></tr>\n";
-    $html = $html . "<tr><td>Request_accepts_json()</td><td>" . Request_accepts_json(%req) . "</td></tr>\n";
-    $html = $html . "<tr><td>Request_is_ajax()</td><td>" . Request_is_ajax(%req) . "</td></tr>\n";
+    $html = $html . "<tr><td>Cannoli::Request::user_agent()</td><td>" . Cannoli::Response::html_escape(Cannoli::Request::user_agent(%req)) . "</td></tr>\n";
+    $html = $html . "<tr><td>Cannoli::Request::host()</td><td>" . Cannoli::Request::host(%req) . "</td></tr>\n";
+    $html = $html . "<tr><td>Cannoli::Request::accepts_json()</td><td>" . Cannoli::Request::accepts_json(%req) . "</td></tr>\n";
+    $html = $html . "<tr><td>Cannoli::Request::is_ajax()</td><td>" . Cannoli::Request::is_ajax(%req) . "</td></tr>\n";
     $html = $html . "</table>\n";
 
     $html = $html . "<p><em>Check response headers in your browser's dev tools (F12 > Network)</em></p>\n";
     $html = $html . "</body>\n</html>\n";
 
-    my hash %res = Response_html(200, $html);
+    my hash %res = Cannoli::Response::html(200, $html);
 
     # Set custom response headers
-    Response_header(%res, "X-Custom-Header", "Hello from Cannoli!");
-    Response_header(%res, "X-Powered-By", "Strada");
-    Response_set_cookie(%res, "cannoli_demo", "visited", "Path=/; Max-Age=3600");
+    Cannoli::Response::header(%res, "X-Custom-Header", "Hello from Cannoli!");
+    Cannoli::Response::header(%res, "X-Powered-By", "Strada");
+    Cannoli::Response::set_cookie(%res, "cannoli_demo", "visited", "Path=/; Max-Age=3600");
 
     return %res;
 }
 
-func handle_not_found(hash %req) hash {
+func Cannoli_Main_handle_not_found(hash %req) hash {
     my str $path = $req{"path"};
-    return Response_error_page(404, "Page not found: " . $path);
+    return Cannoli::Response::error_page(404, "Page not found: " . $path);
 }
 
 # Create the demo application
-func create_demo_app() scalar {
-    my scalar $app = App_new();
+func Cannoli_Main_create_demo_app() scalar {
+    my scalar $app = Cannoli::App::new();
 
     # Register routes
-    App_get($app, "/", \&handle_home);
-    App_get($app, "/hello", \&handle_hello);
-    App_get($app, "/json", \&handle_json);
-    App_get($app, "/user/([0-9]+)", \&handle_user);
-    App_get($app, "/echo", \&handle_echo);
-    App_get($app, "/headers", \&handle_headers);
-    App_post($app, "/submit", \&handle_submit);
+    Cannoli::App::get($app, "/", \&Cannoli_Main_handle_home);
+    Cannoli::App::get($app, "/hello", \&Cannoli_Main_handle_hello);
+    Cannoli::App::get($app, "/json", \&Cannoli_Main_handle_json);
+    Cannoli::App::get($app, "/user/([0-9]+)", \&Cannoli_Main_handle_user);
+    Cannoli::App::get($app, "/echo", \&Cannoli_Main_handle_echo);
+    Cannoli::App::get($app, "/headers", \&Cannoli_Main_handle_headers);
+    Cannoli::App::post($app, "/submit", \&Cannoli_Main_handle_submit);
 
     # Custom 404
-    App_not_found($app, \&handle_not_found);
+    Cannoli::App::not_found($app, \&Cannoli_Main_handle_not_found);
 
     return $app;
 }
 
-func main(int $argc, array @argv) int {
-    my hash %config = Config_defaults();
+func Cannoli_Main_main(int $argc, array @argv) int {
+    my hash %config = Cannoli::Config::defaults();
     my int $dev_mode = 0;
     my int $demo_mode = 0;
     my int $show_help = 0;
@@ -297,7 +299,7 @@ func main(int $argc, array @argv) int {
         } elsif ($arg eq "-c" || $arg eq "--config") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                %config = Config_parse_file(@argv[$i]);
+                %config = Cannoli::Config::parse_file(@argv[$i]);
             }
         } elsif ($arg eq "-p" || $arg eq "--port") {
             if ($i + 1 < $argc) {
@@ -388,12 +390,12 @@ func main(int $argc, array @argv) int {
     }
 
     if ($show_help == 1) {
-        print_help();
+        ::print_help();
         return 0;
     }
 
     if ($show_version == 1) {
-        print_version();
+        ::print_version();
         return 0;
     }
 
@@ -407,10 +409,10 @@ func main(int $argc, array @argv) int {
 
     if (length($static_root) > 0) {
         # Static file server mode
-        $app = App_new();
+        $app = Cannoli::App::new();
 
         # Configure static file serving
-        $g_static_server = Static_new();
+        $g_static_server = Cannoli::Static::new();
         $g_static_server->{"document_root"} = $static_root;
 
         if (exists(%config, "static.listing") && $config{"static.listing"} eq "1") {
@@ -418,7 +420,7 @@ func main(int $argc, array @argv) int {
         }
 
         # Register catch-all route for static files
-        App_get($app, "/.*", \&handle_static_request);
+        Cannoli::App::get($app, "/.*", \&Cannoli_Main_handle_static_request);
 
         say("Static file server mode");
         say("Document root: " . $static_root);
@@ -427,23 +429,30 @@ func main(int $argc, array @argv) int {
         }
     } elsif ($demo_mode == 1) {
         # Create demo application
-        $app = create_demo_app();
+        $app = ::create_demo_app();
         say("Demo mode enabled");
     } else {
         # Empty app - will use libraries if configured, otherwise 404
-        $app = App_new();
+        $app = Cannoli::App::new();
     }
 
     # Apply config to app
     $app->{"config"} = \%config;
 
     # Show registered routes
-    App_dump_routes($app);
+    Cannoli::App::dump_routes($app);
 
     # Run the server
     if ($dev_mode == 1) {
-        return App_run_dev($app);
+        return Cannoli::App::run_dev($app);
     }
 
-    return App_run($app);
+    return Cannoli::App::run($app);
+}
+
+package main;
+
+# Entry point wrapper for the Cannoli binary
+func main(int $argc, array @argv) int {
+    return Cannoli::Main::main($argc, @argv);
 }

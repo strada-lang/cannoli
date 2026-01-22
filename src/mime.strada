@@ -14,10 +14,12 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Mime;
+
 
 # cannoli/src/mime.strada - MIME type detection (minimal)
 
-func Mime_type(str $path) str {
+func Cannoli_Mime_type(str $path) str {
     my int $len = length($path);
     my int $i = $len - 1;
     my int $dot_pos = -1;

@@ -14,21 +14,23 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Validation;
+
 
 # cannoli/src/validation.strada - Request validation
 #
 # Provides validation rules for request parameters.
 #
 # Usage:
-#   my scalar $v = Validator_new();
-#   Validator_add($v, "email", $email, "required");
-#   Validator_add($v, "email", $email, "email");
-#   Validator_add($v, "password", $password, "min_length", 8);
+#   my scalar $v = Cannoli::Validation::new();
+#   Cannoli::Validation::add($v, "email", $email, "required");
+#   Cannoli::Validation::add($v, "email", $email, "email");
+#   Cannoli::Validation::add($v, "password", $password, "min_length", 8);
 #
-#   if (Validator_validate($v) == 1) {
+#   if (Cannoli::Validation::validate($v) == 1) {
 #       # Valid
 #   } else {
-#       my hash %errors = Validator_errors($v);
+#       my hash %errors = Cannoli::Validation::errors($v);
 #   }
 
 # ============================================================
@@ -36,7 +38,7 @@
 # ============================================================
 
 # Check if value is present (not empty)
-func Validate_required(scalar $value) int {
+func Cannoli_Validation_required(scalar $value) int {
     if (!defined($value)) {
         return 0;
     }
@@ -47,8 +49,8 @@ func Validate_required(scalar $value) int {
     return 1;
 }
 
-# Check if value is a valid email (basic check)
-func Validate_email(scalar $value) int {
+# Check if value is a valid Cannoli::Validation::email(basic check)
+func Cannoli_Validation_email(scalar $value) int {
     if (!defined($value)) {
         return 0;
     }
@@ -76,7 +78,7 @@ func Validate_email(scalar $value) int {
 }
 
 # Check minimum length
-func Validate_min_length(scalar $value, int $min) int {
+func Cannoli_Validation_min_length(scalar $value, int $min) int {
     if (!defined($value)) {
         return 0;
     }
@@ -85,7 +87,7 @@ func Validate_min_length(scalar $value, int $min) int {
 }
 
 # Check maximum length
-func Validate_max_length(scalar $value, int $max) int {
+func Cannoli_Validation_max_length(scalar $value, int $max) int {
     if (!defined($value)) {
         return 1;  # Undefined values pass max_length
     }
@@ -93,8 +95,8 @@ func Validate_max_length(scalar $value, int $max) int {
     return length($s) <= $max;
 }
 
-# Check if value is numeric (integer or decimal)
-func Validate_numeric(scalar $value) int {
+# Check if value is Cannoli::Validation::numeric(integer or decimal)
+func Cannoli_Validation_numeric(scalar $value) int {
     if (!defined($value)) {
         return 0;
     }
@@ -132,7 +134,7 @@ func Validate_numeric(scalar $value) int {
 }
 
 # Check if value is an integer
-func Validate_integer(scalar $value) int {
+func Cannoli_Validation_integer(scalar $value) int {
     if (!defined($value)) {
         return 0;
     }
@@ -165,7 +167,7 @@ func Validate_integer(scalar $value) int {
 }
 
 # Check if value matches a regex pattern
-func Validate_regex(scalar $value, str $pattern) int {
+func Cannoli_Validation_regex(scalar $value, str $pattern) int {
     if (!defined($value)) {
         return 0;
     }
@@ -177,7 +179,7 @@ func Validate_regex(scalar $value, str $pattern) int {
 }
 
 # Check if value is in a list of allowed values
-func Validate_in(scalar $value, scalar $allowed) int {
+func Cannoli_Validation_in(scalar $value, scalar $allowed) int {
     if (!defined($value)) {
         return 0;
     }
@@ -197,8 +199,8 @@ func Validate_in(scalar $value, scalar $allowed) int {
 }
 
 # Check minimum value (numeric)
-func Validate_min(scalar $value, int $min) int {
-    if (!Validate_numeric($value)) {
+func Cannoli_Validation_min(scalar $value, int $min) int {
+    if (!::numeric($value)) {
         return 0;
     }
     my int $n = $value + 0;
@@ -206,8 +208,8 @@ func Validate_min(scalar $value, int $min) int {
 }
 
 # Check maximum value (numeric)
-func Validate_max(scalar $value, int $max) int {
-    if (!Validate_numeric($value)) {
+func Cannoli_Validation_max(scalar $value, int $max) int {
+    if (!::numeric($value)) {
         return 0;
     }
     my int $n = $value + 0;
@@ -215,7 +217,7 @@ func Validate_max(scalar $value, int $max) int {
 }
 
 # Check if value equals another value
-func Validate_equals(scalar $value, scalar $other) int {
+func Cannoli_Validation_equals(scalar $value, scalar $other) int {
     if (!defined($value) || !defined($other)) {
         return 0;
     }
@@ -225,7 +227,7 @@ func Validate_equals(scalar $value, scalar $other) int {
 }
 
 # Check if value is alphanumeric only
-func Validate_alphanumeric(scalar $value) int {
+func Cannoli_Validation_alphanumeric(scalar $value) int {
     if (!defined($value)) {
         return 0;
     }
@@ -251,7 +253,7 @@ func Validate_alphanumeric(scalar $value) int {
 }
 
 # Check if value looks like a URL
-func Validate_url(scalar $value) int {
+func Cannoli_Validation_url(scalar $value) int {
     if (!defined($value)) {
         return 0;
     }
@@ -281,7 +283,7 @@ func Validate_url(scalar $value) int {
 # ============================================================
 
 # Create a new validator
-func Validator_new() scalar {
+func Cannoli_Validation_new() scalar {
     my hash %validator = ();
     $validator{"rules"} = [];
     $validator{"errors"} = {};
@@ -291,7 +293,7 @@ func Validator_new() scalar {
 
 # Add a validation rule
 # Rules: required, email, min_length, max_length, numeric, integer, regex, in, min, max, alphanumeric, url
-func Validator_add(scalar $v, str $field, scalar $value, str $rule, scalar $param) void {
+func Cannoli_Validation_add(scalar $v, str $field, scalar $value, str $rule, scalar $param) void {
     my hash %entry = ();
     $entry{"field"} = $field;
     $entry{"value"} = $value;
@@ -301,7 +303,7 @@ func Validator_add(scalar $v, str $field, scalar $value, str $rule, scalar $para
 }
 
 # Run validation
-func Validator_validate(scalar $v) int {
+func Cannoli_Validation_validate(scalar $v) int {
     my scalar $rules = $v->{"rules"};
     my scalar $errors = $v->{"errors"};
     my int $all_valid = 1;
@@ -319,67 +321,67 @@ func Validator_validate(scalar $v) int {
 
         # Apply validation rule
         if ($rule eq "required") {
-            if (Validate_required($value) == 0) {
+            if (::required($value) == 0) {
                 $valid = 0;
                 $error_msg = $field . " is required";
             }
         } elsif ($rule eq "email") {
-            if (Validate_email($value) == 0) {
+            if (::email($value) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be a valid email";
             }
         } elsif ($rule eq "min_length") {
             my int $min = $param + 0;
-            if (Validate_min_length($value, $min) == 0) {
+            if (::min_length($value, $min) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be at least " . $min . " characters";
             }
         } elsif ($rule eq "max_length") {
             my int $max = $param + 0;
-            if (Validate_max_length($value, $max) == 0) {
+            if (::max_length($value, $max) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be at most " . $max . " characters";
             }
         } elsif ($rule eq "numeric") {
-            if (Validate_numeric($value) == 0) {
+            if (::numeric($value) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be numeric";
             }
         } elsif ($rule eq "integer") {
-            if (Validate_integer($value) == 0) {
+            if (::integer($value) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be an integer";
             }
         } elsif ($rule eq "regex") {
             my str $pattern = "" . $param;
-            if (Validate_regex($value, $pattern) == 0) {
+            if (::regex($value, $pattern) == 0) {
                 $valid = 0;
                 $error_msg = $field . " is invalid";
             }
         } elsif ($rule eq "in") {
-            if (Validate_in($value, $param) == 0) {
+            if (::in($value, $param) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be one of the allowed values";
             }
         } elsif ($rule eq "min") {
             my int $min = $param + 0;
-            if (Validate_min($value, $min) == 0) {
+            if (::min($value, $min) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be at least " . $min;
             }
         } elsif ($rule eq "max") {
             my int $max = $param + 0;
-            if (Validate_max($value, $max) == 0) {
+            if (::max($value, $max) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be at most " . $max;
             }
         } elsif ($rule eq "alphanumeric") {
-            if (Validate_alphanumeric($value) == 0) {
+            if (::alphanumeric($value) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be alphanumeric";
             }
         } elsif ($rule eq "url") {
-            if (Validate_url($value) == 0) {
+            if (::url($value) == 0) {
                 $valid = 0;
                 $error_msg = $field . " must be a valid URL";
             }
@@ -401,18 +403,18 @@ func Validator_validate(scalar $v) int {
     return $all_valid;
 }
 
-# Get validation errors (hash of field => error message)
-func Validator_errors(scalar $v) scalar {
+# Get validation Cannoli::Validation::errors(hash of field => error message)
+func Cannoli_Validation_errors(scalar $v) scalar {
     return $v->{"errors"};
 }
 
 # Check if validation passed
-func Validator_is_valid(scalar $v) int {
+func Cannoli_Validation_is_valid(scalar $v) int {
     return $v->{"valid"};
 }
 
 # Get error for a specific field
-func Validator_error(scalar $v, str $field) str {
+func Cannoli_Validation_error(scalar $v, str $field) str {
     my scalar $errors = $v->{"errors"};
     if (exists(%{$errors}, $field)) {
         return $errors->{$field};
@@ -427,8 +429,8 @@ func Validator_error(scalar $v, str $field) str {
 # Create validator from a rules hash
 # rules format: { "field" => ["rule1", "rule2:param", ...] }
 # e.g.: { "email" => ["required", "email"], "age" => ["required", "integer", "min:18"] }
-func Validator_from_rules(scalar $params, scalar $rules) scalar {
-    my scalar $v = Validator_new();
+func Cannoli_Validation_from_rules(scalar $params, scalar $rules) scalar {
+    my scalar $v = ::new();
 
     my array @fields = keys(%{$rules});
     my int $i = 0;
@@ -459,7 +461,7 @@ func Validator_from_rules(scalar $params, scalar $rules) scalar {
                 $param = $param_str;
             }
 
-            Validator_add($v, $field, $value, $rule, $param);
+            ::add($v, $field, $value, $rule, $param);
             $j = $j + 1;
         }
 

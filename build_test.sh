@@ -18,7 +18,7 @@ TEST_NAME=$(basename "$TEST_FILE" .strada)
 COMBINED="/tmp/${TEST_NAME}_combined.strada"
 
 # Build combined file: source files + test + compress (must be last due to package declaration)
-# cannoli_obj.strada must come before router.strada (router calls Cannoli_new)
+# cannoli_obj.strada must come before router.strada (router calls Cannoli::new)
 cat "$CANNOLI_DIR/src/config.strada" \
     "$CANNOLI_DIR/src/mime.strada" \
     "$CANNOLI_DIR/src/session.strada" \

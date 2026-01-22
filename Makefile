@@ -13,7 +13,7 @@ LIB_DIR := lib
 BUILD_DIR := build
 
 # Source files in order of dependency
-# Note: cannoli_obj.strada must come before router.strada (router calls Cannoli_new)
+# Note: cannoli_obj.strada must come before router.strada (router calls Cannoli::new)
 # Note: compress.strada has 'package compress;' so must come LAST (affects subsequent code)
 SOURCES := \
 	$(SRC_DIR)/config.strada \

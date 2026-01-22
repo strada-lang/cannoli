@@ -14,6 +14,8 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Config;
+
 
 # cannoli/src/config.strada - Configuration file parser and settings
 #
@@ -26,7 +28,7 @@
 #   document_root = /var/www
 
 # Default configuration values
-func Config_defaults() hash {
+func Cannoli_Config_defaults() hash {
     my hash %config = ();
 
     # Server settings
@@ -63,8 +65,8 @@ func Config_defaults() hash {
 }
 
 # Parse a configuration file
-func Config_parse_file(str $filename) hash {
-    my hash %config = Config_defaults();
+func Cannoli_Config_parse_file(str $filename) hash {
+    my hash %config = ::defaults();
 
     if (!sys::is_file($filename)) {
         return %config;
@@ -79,7 +81,7 @@ func Config_parse_file(str $filename) hash {
 
     while ($i < $len) {
         my str $line = @lines[$i];
-        $line = trim($line);
+        $line = ::trim($line);
 
         # Skip empty lines and comments
         if (length($line) == 0) {
@@ -104,8 +106,8 @@ func Config_parse_file(str $filename) hash {
         # Key = value
         my int $eq_pos = index($line, "=");
         if ($eq_pos > 0) {
-            my str $key = trim(substr($line, 0, $eq_pos));
-            my str $value = trim(substr($line, $eq_pos + 1, length($line) - $eq_pos - 1));
+            my str $key = ::trim(substr($line, 0, $eq_pos));
+            my str $value = ::trim(substr($line, $eq_pos + 1, length($line) - $eq_pos - 1));
 
             # Remove quotes if present
             if (length($value) >= 2) {
@@ -132,7 +134,7 @@ func Config_parse_file(str $filename) hash {
 }
 
 # Trim whitespace from string
-func trim(str $s) str {
+func Cannoli_Config_trim(str $s) str {
     my int $start = 0;
     my int $end = length($s);
 
@@ -162,7 +164,7 @@ func trim(str $s) str {
 }
 
 # Get a string configuration value with fallback
-func Config_get_str(hash %config, str $key, str $fallback) str {
+func Cannoli_Config_get_str(hash %config, str $key, str $fallback) str {
     if (exists(%config, $key)) {
         return $config{$key};
     }
@@ -170,7 +172,7 @@ func Config_get_str(hash %config, str $key, str $fallback) str {
 }
 
 # Get an integer configuration value with fallback
-func Config_get_int(hash %config, str $key, int $fallback) int {
+func Cannoli_Config_get_int(hash %config, str $key, int $fallback) int {
     if (exists(%config, $key)) {
         my str $val = $config{$key};
         return $val + 0;
@@ -179,7 +181,7 @@ func Config_get_int(hash %config, str $key, int $fallback) int {
 }
 
 # Get a boolean configuration value (0/1, true/false, yes/no)
-func Config_get_bool(hash %config, str $key, int $fallback) int {
+func Cannoli_Config_get_bool(hash %config, str $key, int $fallback) int {
     if (!exists(%config, $key)) {
         return $fallback;
     }
@@ -195,12 +197,12 @@ func Config_get_bool(hash %config, str $key, int $fallback) int {
 }
 
 # Set a configuration value
-func Config_set(hash %config, str $key, str $value) void {
+func Cannoli_Config_set(hash %config, str $key, str $value) void {
     $config{$key} = $value;
 }
 
 # Merge command line args into config
-func Config_merge_args(hash %config, int $argc, array @argv) hash {
+func Cannoli_Config_merge_args(hash %config, int $argc, array @argv) hash {
     my int $i = 1;
 
     while ($i < $argc) {
@@ -240,7 +242,7 @@ func Config_merge_args(hash %config, int $argc, array @argv) hash {
 # Extract library routes from config
 # Looks for keys like "library./api" = "api.so"
 # Returns array reference of hashes with {prefix, path}
-func Config_get_library_routes(hash %config) scalar {
+func Cannoli_Config_get_library_routes(hash %config) scalar {
     my scalar $routes = [];
     my array @k = keys(%config);
     my int $i = 0;
@@ -285,7 +287,7 @@ func Config_get_library_routes(hash %config) scalar {
 }
 
 # Print configuration (for debugging)
-func Config_dump(hash %config) void {
+func Cannoli_Config_dump(hash %config) void {
     say("=== Configuration ===");
     my array @k = keys(%config);
     my int $i = 0;

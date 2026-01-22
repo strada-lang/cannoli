@@ -14,13 +14,15 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Request;
+
 
 # cannoli/src/request.strada - HTTP Request parsing
 #
 # Parses incoming HTTP requests into a structured format
 
 # Create a new empty request object
-func Request_new() hash {
+func Cannoli_Request_new() hash {
     my hash %req = ();
 
     $req{"method"} = "GET";
@@ -41,8 +43,8 @@ func Request_new() hash {
 }
 
 # Parse an HTTP request from raw data
-func Request_parse(str $data) hash {
-    my hash %req = Request_new();
+func Cannoli_Request_parse(str $data) hash {
+    my hash %req = ::new();
 
     # Split headers and body
     my int $body_start = index($data, "\r\n\r\n");
@@ -96,7 +98,7 @@ func Request_parse(str $data) hash {
             }
 
             # Normalize header name to lowercase
-            $name = Request_header_normalize($name);
+            $name = ::header_normalize($name);
             $headers{$name} = $value;
         }
 
@@ -116,7 +118,7 @@ func Request_parse(str $data) hash {
 
     # Parse query parameters
     if (length($req{"query_string"}) > 0) {
-        $req{"params"} = Request_parse_query($req{"query_string"});
+        $req{"params"} = ::parse_query($req{"query_string"});
     }
 
     # Parse POST/PUT body if form data
@@ -126,9 +128,9 @@ func Request_parse(str $data) hash {
 
         if (index($ct, "multipart/form-data") >= 0) {
             # Parse multipart form data (file uploads)
-            my str $boundary = Request_extract_boundary($ct);
+            my str $boundary = ::extract_boundary($ct);
             if (length($boundary) > 0) {
-                my hash %multipart = Request_parse_multipart($body, $boundary);
+                my hash %multipart = ::parse_multipart($body, $boundary);
 
                 # Store files
                 $req{"files"} = $multipart{"files"};
@@ -146,7 +148,7 @@ func Request_parse(str $data) hash {
                 $req{"params"} = \%params;
             }
         } elsif (index($ct, "application/x-www-form-urlencoded") >= 0) {
-            my scalar $body_params = Request_parse_query($body);
+            my scalar $body_params = ::parse_query($body);
             # Merge with existing params
             my hash %params = %{$req{"params"}};
             my array @k = keys(%{$body_params});
@@ -170,7 +172,7 @@ func Request_parse(str $data) hash {
 }
 
 # Parse query string into hash
-func Request_parse_query(str $qs) scalar {
+func Cannoli_Request_parse_query(str $qs) scalar {
     my hash %params = ();
 
     if (length($qs) == 0) {
@@ -185,11 +187,11 @@ func Request_parse_query(str $qs) scalar {
         my int $eq_idx = index($pair, "=");
 
         if ($eq_idx > 0) {
-            my str $key = Request_url_decode(substr($pair, 0, $eq_idx));
-            my str $val = Request_url_decode(substr($pair, $eq_idx + 1, length($pair) - $eq_idx - 1));
+            my str $key = ::url_decode(substr($pair, 0, $eq_idx));
+            my str $val = ::url_decode(substr($pair, $eq_idx + 1, length($pair) - $eq_idx - 1));
             $params{$key} = $val;
         } elsif (length($pair) > 0) {
-            $params{Request_url_decode($pair)} = "";
+            $params{::url_decode($pair)} = "";
         }
 
         $i = $i + 1;
@@ -199,7 +201,7 @@ func Request_parse_query(str $qs) scalar {
 }
 
 # URL decode a string
-func Request_url_decode(str $s) str {
+func Cannoli_Request_url_decode(str $s) str {
     my str $result = "";
     my int $i = 0;
     my int $len = length($s);
@@ -211,7 +213,7 @@ func Request_url_decode(str $s) str {
             $result = $result . " ";
         } elsif ($ch eq "%" && $i + 2 < $len) {
             my str $hex = substr($s, $i + 1, 2);
-            my int $code = Request_hex_to_int($hex);
+            my int $code = ::hex_to_int($hex);
             if ($code >= 0) {
                 $result = $result . chr($code);
                 $i = $i + 2;
@@ -229,7 +231,7 @@ func Request_url_decode(str $s) str {
 }
 
 # Convert hex string to integer
-func Request_hex_to_int(str $hex) int {
+func Cannoli_Request_hex_to_int(str $hex) int {
     my int $result = 0;
     my int $i = 0;
     my int $len = length($hex);
@@ -260,7 +262,7 @@ func Request_hex_to_int(str $hex) int {
 }
 
 # Normalize header name (lowercase)
-func Request_header_normalize(str $name) str {
+func Cannoli_Request_header_normalize(str $name) str {
     my str $result = "";
     my int $i = 0;
     my int $len = length($name);
@@ -282,8 +284,8 @@ func Request_header_normalize(str $name) str {
 }
 
 # Get a header value (case-insensitive)
-func Request_get_header(hash %req, str $name) str {
-    my str $normalized = Request_header_normalize($name);
+func Cannoli_Request_get_header(hash %req, str $name) str {
+    my str $normalized = ::header_normalize($name);
     my scalar $headers = $req{"headers"};
 
     if (exists(%{$headers}, $normalized)) {
@@ -293,7 +295,7 @@ func Request_get_header(hash %req, str $name) str {
 }
 
 # Get a parameter value
-func Request_get_param(hash %req, str $name) str {
+func Cannoli_Request_get_param(hash %req, str $name) str {
     my scalar $params = $req{"params"};
 
     if (exists(%{$params}, $name)) {
@@ -303,43 +305,43 @@ func Request_get_param(hash %req, str $name) str {
 }
 
 # Check if request is a specific method
-func Request_is_get(hash %req) int {
+func Cannoli_Request_is_get(hash %req) int {
     return $req{"method"} eq "GET";
 }
 
-func Request_is_post(hash %req) int {
+func Cannoli_Request_is_post(hash %req) int {
     return $req{"method"} eq "POST";
 }
 
-func Request_is_put(hash %req) int {
+func Cannoli_Request_is_put(hash %req) int {
     return $req{"method"} eq "PUT";
 }
 
-func Request_is_delete(hash %req) int {
+func Cannoli_Request_is_delete(hash %req) int {
     return $req{"method"} eq "DELETE";
 }
 
 # Get all headers as a hash reference
-func Request_headers(hash %req) scalar {
+func Cannoli_Request_headers(hash %req) scalar {
     return $req{"headers"};
 }
 
 # Check if a header exists
-func Request_has_header(hash %req, str $name) int {
-    my str $normalized = Request_header_normalize($name);
+func Cannoli_Request_has_header(hash %req, str $name) int {
+    my str $normalized = ::header_normalize($name);
     my scalar $headers = $req{"headers"};
     return exists(%{$headers}, $normalized);
 }
 
 # Get all header names as an array
-func Request_header_names(hash %req) array {
+func Cannoli_Request_header_names(hash %req) array {
     my scalar $headers = $req{"headers"};
     return keys(%{$headers});
 }
 
 # Get a cookie value from the Cookie header
-func Request_get_cookie(hash %req, str $name) str {
-    my str $cookie_header = Request_get_header(%req, "Cookie");
+func Cannoli_Request_get_cookie(hash %req, str $name) str {
+    my str $cookie_header = ::get_header(%req, "Cookie");
     if (length($cookie_header) == 0) {
         return "";
     }
@@ -362,9 +364,9 @@ func Request_get_cookie(hash %req, str $name) str {
 }
 
 # Get all cookies as a hash
-func Request_cookies(hash %req) hash {
+func Cannoli_Request_cookies(hash %req) hash {
     my hash %cookies = ();
-    my str $cookie_header = Request_get_header(%req, "Cookie");
+    my str $cookie_header = ::get_header(%req, "Cookie");
     if (length($cookie_header) == 0) {
         return %cookies;
     }
@@ -385,23 +387,23 @@ func Request_cookies(hash %req) hash {
 }
 
 # Get the User-Agent header
-func Request_user_agent(hash %req) str {
-    return Request_get_header(%req, "User-Agent");
+func Cannoli_Request_user_agent(hash %req) str {
+    return ::get_header(%req, "User-Agent");
 }
 
 # Get the Referer header
-func Request_referer(hash %req) str {
-    return Request_get_header(%req, "Referer");
+func Cannoli_Request_referer(hash %req) str {
+    return ::get_header(%req, "Referer");
 }
 
 # Get the Host header
-func Request_host(hash %req) str {
-    return Request_get_header(%req, "Host");
+func Cannoli_Request_host(hash %req) str {
+    return ::get_header(%req, "Host");
 }
 
 # Check if request accepts JSON
-func Request_accepts_json(hash %req) int {
-    my str $accept = Request_get_header(%req, "Accept");
+func Cannoli_Request_accepts_json(hash %req) int {
+    my str $accept = ::get_header(%req, "Accept");
     if (index($accept, "application/json") >= 0) {
         return 1;
     }
@@ -412,13 +414,13 @@ func Request_accepts_json(hash %req) int {
 }
 
 # Check if request is AJAX/XHR
-func Request_is_ajax(hash %req) int {
-    my str $xhr = Request_get_header(%req, "X-Requested-With");
+func Cannoli_Request_is_ajax(hash %req) int {
+    my str $xhr = ::get_header(%req, "X-Requested-With");
     return $xhr eq "XMLHttpRequest";
 }
 
 # Check if a parameter exists
-func Request_has_param(hash %req, str $name) int {
+func Cannoli_Request_has_param(hash %req, str $name) int {
     my scalar $params = $req{"params"};
     return exists(%{$params}, $name);
 }
@@ -429,7 +431,7 @@ func Request_has_param(hash %req, str $name) int {
 
 # Extract boundary from Content-Type header
 # Content-Type: multipart/form-data; boundary=----WebKitFormBoundary...
-func Request_extract_boundary(str $content_type) str {
+func Cannoli_Request_extract_boundary(str $content_type) str {
     # Check if multipart
     if (index($content_type, "multipart/form-data") < 0) {
         return "";
@@ -464,7 +466,7 @@ func Request_extract_boundary(str $content_type) str {
 
 # Extract a parameter value from Content-Disposition header
 # e.g., form-data; name="fieldname"; filename="file.txt"
-func Request_extract_disposition_param(str $header, str $param_name) str {
+func Cannoli_Request_extract_disposition_param(str $header, str $param_name) str {
     my str $search = $param_name . "=\"";
     my int $pos = index($header, $search);
     if ($pos < 0) {
@@ -494,7 +496,7 @@ func Request_extract_disposition_param(str $header, str $param_name) str {
 
 # Parse a single multipart part
 # Returns hash with: name, filename, content_type, content, size
-func Request_parse_multipart_part(str $part) hash {
+func Cannoli_Request_parse_multipart_part(str $part) hash {
     my hash %result = ();
     $result{"name"} = "";
     $result{"filename"} = "";
@@ -525,12 +527,12 @@ func Request_parse_multipart_part(str $part) hash {
         my int $i = 0;
         while ($i < scalar(@header_lines)) {
             my str $line = @header_lines[$i];
-            my str $line_lower = Request_header_normalize($line);
+            my str $line_lower = ::header_normalize($line);
 
             if (index($line_lower, "content-disposition:") == 0) {
                 # Extract name and filename from Content-Disposition
-                $result{"name"} = Request_extract_disposition_param($line, "name");
-                $result{"filename"} = Request_extract_disposition_param($line, "filename");
+                $result{"name"} = ::extract_disposition_param($line, "name");
+                $result{"filename"} = ::extract_disposition_param($line, "filename");
             } elsif (index($line_lower, "content-type:") == 0) {
                 # Extract content type (after "Content-Type: ")
                 my int $colon_pos = index($line, ":");
@@ -551,8 +553,8 @@ func Request_parse_multipart_part(str $part) hash {
 }
 
 # Parse multipart form data body
-# Returns hash with: params (hash ref), files (hash ref)
-func Request_parse_multipart(str $body, str $boundary) hash {
+# Returns hash with: params (hash ref), Cannoli::Request::files(hash ref)
+func Cannoli_Request_parse_multipart(str $body, str $boundary) hash {
     my hash %result = ();
     my hash %params = ();
     my hash %files = ();
@@ -586,7 +588,7 @@ func Request_parse_multipart(str $body, str $boundary) hash {
             }
 
             if (length($part) > 0) {
-                my hash %parsed = Request_parse_multipart_part($part);
+                my hash %parsed = ::parse_multipart_part($part);
                 my str $name = $parsed{"name"};
                 my str $filename = $parsed{"filename"};
 
@@ -611,7 +613,7 @@ func Request_parse_multipart(str $body, str $boundary) hash {
 }
 
 # Get an uploaded file by field name
-func Request_get_file(hash %req, str $name) scalar {
+func Cannoli_Request_get_file(hash %req, str $name) scalar {
     if (!exists(%req, "files")) {
         return undef;
     }
@@ -623,7 +625,7 @@ func Request_get_file(hash %req, str $name) scalar {
 }
 
 # Check if a file was uploaded with the given field name
-func Request_has_file(hash %req, str $name) int {
+func Cannoli_Request_has_file(hash %req, str $name) int {
     if (!exists(%req, "files")) {
         return 0;
     }
@@ -632,7 +634,7 @@ func Request_has_file(hash %req, str $name) int {
 }
 
 # Get all uploaded files as a hash reference
-func Request_files(hash %req) scalar {
+func Cannoli_Request_files(hash %req) scalar {
     if (!exists(%req, "files")) {
         my hash %empty = ();
         return \%empty;
@@ -641,7 +643,7 @@ func Request_files(hash %req) scalar {
 }
 
 # Get file content from a file hash
-func Request_file_content(scalar $file) str {
+func Cannoli_Request_file_content(scalar $file) str {
     if (length($file) == 0) {
         return "";
     }
@@ -649,7 +651,7 @@ func Request_file_content(scalar $file) str {
 }
 
 # Get original filename from a file hash
-func Request_file_name(scalar $file) str {
+func Cannoli_Request_file_name(scalar $file) str {
     if (length($file) == 0) {
         return "";
     }
@@ -657,7 +659,7 @@ func Request_file_name(scalar $file) str {
 }
 
 # Get file size from a file hash
-func Request_file_size(scalar $file) int {
+func Cannoli_Request_file_size(scalar $file) int {
     if (length($file) == 0) {
         return 0;
     }
@@ -665,7 +667,7 @@ func Request_file_size(scalar $file) int {
 }
 
 # Get content type from a file hash
-func Request_file_type(scalar $file) str {
+func Cannoli_Request_file_type(scalar $file) str {
     if (length($file) == 0) {
         return "";
     }
@@ -677,7 +679,7 @@ func Request_file_type(scalar $file) str {
 #
 
 # Check if request has JSON content type
-func Request_is_json(hash %req) int {
+func Cannoli_Request_is_json(hash %req) int {
     my str $ct = $req{"content_type"};
     if (index($ct, "application/json") >= 0) {
         return 1;
@@ -687,20 +689,20 @@ func Request_is_json(hash %req) int {
 
 # Parse JSON body - simple JSON parser
 # Returns parsed structure or undef on error
-func Request_parse_json_body(hash %req) scalar {
-    if (Request_is_json(%req) == 0) {
+func Cannoli_Request_parse_json_body(hash %req) scalar {
+    if (::is_json(%req) == 0) {
         return undef;
     }
     my str $body = $req{"body"};
     if (length($body) == 0) {
         return undef;
     }
-    return Request_json_parse($body);
+    return ::json_parse($body);
 }
 
 # Simple JSON parser
 # Handles: objects, arrays, strings, numbers, true, false, null
-func Request_json_parse(str $json) scalar {
+func Cannoli_Request_json_parse(str $json) scalar {
     my int $pos = 0;
     my int $len = length($json);
 
@@ -721,26 +723,26 @@ func Request_json_parse(str $json) scalar {
 
     # Object
     if ($ch eq "{") {
-        return Request_json_parse_object($json, $pos);
+        return ::json_parse_object($json, $pos);
     }
 
     # Array
     if ($ch eq "[") {
-        return Request_json_parse_array($json, $pos);
+        return ::json_parse_array($json, $pos);
     }
 
     # String
     if ($ch eq "\"") {
-        my scalar $result = Request_json_parse_string($json, $pos);
+        my scalar $result = ::json_parse_string($json, $pos);
         return $result->{"value"};
     }
 
     # Number, true, false, null
-    return Request_json_parse_value($json, $pos);
+    return ::json_parse_value($json, $pos);
 }
 
 # Parse JSON object starting at pos, returns {value, end_pos}
-func Request_json_parse_object(str $json, int $start) scalar {
+func Cannoli_Request_json_parse_object(str $json, int $start) scalar {
     my hash %obj = ();
     my int $pos = $start + 1;  # Skip '{'
     my int $len = length($json);
@@ -769,7 +771,7 @@ func Request_json_parse_object(str $json, int $start) scalar {
             return undef;
         }
 
-        my scalar $key_result = Request_json_parse_string($json, $pos);
+        my scalar $key_result = ::json_parse_string($json, $pos);
         if (!defined($key_result)) { return undef; }
         my str $key = $key_result->{"value"};
         $pos = $key_result->{"end_pos"};
@@ -798,7 +800,7 @@ func Request_json_parse_object(str $json, int $start) scalar {
         }
 
         # Parse value
-        my scalar $val_result = Request_json_parse_any($json, $pos);
+        my scalar $val_result = ::json_parse_any($json, $pos);
         if (!defined($val_result)) { return undef; }
         $obj{$key} = $val_result->{"value"};
         $pos = $val_result->{"end_pos"};
@@ -827,7 +829,7 @@ func Request_json_parse_object(str $json, int $start) scalar {
 }
 
 # Parse JSON array starting at pos
-func Request_json_parse_array(str $json, int $start) scalar {
+func Cannoli_Request_json_parse_array(str $json, int $start) scalar {
     my array @arr = ();
     my int $pos = $start + 1;  # Skip '['
     my int $len = length($json);
@@ -852,7 +854,7 @@ func Request_json_parse_array(str $json, int $start) scalar {
         }
 
         # Parse value
-        my scalar $val_result = Request_json_parse_any($json, $pos);
+        my scalar $val_result = ::json_parse_any($json, $pos);
         if (!defined($val_result)) { return undef; }
         push(@arr, $val_result->{"value"});
         $pos = $val_result->{"end_pos"};
@@ -881,7 +883,7 @@ func Request_json_parse_array(str $json, int $start) scalar {
 }
 
 # Parse JSON string starting at pos, returns {value, end_pos}
-func Request_json_parse_string(str $json, int $start) scalar {
+func Cannoli_Request_json_parse_string(str $json, int $start) scalar {
     my str $result = "";
     my int $pos = $start + 1;  # Skip opening quote
     my int $len = length($json);
@@ -921,7 +923,7 @@ func Request_json_parse_string(str $json, int $start) scalar {
 }
 
 # Parse any JSON value, returns {value, end_pos}
-func Request_json_parse_any(str $json, int $start) scalar {
+func Cannoli_Request_json_parse_any(str $json, int $start) scalar {
     my int $pos = $start;
     my int $len = length($json);
 
@@ -942,9 +944,9 @@ func Request_json_parse_any(str $json, int $start) scalar {
 
     # Object
     if ($ch eq "{") {
-        my scalar $obj = Request_json_parse_object($json, $pos);
+        my scalar $obj = ::json_parse_object($json, $pos);
         # Find end position by scanning past the object
-        my int $end = Request_json_find_end($json, $pos, "{", "}");
+        my int $end = ::json_find_end($json, $pos, "{", "}");
         my hash %ret = ();
         $ret{"value"} = $obj;
         $ret{"end_pos"} = $end;
@@ -953,8 +955,8 @@ func Request_json_parse_any(str $json, int $start) scalar {
 
     # Array
     if ($ch eq "[") {
-        my scalar $arr = Request_json_parse_array($json, $pos);
-        my int $end = Request_json_find_end($json, $pos, "[", "]");
+        my scalar $arr = ::json_parse_array($json, $pos);
+        my int $end = ::json_find_end($json, $pos, "[", "]");
         my hash %ret = ();
         $ret{"value"} = $arr;
         $ret{"end_pos"} = $end;
@@ -963,7 +965,7 @@ func Request_json_parse_any(str $json, int $start) scalar {
 
     # String
     if ($ch eq "\"") {
-        return Request_json_parse_string($json, $pos);
+        return ::json_parse_string($json, $pos);
     }
 
     # true, false, null, or number
@@ -1009,7 +1011,7 @@ func Request_json_parse_any(str $json, int $start) scalar {
 }
 
 # Find matching end bracket/brace
-func Request_json_find_end(str $json, int $start, str $open, str $close) int {
+func Cannoli_Request_json_find_end(str $json, int $start, str $open, str $close) int {
     my int $depth = 0;
     my int $pos = $start;
     my int $len = length($json);
@@ -1046,8 +1048,8 @@ func Request_json_find_end(str $json, int $start, str $open, str $close) int {
 }
 
 # Parse JSON value (for top-level primitives)
-func Request_json_parse_value(str $json, int $pos) scalar {
-    my scalar $result = Request_json_parse_any($json, $pos);
+func Cannoli_Request_json_parse_value(str $json, int $pos) scalar {
+    my scalar $result = ::json_parse_any($json, $pos);
     if (defined($result)) {
         return $result->{"value"};
     }

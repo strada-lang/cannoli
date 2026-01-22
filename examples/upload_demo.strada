@@ -109,7 +109,7 @@ func handle_form(scalar $c) hash {
 
 # Register routes when library is loaded
 func cannoli_init(scalar $app) void {
-    App_get($app, "/", \&handle_form);
-    App_post($app, "/upload", \&handle_upload);
-    App_get($app, "/stream", \&handle_stream);
+    Cannoli::App::get($app, "/", \&handle_form);
+    Cannoli::App::post($app, "/upload", \&handle_upload);
+    Cannoli::App::get($app, "/stream", \&handle_stream);
 }

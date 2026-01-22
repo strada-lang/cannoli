@@ -20,12 +20,12 @@
 func test_exact_match() int {
     say("Testing exact path matching...");
 
-    my scalar $router = Router_new();
+    my scalar $router = Cannoli::Router::new();
 
     my int $called = 0;
-    Router_get($router, "/hello", func (hash %req) {
+    Cannoli::Router::get($router, "/hello", func (hash %req) {
         $called = 1;
-        return Response_text(200, "Hello");
+        return Cannoli::Response::text(200, "Hello");
     });
 
     # Create a mock request
@@ -33,7 +33,7 @@ func test_exact_match() int {
     $req{"method"} = "GET";
     $req{"path"} = "/hello";
 
-    my scalar $match = Router_match($router, %req);
+    my scalar $match = Cannoli::Router::match($router, %req);
 
     if (!defined($match)) {
         say("  FAIL: route should match /hello");
@@ -47,17 +47,17 @@ func test_exact_match() int {
 func test_no_match() int {
     say("Testing no match...");
 
-    my scalar $router = Router_new();
+    my scalar $router = Cannoli::Router::new();
 
-    Router_get($router, "/hello", func (hash %req) {
-        return Response_text(200, "Hello");
+    Cannoli::Router::get($router, "/hello", func (hash %req) {
+        return Cannoli::Response::text(200, "Hello");
     });
 
     my hash %req = ();
     $req{"method"} = "GET";
     $req{"path"} = "/world";
 
-    my scalar $match = Router_match($router, %req);
+    my scalar $match = Cannoli::Router::match($router, %req);
 
     if (defined($match)) {
         say("  FAIL: /world should not match /hello");
@@ -71,14 +71,14 @@ func test_no_match() int {
 func test_method_match() int {
     say("Testing method matching...");
 
-    my scalar $router = Router_new();
+    my scalar $router = Cannoli::Router::new();
 
-    Router_get($router, "/resource", func (hash %req) {
-        return Response_text(200, "GET");
+    Cannoli::Router::get($router, "/resource", func (hash %req) {
+        return Cannoli::Response::text(200, "GET");
     });
 
-    Router_post($router, "/resource", func (hash %req) {
-        return Response_text(200, "POST");
+    Cannoli::Router::post($router, "/resource", func (hash %req) {
+        return Cannoli::Response::text(200, "POST");
     });
 
     # GET should match
@@ -86,7 +86,7 @@ func test_method_match() int {
     $get_req{"method"} = "GET";
     $get_req{"path"} = "/resource";
 
-    my scalar $get_match = Router_match($router, %get_req);
+    my scalar $get_match = Cannoli::Router::match($router, %get_req);
     if (!defined($get_match)) {
         say("  FAIL: GET /resource should match");
         return 1;
@@ -97,7 +97,7 @@ func test_method_match() int {
     $post_req{"method"} = "POST";
     $post_req{"path"} = "/resource";
 
-    my scalar $post_match = Router_match($router, %post_req);
+    my scalar $post_match = Cannoli::Router::match($router, %post_req);
     if (!defined($post_match)) {
         say("  FAIL: POST /resource should match");
         return 1;
@@ -108,7 +108,7 @@ func test_method_match() int {
     $delete_req{"method"} = "DELETE";
     $delete_req{"path"} = "/resource";
 
-    my scalar $delete_match = Router_match($router, %delete_req);
+    my scalar $delete_match = Cannoli::Router::match($router, %delete_req);
     if (defined($delete_match)) {
         say("  FAIL: DELETE /resource should not match");
         return 1;
@@ -121,10 +121,10 @@ func test_method_match() int {
 func test_regex_match() int {
     say("Testing regex matching...");
 
-    my scalar $router = Router_new();
+    my scalar $router = Cannoli::Router::new();
 
-    Router_get($router, "/user/([0-9]+)", func (hash %req) {
-        return Response_text(200, "User");
+    Cannoli::Router::get($router, "/user/([0-9]+)", func (hash %req) {
+        return Cannoli::Response::text(200, "User");
     });
 
     # Should match numeric ID
@@ -132,7 +132,7 @@ func test_regex_match() int {
     $req1{"method"} = "GET";
     $req1{"path"} = "/user/123";
 
-    my scalar $match1 = Router_match($router, %req1);
+    my scalar $match1 = Cannoli::Router::match($router, %req1);
     if (!defined($match1)) {
         say("  FAIL: /user/123 should match");
         return 1;
@@ -143,7 +143,7 @@ func test_regex_match() int {
     $req2{"method"} = "GET";
     $req2{"path"} = "/user/abc";
 
-    my scalar $match2 = Router_match($router, %req2);
+    my scalar $match2 = Cannoli::Router::match($router, %req2);
     if (defined($match2)) {
         say("  FAIL: /user/abc should not match [0-9]+");
         return 1;
@@ -156,10 +156,10 @@ func test_regex_match() int {
 func test_any_method() int {
     say("Testing any method matching...");
 
-    my scalar $router = Router_new();
+    my scalar $router = Cannoli::Router::new();
 
-    Router_any($router, "/anything", func (hash %req) {
-        return Response_text(200, "OK");
+    Cannoli::Router::any($router, "/anything", func (hash %req) {
+        return Cannoli::Response::text(200, "OK");
     });
 
     my array @methods = ("GET", "POST", "PUT", "DELETE");
@@ -170,7 +170,7 @@ func test_any_method() int {
         $req{"method"} = @methods[$i];
         $req{"path"} = "/anything";
 
-        my scalar $match = Router_match($router, %req);
+        my scalar $match = Cannoli::Router::match($router, %req);
         if (!defined($match)) {
             say("  FAIL: " . @methods[$i] . " /anything should match");
             return 1;
@@ -186,17 +186,17 @@ func test_any_method() int {
 func test_contains_regex_chars() int {
     say("Testing regex character detection...");
 
-    if (Router_contains_regex_chars("/simple") != 0) {
+    if (Cannoli::Router::contains_regex_chars("/simple") != 0) {
         say("  FAIL: /simple should not be detected as regex");
         return 1;
     }
 
-    if (Router_contains_regex_chars("/user/([0-9]+)") != 1) {
+    if (Cannoli::Router::contains_regex_chars("/user/([0-9]+)") != 1) {
         say("  FAIL: /user/([0-9]+) should be detected as regex");
         return 1;
     }
 
-    if (Router_contains_regex_chars("/files/*") != 1) {
+    if (Cannoli::Router::contains_regex_chars("/files/*") != 1) {
         say("  FAIL: /files/* should be detected as regex");
         return 1;
     }

@@ -14,6 +14,8 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::FastCGI;
+
 
 # cannoli/src/fastcgi.strada - FastCGI protocol implementation
 #
@@ -49,7 +51,7 @@ func fcgi_mod(int $a, int $b) int {
 }
 
 # Create a FastCGI header (8 bytes)
-func FastCGI_make_header(int $type, int $request_id, int $content_len, int $padding_len) str {
+func Cannoli_FastCGI_make_header(int $type, int $request_id, int $content_len, int $padding_len) str {
     my str $header = "";
 
     # Version (1)
@@ -82,7 +84,7 @@ func FastCGI_make_header(int $type, int $request_id, int $content_len, int $padd
 }
 
 # Parse a FastCGI header
-func FastCGI_parse_header(str $data) hash {
+func Cannoli_FastCGI_parse_header(str $data) hash {
     my hash %header = ();
 
     if (length($data) < 8) {
@@ -101,7 +103,7 @@ func FastCGI_parse_header(str $data) hash {
 }
 
 # Parse FastCGI name-value pairs (FCGI_PARAMS)
-func FastCGI_parse_params(str $data) hash {
+func Cannoli_FastCGI_parse_params(str $data) hash {
     my hash %params = ();
     my int $pos = 0;
     my int $len = length($data);
@@ -153,8 +155,8 @@ func FastCGI_parse_params(str $data) hash {
 }
 
 # Build FastCGI params from CGI environment to request hash
-func FastCGI_params_to_request(hash %params) hash {
-    my hash %req = Request_new();
+func Cannoli_FastCGI_params_to_request(hash %params) hash {
+    my hash %req = Cannoli::Request::new();
 
     # Map CGI variables to request object
     if (exists(%params, "REQUEST_METHOD")) {
@@ -170,7 +172,7 @@ func FastCGI_params_to_request(hash %params) hash {
     }
     if (exists(%params, "QUERY_STRING")) {
         $req{"query_string"} = $params{"QUERY_STRING"};
-        $req{"params"} = Request_parse_query($params{"QUERY_STRING"});
+        $req{"params"} = Cannoli::Request::parse_query($params{"QUERY_STRING"});
     }
     if (exists(%params, "CONTENT_TYPE")) {
         $req{"content_type"} = $params{"CONTENT_TYPE"};
@@ -195,7 +197,7 @@ func FastCGI_params_to_request(hash %params) hash {
         if (substr($key, 0, 5) eq "HTTP_") {
             my str $header_name = substr($key, 5, length($key) - 5);
             # Convert HTTP_CONTENT_TYPE to content-type
-            $header_name = FastCGI_header_from_cgi($header_name);
+            $header_name = ::header_from_cgi($header_name);
             $headers{$header_name} = $params{$key};
         }
         $i = $i + 1;
@@ -207,7 +209,7 @@ func FastCGI_params_to_request(hash %params) hash {
 }
 
 # Convert CGI header name to HTTP header name
-func FastCGI_header_from_cgi(str $name) str {
+func Cannoli_FastCGI_header_from_cgi(str $name) str {
     my str $result = "";
     my int $i = 0;
     my int $len = length($name);
@@ -239,9 +241,9 @@ func FastCGI_header_from_cgi(str $name) str {
 }
 
 # Build FCGI_STDOUT response
-func FastCGI_build_response(hash %res, int $request_id) str {
+func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
     # Build HTTP response
-    my str $http_response = Response_build(%res);
+    my str $http_response = Cannoli::Response::build(%res);
 
     # Build FCGI_STDOUT record(s)
     my str $output = "";
@@ -262,7 +264,7 @@ func FastCGI_build_response(hash %res, int $request_id) str {
         $padding = fcgi_mod($padding, 8);
 
         # Header
-        $output = $output . FastCGI_make_header(FCGI_STDOUT(), $request_id, $chunk_size, $padding);
+        $output = $output . ::make_header(FCGI_STDOUT(), $request_id, $chunk_size, $padding);
 
         # Content
         $output = $output . $chunk;
@@ -278,7 +280,7 @@ func FastCGI_build_response(hash %res, int $request_id) str {
     }
 
     # Empty FCGI_STDOUT to signal end
-    $output = $output . FastCGI_make_header(FCGI_STDOUT(), $request_id, 0, 0);
+    $output = $output . ::make_header(FCGI_STDOUT(), $request_id, 0, 0);
 
     # FCGI_END_REQUEST
     my str $end_body = "";
@@ -289,14 +291,14 @@ func FastCGI_build_response(hash %res, int $request_id) str {
     # Reserved (3 bytes)
     $end_body = $end_body . chr(0) . chr(0) . chr(0);
 
-    $output = $output . FastCGI_make_header(FCGI_END_REQUEST(), $request_id, 8, 0);
+    $output = $output . ::make_header(FCGI_END_REQUEST(), $request_id, 8, 0);
     $output = $output . $end_body;
 
     return $output;
 }
 
 # Handle a single FastCGI connection
-func FastCGI_handle_connection(int $fd, scalar $router) void {
+func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
     my hash %params = ();
     my str $stdin_data = "";
     my int $request_id = 0;
@@ -309,7 +311,7 @@ func FastCGI_handle_connection(int $fd, scalar $router) void {
             last;
         }
 
-        my hash %header = FastCGI_parse_header($header_data);
+        my hash %header = ::parse_header($header_data);
         if ($header{"valid"} == 0) {
             last;
         }
@@ -336,7 +338,7 @@ func FastCGI_handle_connection(int $fd, scalar $router) void {
             # New request
         } elsif ($rec_type == FCGI_PARAMS()) {
             if ($content_len > 0) {
-                my hash %new_params = FastCGI_parse_params($content);
+                my hash %new_params = ::parse_params($content);
                 my array @k = keys(%new_params);
                 my int $i = 0;
                 while ($i < scalar(@k)) {
@@ -358,26 +360,26 @@ func FastCGI_handle_connection(int $fd, scalar $router) void {
     }
 
     # Build request from params
-    my hash %req = FastCGI_params_to_request(%params);
+    my hash %req = ::params_to_request(%params);
     $req{"body"} = $stdin_data;
 
     # Dispatch to router
     my hash %res = ();
     if (defined($router)) {
-        %res = Router_dispatch($router, %req);
+        %res = Cannoli::Router::dispatch($router, %req);
     } else {
-        %res = Response_text(200, "Cannoli FastCGI server running");
+        %res = Cannoli::Response::text(200, "Cannoli FastCGI server running");
     }
 
     # Send response
-    my str $response = FastCGI_build_response(%res, $request_id);
+    my str $response = ::build_response(%res, $request_id);
     sys::write_fd($fd, $response);
 
     sys::close_fd($fd);
 }
 
 # FastCGI worker loop
-func FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_requests) void {
+func Cannoli_FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_requests) void {
     my int $requests_handled = 0;
 
     while ($requests_handled < $max_requests) {
@@ -388,14 +390,14 @@ func FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_requests) void
             next;
         }
 
-        FastCGI_handle_connection($fd, $router);
+        ::handle_connection($fd, $router);
         $requests_handled = $requests_handled + 1;
     }
 }
 
 # Run FastCGI server (TCP mode - nginx connects via TCP)
 # Note: Unix sockets would require additional runtime support
-func FastCGI_run(str $socket_path, scalar $router, int $num_workers) int {
+func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int {
     # For now, use TCP port 9000 (standard FastCGI port)
     # socket_path is ignored - would need Unix socket support in runtime
     my int $port = 9000;
@@ -418,7 +420,7 @@ func FastCGI_run(str $socket_path, scalar $router, int $num_workers) int {
 
         if ($pid == 0) {
             # Child
-            FastCGI_worker_loop($fd, $router, 1000);
+            ::worker_loop($fd, $router, 1000);
             exit(0);
         } elsif ($pid > 0) {
             say("Spawned FastCGI worker " . ($i + 1) . " with PID " . $pid);
@@ -437,7 +439,7 @@ func FastCGI_run(str $socket_path, scalar $router, int $num_workers) int {
 
             my int $new_pid = sys::fork();
             if ($new_pid == 0) {
-                FastCGI_worker_loop($fd, $router, 1000);
+                ::worker_loop($fd, $router, 1000);
                 exit(0);
             } elsif ($new_pid > 0) {
                 say("Respawned FastCGI worker with PID " . $new_pid);

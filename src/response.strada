@@ -14,13 +14,15 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Response;
+
 
 # cannoli/src/response.strada - HTTP Response building
 #
 # Build and send HTTP responses
 
 # HTTP status code messages
-func Response_status_message(int $code) str {
+func Cannoli_Response_status_message(int $code) str {
     if ($code == 200) { return "OK"; }
     if ($code == 201) { return "Created"; }
     if ($code == 204) { return "No Content"; }
@@ -41,7 +43,7 @@ func Response_status_message(int $code) str {
 }
 
 # Create a new response object
-func Response_new() hash {
+func Cannoli_Response_new() hash {
     my hash %res = ();
 
     $res{"status"} = 200;
@@ -59,35 +61,35 @@ func Response_new() hash {
 }
 
 # Set status code
-func Response_status(hash %res, int $code) void {
+func Cannoli_Response_status(hash %res, int $code) void {
     $res{"status"} = $code;
 }
 
 # Set a header
-func Response_header(hash %res, str $name, str $value) void {
+func Cannoli_Response_header(hash %res, str $name, str $value) void {
     my scalar $headers = $res{"headers"};
     $headers->{$name} = $value;
 }
 
 # Set content type
-func Response_content_type(hash %res, str $type) void {
-    Response_header(%res, "Content-Type", $type);
+func Cannoli_Response_content_type(hash %res, str $type) void {
+    ::header(%res, "Content-Type", $type);
 }
 
 # Set body content
-func Response_body(hash %res, str $content) void {
+func Cannoli_Response_body(hash %res, str $content) void {
     $res{"body"} = $content;
 }
 
 # Append to body
-func Response_write(hash %res, str $content) void {
+func Cannoli_Response_write(hash %res, str $content) void {
     $res{"body"} = $res{"body"} . $content;
 }
 
 # Build the complete HTTP response string
-func Response_build(hash %res) str {
+func Cannoli_Response_build(hash %res) str {
     my int $status_code = $res{"status"};
-    my str $status_msg = Response_status_message($status_code);
+    my str $status_msg = ::status_message($status_code);
     my str $body_content = $res{"body"};
     my scalar $headers = $res{"headers"};
 
@@ -97,7 +99,7 @@ func Response_build(hash %res) str {
     # Build status line
     my str $response = "HTTP/1.1 " . $status_code . " " . $status_msg . "\r\n";
 
-    # Add headers (skip empty values)
+    # Add Cannoli::Response::headers(skip empty values)
     my array @header_names = keys(%{$headers});
     my int $i = 0;
     while ($i < scalar(@header_names)) {
@@ -116,12 +118,12 @@ func Response_build(hash %res) str {
 }
 
 # Send response to a file descriptor
-func Response_send_to(hash %res, int $fd) int {
+func Cannoli_Response_send_to(hash %res, int $fd) int {
     if ($res{"sent"} == 1) {
         return 0;
     }
 
-    my str $data = Response_build(%res);
+    my str $data = ::build(%res);
     my int $written = sys::write_fd($fd, $data);
     $res{"sent"} = 1;
 
@@ -129,49 +131,49 @@ func Response_send_to(hash %res, int $fd) int {
 }
 
 # Convenience: Create and return a simple text response
-func Response_text(int $status, str $content) hash {
-    my hash %res = Response_new();
-    Response_status(%res, $status);
-    Response_content_type(%res, "text/plain; charset=utf-8");
-    Response_body(%res, $content);
+func Cannoli_Response_text(int $status, str $content) hash {
+    my hash %res = ::new();
+    ::status(%res, $status);
+    ::content_type(%res, "text/plain; charset=utf-8");
+    ::body(%res, $content);
     return %res;
 }
 
 # Convenience: Create and return an HTML response
-func Response_html(int $status, str $content) hash {
-    my hash %res = Response_new();
-    Response_status(%res, $status);
-    Response_content_type(%res, "text/html; charset=utf-8");
-    Response_body(%res, $content);
+func Cannoli_Response_html(int $status, str $content) hash {
+    my hash %res = ::new();
+    ::status(%res, $status);
+    ::content_type(%res, "text/html; charset=utf-8");
+    ::body(%res, $content);
     return %res;
 }
 
 # Convenience: Create and return a JSON response
-func Response_json(int $status, str $content) hash {
-    my hash %res = Response_new();
-    Response_status(%res, $status);
-    Response_content_type(%res, "application/json");
-    Response_body(%res, $content);
+func Cannoli_Response_json(int $status, str $content) hash {
+    my hash %res = ::new();
+    ::status(%res, $status);
+    ::content_type(%res, "application/json");
+    ::body(%res, $content);
     return %res;
 }
 
 # Convenience: Redirect response
-func Response_redirect(str $url, int $permanent) hash {
-    my hash %res = Response_new();
+func Cannoli_Response_redirect(str $url, int $permanent) hash {
+    my hash %res = ::new();
 
     if ($permanent == 1) {
-        Response_status(%res, 301);
+        ::status(%res, 301);
     } else {
-        Response_status(%res, 302);
+        ::status(%res, 302);
     }
 
-    Response_header(%res, "Location", $url);
-    Response_body(%res, "");
+    ::header(%res, "Location", $url);
+    ::body(%res, "");
     return %res;
 }
 
 # HTML escape helper
-func Response_html_escape(str $s) str {
+func Cannoli_Response_html_escape(str $s) str {
     my str $result = "";
     my int $i = 0;
     my int $len = length($s);
@@ -198,8 +200,8 @@ func Response_html_escape(str $s) str {
 }
 
 # Error page responses
-func Response_error_page(int $code, str $message) hash {
-    my str $status_msg = Response_status_message($code);
+func Cannoli_Response_error_page(int $code, str $message) hash {
+    my str $status_msg = ::status_message($code);
     my str $html_content = "<!DOCTYPE html>\n";
     $html_content = $html_content . "<html>\n<head>\n";
     $html_content = $html_content . "<title>" . $code . " " . $status_msg . "</title>\n";
@@ -213,68 +215,68 @@ func Response_error_page(int $code, str $message) hash {
     $html_content = $html_content . "<h1>" . $status_msg . "</h1>\n";
 
     if (length($message) > 0) {
-        $html_content = $html_content . "<p>" . Response_html_escape($message) . "</p>\n";
+        $html_content = $html_content . "<p>" . ::html_escape($message) . "</p>\n";
     }
 
     $html_content = $html_content . "<hr>\n<p><em>Cannoli/1.0</em></p>\n";
     $html_content = $html_content . "</body>\n</html>\n";
 
-    return Response_html($code, $html_content);
+    return ::html($code, $html_content);
 }
 
 # Not found (404)
-func Response_not_found() hash {
-    return Response_error_page(404, "The requested resource was not found.");
+func Cannoli_Response_not_found() hash {
+    return ::error_page(404, "The requested resource was not found.");
 }
 
 # Method not allowed (405)
-func Response_method_not_allowed(str $allowed) hash {
-    my hash %res = Response_error_page(405, "Method not allowed.");
-    Response_header(%res, "Allow", $allowed);
+func Cannoli_Response_method_not_allowed(str $allowed) hash {
+    my hash %res = ::error_page(405, "Method not allowed.");
+    ::header(%res, "Allow", $allowed);
     return %res;
 }
 
 # Internal server error (500)
-func Response_internal_error(str $message) hash {
-    return Response_error_page(500, $message);
+func Cannoli_Response_internal_error(str $message) hash {
+    return ::error_page(500, $message);
 }
 
 # Payload too large (413)
-func Response_payload_too_large(int $max_size) hash {
+func Cannoli_Response_payload_too_large(int $max_size) hash {
     my str $msg = "Request body exceeds maximum allowed size of " . $max_size . " bytes.";
-    return Response_error_page(413, $msg);
+    return ::error_page(413, $msg);
 }
 
 # Request header fields too large (431)
-func Response_header_too_large(int $max_size) hash {
+func Cannoli_Response_header_too_large(int $max_size) hash {
     my str $msg = "Request headers exceed maximum allowed size of " . $max_size . " bytes.";
-    return Response_error_page(431, $msg);
+    return ::error_page(431, $msg);
 }
 
 # Set multiple headers from a hash
-func Response_headers(hash %res, hash %hdrs) void {
+func Cannoli_Response_headers(hash %res, hash %hdrs) void {
     my array @names = keys(%hdrs);
     my int $i = 0;
     while ($i < scalar(@names)) {
         my str $name = @names[$i];
-        Response_header(%res, $name, $hdrs{$name});
+        ::header(%res, $name, $hdrs{$name});
         $i = $i + 1;
     }
 }
 
 # Get all response headers as a hash reference
-func Response_get_headers(hash %res) scalar {
+func Cannoli_Response_get_headers(hash %res) scalar {
     return $res{"headers"};
 }
 
 # Check if a response header is set
-func Response_has_header(hash %res, str $name) int {
+func Cannoli_Response_has_header(hash %res, str $name) int {
     my scalar $headers = $res{"headers"};
     return exists(%{$headers}, $name);
 }
 
 # Get a response header value
-func Response_get_header(hash %res, str $name) str {
+func Cannoli_Response_get_header(hash %res, str $name) str {
     my scalar $headers = $res{"headers"};
     if (exists(%{$headers}, $name)) {
         return $headers->{$name};
@@ -282,9 +284,9 @@ func Response_get_header(hash %res, str $name) str {
     return "";
 }
 
-# Remove a response header (sets to empty string)
+# Remove a response Cannoli::Response::header(sets to empty string)
 # Note: To fully remove, rebuild headers hash without the key
-func Response_remove_header(hash %res, str $name) void {
+func Cannoli_Response_remove_header(hash %res, str $name) void {
     my scalar $headers = $res{"headers"};
     # Since Strada doesn't have delete, we set to empty
     # The build function will skip empty headers
@@ -292,54 +294,54 @@ func Response_remove_header(hash %res, str $name) void {
 }
 
 # Convenience: Text response with custom headers
-func Response_text_with_headers(int $status, str $content, hash %hdrs) hash {
-    my hash %res = Response_text($status, $content);
-    Response_headers(%res, %hdrs);
+func Cannoli_Response_text_with_headers(int $status, str $content, hash %hdrs) hash {
+    my hash %res = ::text($status, $content);
+    ::headers(%res, %hdrs);
     return %res;
 }
 
 # Convenience: HTML response with custom headers
-func Response_html_with_headers(int $status, str $content, hash %hdrs) hash {
-    my hash %res = Response_html($status, $content);
-    Response_headers(%res, %hdrs);
+func Cannoli_Response_html_with_headers(int $status, str $content, hash %hdrs) hash {
+    my hash %res = ::html($status, $content);
+    ::headers(%res, %hdrs);
     return %res;
 }
 
 # Convenience: JSON response with custom headers
-func Response_json_with_headers(int $status, str $content, hash %hdrs) hash {
-    my hash %res = Response_json($status, $content);
-    Response_headers(%res, %hdrs);
+func Cannoli_Response_json_with_headers(int $status, str $content, hash %hdrs) hash {
+    my hash %res = ::json($status, $content);
+    ::headers(%res, %hdrs);
     return %res;
 }
 
 # Set Cache-Control header
-func Response_cache(hash %res, int $max_age) void {
+func Cannoli_Response_cache(hash %res, int $max_age) void {
     if ($max_age <= 0) {
-        Response_header(%res, "Cache-Control", "no-cache, no-store, must-revalidate");
-        Response_header(%res, "Pragma", "no-cache");
-        Response_header(%res, "Expires", "0");
+        ::header(%res, "Cache-Control", "no-cache, no-store, must-revalidate");
+        ::header(%res, "Pragma", "no-cache");
+        ::header(%res, "Expires", "0");
     } else {
-        Response_header(%res, "Cache-Control", "public, max-age=" . $max_age);
+        ::header(%res, "Cache-Control", "public, max-age=" . $max_age);
     }
 }
 
 # Set CORS headers for cross-origin requests
-func Response_cors(hash %res, str $origin) void {
+func Cannoli_Response_cors(hash %res, str $origin) void {
     if (length($origin) == 0) {
         $origin = "*";
     }
-    Response_header(%res, "Access-Control-Allow-Origin", $origin);
-    Response_header(%res, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    Response_header(%res, "Access-Control-Allow-Headers", "Content-Type, Authorization");
+    ::header(%res, "Access-Control-Allow-Origin", $origin);
+    ::header(%res, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    ::header(%res, "Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 # Set cookie header
-func Response_set_cookie(hash %res, str $name, str $value, str $options) void {
+func Cannoli_Response_set_cookie(hash %res, str $name, str $value, str $options) void {
     my str $cookie = $name . "=" . $value;
     if (length($options) > 0) {
         $cookie = $cookie . "; " . $options;
     }
-    Response_header(%res, "Set-Cookie", $cookie);
+    ::header(%res, "Set-Cookie", $cookie);
 }
 
 # ============================================================
@@ -347,14 +349,14 @@ func Response_set_cookie(hash %res, str $name, str $value, str $options) void {
 # ============================================================
 
 # Integer modulo operation (a mod b)
-func Response_mod(int $a, int $b) int {
+func Cannoli_Response_mod(int $a, int $b) int {
     my num $div = $a / $b;
     my int $floored = math::floor($div);
     return $a - ($floored * $b);
 }
 
 # Convert integer to lowercase hexadecimal string
-func Response_to_hex(int $value) str {
+func Cannoli_Response_to_hex(int $value) str {
     if ($value == 0) {
         return "0";
     }
@@ -363,7 +365,7 @@ func Response_to_hex(int $value) str {
     my int $n = $value;
 
     while ($n > 0) {
-        my int $digit = Response_mod($n, 16);
+        my int $digit = ::mod($n, 16);
         my str $ch = "";
         if ($digit < 10) {
             $ch = chr(48 + $digit);  # 0-9
@@ -378,17 +380,17 @@ func Response_to_hex(int $value) str {
     return $result;
 }
 
-# Build only the HTTP headers (status line + headers + blank line)
+# Build only the HTTP Cannoli::Response::headers(status line + headers + blank line)
 # Used for chunked responses where body is sent separately
-func Response_build_headers(hash %res) str {
+func Cannoli_Response_build_headers(hash %res) str {
     my int $status_code = $res{"status"};
-    my str $status_msg = Response_status_message($status_code);
+    my str $status_msg = ::status_message($status_code);
     my scalar $headers = $res{"headers"};
 
     # Build status line
     my str $response = "HTTP/1.1 " . $status_code . " " . $status_msg . "\r\n";
 
-    # Add headers (skip empty values and Content-Length for chunked)
+    # Add Cannoli::Response::headers(skip empty values and Content-Length for chunked)
     my array @header_names = keys(%{$headers});
     my int $i = 0;
     while ($i < scalar(@header_names)) {
@@ -410,19 +412,19 @@ func Response_build_headers(hash %res) str {
 # Initialize chunked response and send headers
 # Sets Transfer-Encoding: chunked and sends headers immediately
 # Returns the modified response hash
-func Response_chunked_start(hash %res, int $fd) hash {
+func Cannoli_Response_chunked_start(hash %res, int $fd) hash {
     # Set chunked encoding header
-    Response_header(%res, "Transfer-Encoding", "chunked");
+    ::header(%res, "Transfer-Encoding", "chunked");
 
     # Remove Content-Length if set (not allowed with chunked)
-    Response_remove_header(%res, "Content-Length");
+    ::remove_header(%res, "Content-Length");
 
     # Store the fd for later chunk writes
     $res{"_fd"} = $fd;
     $res{"_chunked"} = 1;
 
     # Send headers immediately
-    my str $headers = Response_build_headers(%res);
+    my str $headers = ::build_headers(%res);
     sys::write_fd($fd, $headers);
 
     $res{"sent"} = 1;  # Mark as sent (headers sent)
@@ -433,7 +435,7 @@ func Response_chunked_start(hash %res, int $fd) hash {
 # Send a data chunk
 # Format: hex_size\r\n data\r\n
 # Returns bytes written
-func Response_send_chunk(hash %res, str $data) int {
+func Cannoli_Response_send_chunk(hash %res, str $data) int {
     if (length($data) == 0) {
         return 0;  # Skip empty chunks
     }
@@ -444,7 +446,7 @@ func Response_send_chunk(hash %res, str $data) int {
     }
 
     # Format: {hex_length}\r\n{data}\r\n
-    my str $hex_len = Response_to_hex(length($data));
+    my str $hex_len = ::to_hex(length($data));
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
 
     return sys::write_fd($fd, $chunk);
@@ -453,7 +455,7 @@ func Response_send_chunk(hash %res, str $data) int {
 # Send the final (terminating) chunk
 # Format: 0\r\n\r\n
 # Returns bytes written
-func Response_end_chunked(hash %res) int {
+func Cannoli_Response_end_chunked(hash %res) int {
     my int $fd = $res{"_fd"};
     if ($fd <= 0) {
         return -1;
@@ -465,7 +467,7 @@ func Response_end_chunked(hash %res) int {
 
 # Create an empty response to signal "already handled"
 # Used when handler sends response directly (e.g., chunked)
-func Response_empty() hash {
+func Cannoli_Response_empty() hash {
     my hash %res = ();
     $res{"status"} = 0;
     $res{"headers"} = {};
@@ -476,7 +478,7 @@ func Response_empty() hash {
 }
 
 # Check if response is chunked
-func Response_is_chunked(hash %res) int {
+func Cannoli_Response_is_chunked(hash %res) int {
     if (exists(%res, "_chunked")) {
         return $res{"_chunked"};
     }
@@ -489,7 +491,7 @@ func Response_is_chunked(hash %res) int {
 
 # Compress response body using gzip
 # Returns 1 if compressed, 0 if not
-func Response_compress_gzip(hash %res) int {
+func Cannoli_Response_compress_gzip(hash %res) int {
     my str $body = $res{"body"};
 
     # Don't compress if body is empty or too small
@@ -498,24 +500,24 @@ func Response_compress_gzip(hash %res) int {
     }
 
     # Don't compress if already compressed
-    if (Response_has_header(%res, "Content-Encoding")) {
+    if (::has_header(%res, "Content-Encoding")) {
         return 0;
     }
 
     # Check content type - only compress text-based
-    my str $content_type = Response_get_header(%res, "Content-Type");
-    if (compress_should_compress($content_type, $body) == 0) {
+    my str $content_type = ::get_header(%res, "Content-Type");
+    if (compress::should_compress($content_type, $body) == 0) {
         return 0;
     }
 
     # Compress the body
-    my str $compressed = compress_gzip($body);
+    my str $compressed = compress::gzip($body);
 
     # Only use compressed if it's actually smaller
     if (length($compressed) < length($body)) {
         $res{"body"} = $compressed;
-        Response_header(%res, "Content-Encoding", "gzip");
-        Response_header(%res, "Vary", "Accept-Encoding");
+        ::header(%res, "Content-Encoding", "gzip");
+        ::header(%res, "Vary", "Accept-Encoding");
         return 1;
     }
 
@@ -523,18 +525,18 @@ func Response_compress_gzip(hash %res) int {
 }
 
 # Compress response if client accepts gzip encoding
-func Response_auto_compress(hash %res, str $accept_encoding) int {
+func Cannoli_Response_auto_compress(hash %res, str $accept_encoding) int {
     # Check if client accepts gzip
     if (index($accept_encoding, "gzip") < 0) {
         return 0;
     }
 
-    return Response_compress_gzip(%res);
+    return ::compress_gzip(%res);
 }
 
 # Check if response is compressed
-func Response_is_compressed(hash %res) int {
-    my str $encoding = Response_get_header(%res, "Content-Encoding");
+func Cannoli_Response_is_compressed(hash %res) int {
+    my str $encoding = ::get_header(%res, "Content-Encoding");
     if (length($encoding) > 0) {
         return 1;
     }

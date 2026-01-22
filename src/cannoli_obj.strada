@@ -15,6 +15,9 @@
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
+package Cannoli;
+
+
 # cannoli_obj.strada - Request/Response object for Strada handlers
 #
 # This module provides an object-oriented interface for handling
@@ -30,7 +33,7 @@
 #       return $c->build_response();
 #   }
 
-# Functions use Cannoli_ prefix for OOP method registration
+# Methods are defined on the Cannoli object package
 
 # Constructor - create from request hash
 func Cannoli_new(hash %req) scalar {
@@ -52,7 +55,7 @@ func Cannoli_new(hash %req) scalar {
     $self{"_document_root"} = "";
 
     # Extract Accept-Encoding for compression support
-    my str $accept_enc = Request_get_header(%req, "Accept-Encoding");
+    my str $accept_enc = Cannoli::Request::get_header(%req, "Accept-Encoding");
     $self{"_req_accept_encoding"} = $accept_enc;
 
     # Socket/connection info for chunked responses
@@ -103,7 +106,7 @@ func Cannoli_body(scalar $self) str {
     return $self->{"_body"};
 }
 
-# Get parsed JSON body (lazy parsing)
+# Get parsed JSON Cannoli_body(lazy parsing)
 func Cannoli_json_body(scalar $self) scalar {
     # Return cached if already parsed
     if (exists(%{$self}, "_json_body_parsed")) {
@@ -126,7 +129,7 @@ func Cannoli_json_body(scalar $self) scalar {
         return undef;
     }
 
-    my scalar $parsed = Request_json_parse($body_str);
+    my scalar $parsed = Cannoli::Request::json_parse($body_str);
     $self->{"_json_body_parsed"} = 1;
     $self->{"_json_body"} = $parsed;
     return $parsed;
@@ -166,7 +169,7 @@ func Cannoli_headers(scalar $self) scalar {
     return $self->{"_headers"};
 }
 
-# Get a specific request header (case-insensitive)
+# Get a specific request Cannoli_header(case-insensitive)
 func Cannoli_header(scalar $self, str $name) str {
     my str $lc_name = lc($name);
     my scalar $hdrs = $self->{"_headers"};
@@ -489,12 +492,12 @@ func Cannoli_write_body(scalar $self, str $content) scalar {
     return $self;
 }
 
-# Alias for write_body (nginx compat: print)
+# Alias for Cannoli_write_body(nginx compat: print)
 func Cannoli_print_body(scalar $self, str $content) scalar {
     return $self->write_body($content);
 }
 
-# Set response body (replaces existing)
+# Set response Cannoli_body(replaces existing)
 func Cannoli_body_set(scalar $self, str $content) scalar {
     $self->{"_res_body"} = $content;
     return $self;
@@ -628,15 +631,15 @@ func Cannoli_sendfile(scalar $self, str $filepath) scalar {
 #
 
 # Start a chunked response - sends headers immediately
-# After calling this, use write_chunk() to send data, then end_chunked() to finish
+# After calling this, use Cannoli_write_chunk() to send data, then Cannoli_end_chunked() to finish
 func Cannoli_start_chunked(scalar $self) scalar {
     # Build a response hash with current settings
-    my hash %res = Response_new();
-    Response_status(%res, $self->{"_res_status"});
+    my hash %res = Cannoli::Response::new();
+    Cannoli::Response::status(%res, $self->{"_res_status"});
 
     # Set content type
     if (length($self->{"_res_content_type"}) > 0) {
-        Response_content_type(%res, $self->{"_res_content_type"});
+        Cannoli::Response::content_type(%res, $self->{"_res_content_type"});
     }
 
     # Set custom headers
@@ -646,7 +649,7 @@ func Cannoli_start_chunked(scalar $self) scalar {
     while ($i < scalar(@hdr_names)) {
         my str $name = @hdr_names[$i];
         my str $value = $custom_hdrs->{$name};
-        Response_header(%res, $name, $value);
+        Cannoli::Response::header(%res, $name, $value);
         $i = $i + 1;
     }
 
@@ -656,9 +659,9 @@ func Cannoli_start_chunked(scalar $self) scalar {
         my scalar $ssl_conn = $self->{"_ssl_conn"};
         my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
 
-        Response_header(%res, "Transfer-Encoding", "chunked");
-        Response_remove_header(%res, "Content-Length");
-        my str $headers = Response_build_headers(%res);
+        Cannoli::Response::header(%res, "Transfer-Encoding", "chunked");
+        Cannoli::Response::remove_header(%res, "Content-Length");
+        my str $headers = Cannoli::Response::build_headers(%res);
         sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $headers]);
 
         $self->{"_chunked"} = 1;
@@ -666,7 +669,7 @@ func Cannoli_start_chunked(scalar $self) scalar {
     } else {
         # Regular socket chunked
         my int $fd = $self->{"_fd"};
-        %res = Response_chunked_start(%res, $fd);
+        %res = Cannoli::Response::chunked_start(%res, $fd);
         $self->{"_chunked"} = 1;
         $self->{"_chunked_res"} = \%res;
     }
@@ -682,7 +685,7 @@ func Cannoli_write_chunk(scalar $self, str $data) int {
     }
 
     # Format chunk: hex_length\r\n data \r\n
-    my str $hex_len = Response_to_hex(length($data));
+    my str $hex_len = Cannoli::Response::to_hex(length($data));
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
 
     if (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
@@ -730,26 +733,26 @@ func Cannoli_is_chunked(scalar $self) int {
 func Cannoli_build_response(scalar $self) hash {
     # If chunked mode, response was already sent
     if ($self->is_chunked() == 1) {
-        return Response_empty();
+        return Cannoli::Response::empty();
     }
 
-    my hash %res = Response_new();
+    my hash %res = Cannoli::Response::new();
 
     # Handle redirect
     if (length($self->{"_res_redirect"}) > 0) {
-        return Response_redirect($self->{"_res_redirect"}, $self->{"_res_status"});
+        return Cannoli::Response::redirect($self->{"_res_redirect"}, $self->{"_res_status"});
     }
 
     # Set status
-    Response_status(%res, $self->{"_res_status"});
+    Cannoli::Response::status(%res, $self->{"_res_status"});
 
     # Set content type
     if (length($self->{"_res_content_type"}) > 0) {
-        Response_content_type(%res, $self->{"_res_content_type"});
+        Cannoli::Response::content_type(%res, $self->{"_res_content_type"});
     }
 
     # Set body
-    Response_body(%res, $self->{"_res_body"});
+    Cannoli::Response::body(%res, $self->{"_res_body"});
 
     # Set custom headers
     my scalar $custom_hdrs = $self->{"_res_headers"};
@@ -758,7 +761,7 @@ func Cannoli_build_response(scalar $self) hash {
     while ($i < scalar(@hdr_names)) {
         my str $name = @hdr_names[$i];
         my str $value = $custom_hdrs->{$name};
-        Response_header(%res, $name, $value);
+        Cannoli::Response::header(%res, $name, $value);
         $i = $i + 1;
     }
 
@@ -767,10 +770,10 @@ func Cannoli_build_response(scalar $self) hash {
         if (exists(%{$self}, "_auto_compress")) {
             # Auto-compress based on Accept-Encoding
             my str $accept = $self->{"_req_accept_encoding"};
-            Response_auto_compress(%res, $accept);
+            Cannoli::Response::auto_compress(%res, $accept);
         } else {
             # Force gzip compression
-            Response_compress_gzip(%res);
+            Cannoli::Response::compress_gzip(%res);
         }
     }
 
@@ -780,7 +783,7 @@ func Cannoli_build_response(scalar $self) hash {
 # end package Cannoli
 
 #
-# Helper functions (these keep Cannoli_ prefix as they're utility functions)
+# Helper functions (utility routines in Cannoli package)
 #
 
 # URL decode helper
@@ -951,7 +954,7 @@ func Cannoli_render_error(scalar $self, int $code, str $message) void {
     $self->status($code);
     $self->content_type("text/html");
 
-    my str $title = Response_status_message($code);
+    my str $title = Cannoli::Response::status_message($code);
 
     my str $html = "<!DOCTYPE html>\n";
     $html = $html . "<html><head><title>" . $code . " " . $title . "</title>\n";
@@ -964,7 +967,7 @@ func Cannoli_render_error(scalar $self, int $code, str $message) void {
     $html = $html . "<div class=\"code\">" . $code . "</div>\n";
     $html = $html . "<h1>" . $title . "</h1>\n";
     if (length($message) > 0) {
-        $html = $html . "<p class=\"message\">" . Response_html_escape($message) . "</p>\n";
+        $html = $html . "<p class=\"message\">" . Cannoli::Response::html_escape($message) . "</p>\n";
     }
     $html = $html . "</body></html>\n";
 
@@ -996,7 +999,7 @@ func Cannoli_is_compress_enabled(scalar $self) int {
 
 # ===== Session methods =====
 
-# Get or create session (lazy loading from cookie)
+# Get or create Cannoli_session(lazy loading from cookie)
 func Cannoli_session(scalar $self) scalar {
     # Return cached session if already loaded
     if (exists(%{$self}, "_session")) {
@@ -1004,7 +1007,7 @@ func Cannoli_session(scalar $self) scalar {
     }
 
     # Try to load from session cookie
-    my str $cookie_name = Session_cookie_name();
+    my str $cookie_name = Cannoli::Session::cookie_name();
     my str $session_id = "";
 
     # Get cookies from request headers
@@ -1033,12 +1036,12 @@ func Cannoli_session(scalar $self) scalar {
 
     # Try to load existing session
     if (length($session_id) > 0) {
-        $session = Session_load($session_id);
+        $session = Cannoli::Session::load($session_id);
     }
 
     # Create new session if not found
     if (!defined($session)) {
-        $session = Session_new();
+        $session = Cannoli::Session::new();
         $self->{"_session_new"} = 1;  # Flag to set cookie
     }
 
@@ -1049,26 +1052,26 @@ func Cannoli_session(scalar $self) scalar {
 # Get a value from session
 func Cannoli_session_get(scalar $self, str $key) scalar {
     my scalar $session = $self->session();
-    return Session_get($session, $key);
+    return Cannoli::Session::get($session, $key);
 }
 
 # Set a value in session
 func Cannoli_session_set(scalar $self, str $key, scalar $value) scalar {
     my scalar $session = $self->session();
-    Session_set($session, $key, $value);
+    Cannoli::Session::set($session, $key, $value);
     return $self;
 }
 
 # Check if session has a key
 func Cannoli_session_has(scalar $self, str $key) int {
     my scalar $session = $self->session();
-    return Session_has($session, $key);
+    return Cannoli::Session::has($session, $key);
 }
 
 # Delete a value from session
 func Cannoli_session_delete(scalar $self, str $key) scalar {
     my scalar $session = $self->session();
-    Session_delete($session, $key);
+    Cannoli::Session::delete($session, $key);
     return $self;
 }
 
@@ -1079,13 +1082,13 @@ func Cannoli_session_save(scalar $self) scalar {
     }
 
     my scalar $session = $self->{"_session"};
-    Session_save($session);
+    Cannoli::Session::save($session);
 
     # Set session cookie if this is a new session
     if (exists(%{$self}, "_session_new") && $self->{"_session_new"} == 1) {
-        my str $cookie_name = Session_cookie_name();
-        my str $session_id = Session_id($session);
-        my int $ttl = Session_ttl();
+        my str $cookie_name = Cannoli::Session::cookie_name();
+        my str $session_id = Cannoli::Session::id($session);
+        my int $ttl = Cannoli::Session::ttl();
         $self->set_cookie($cookie_name, $session_id, "/", $ttl, 1, 0);
         $self->{"_session_new"} = 0;
     }
@@ -1097,11 +1100,11 @@ func Cannoli_session_save(scalar $self) scalar {
 func Cannoli_session_destroy(scalar $self) scalar {
     if (exists(%{$self}, "_session")) {
         my scalar $session = $self->{"_session"};
-        my str $session_id = Session_id($session);
-        Session_destroy($session_id);
+        my str $session_id = Cannoli::Session::id($session);
+        Cannoli::Session::destroy($session_id);
 
         # Clear cookie by setting max-age to 0
-        my str $cookie_name = Session_cookie_name();
+        my str $cookie_name = Cannoli::Session::cookie_name();
         $self->set_cookie($cookie_name, "", "/", 0, 1, 0);
 
         $self->{"_session"} = undef;
@@ -1113,14 +1116,14 @@ func Cannoli_session_destroy(scalar $self) scalar {
 # Get session ID
 func Cannoli_session_id(scalar $self) str {
     my scalar $session = $self->session();
-    return Session_id($session);
+    return Cannoli::Session::id($session);
 }
 
 # ===== Template methods =====
 
 # Render a template and set response body
 func Cannoli_render(scalar $self, str $template_name, scalar $vars) scalar {
-    my str $html = Template_render($template_name, $vars);
+    my str $html = Cannoli::Template::render($template_name, $vars);
     if (length($self->{"_res_content_type"}) == 0) {
         $self->content_type("text/html; charset=utf-8");
     }
@@ -1130,7 +1133,7 @@ func Cannoli_render(scalar $self, str $template_name, scalar $vars) scalar {
 
 # Render a template with HTML escaping (safe mode)
 func Cannoli_render_safe(scalar $self, str $template_name, scalar $vars) scalar {
-    my str $html = Template_render_safe($template_name, $vars);
+    my str $html = Cannoli::Template::render_safe($template_name, $vars);
     if (length($self->{"_res_content_type"}) == 0) {
         $self->content_type("text/html; charset=utf-8");
     }
@@ -1140,7 +1143,7 @@ func Cannoli_render_safe(scalar $self, str $template_name, scalar $vars) scalar 
 
 # Render a template with a layout
 func Cannoli_render_with_layout(scalar $self, str $template_name, str $layout_name, scalar $vars) scalar {
-    my str $html = Template_render_with_layout($template_name, $layout_name, $vars);
+    my str $html = Cannoli::Template::render_with_layout($template_name, $layout_name, $vars);
     if (length($self->{"_res_content_type"}) == 0) {
         $self->content_type("text/html; charset=utf-8");
     }
@@ -1150,7 +1153,7 @@ func Cannoli_render_with_layout(scalar $self, str $template_name, str $layout_na
 
 # Render a template string directly
 func Cannoli_render_string(scalar $self, str $template, scalar $vars) scalar {
-    my str $html = Template_render_string($template, $vars);
+    my str $html = Cannoli::Template::render_string($template, $vars);
     if (length($self->{"_res_content_type"}) == 0) {
         $self->content_type("text/html; charset=utf-8");
     }
@@ -1169,7 +1172,7 @@ func Cannoli_validate(scalar $self, scalar $rules) scalar {
     if ($self->is_json() == 1) {
         my scalar $json_body = $self->json_body();
         if (defined($json_body) && ref($json_body) eq "hash") {
-            # Merge JSON body into params (JSON takes precedence)
+            # Merge JSON body into Cannoli_params(JSON takes precedence)
             my array @json_keys = keys(%{$json_body});
             my int $i = 0;
             while ($i < scalar(@json_keys)) {
@@ -1180,7 +1183,7 @@ func Cannoli_validate(scalar $self, scalar $rules) scalar {
         }
     }
 
-    return Validator_from_rules($params, $rules);
+    return Cannoli::Validation::from_rules($params, $rules);
 }
 
 # Validate and return JSON error response if invalid
@@ -1188,8 +1191,8 @@ func Cannoli_validate(scalar $self, scalar $rules) scalar {
 func Cannoli_validate_or_error(scalar $self, scalar $rules) int {
     my scalar $v = $self->validate($rules);
 
-    if (Validator_validate($v) == 0) {
-        my scalar $errors = Validator_errors($v);
+    if (Cannoli::Validation::validate($v) == 0) {
+        my scalar $errors = Cannoli::Validation::errors($v);
         $self->status(400);
         $self->content_type("application/json");
         $self->render_json({"errors" => $errors});
@@ -1259,14 +1262,14 @@ func Cannoli_handle_preflight(scalar $self, str $origin) int {
 # Set a flash message (stored in session, cleared after read)
 func Cannoli_flash(scalar $self, str $key, str $message) scalar {
     my scalar $session = $self->session();
-    my scalar $flash = Session_get($session, "_flash");
+    my scalar $flash = Cannoli::Session::get($session, "_flash");
 
     if (!defined($flash)) {
         $flash = {};
     }
 
     $flash->{$key} = $message;
-    Session_set($session, "_flash", $flash);
+    Cannoli::Session::set($session, "_flash", $flash);
 
     return $self;
 }
@@ -1274,7 +1277,7 @@ func Cannoli_flash(scalar $self, str $key, str $message) scalar {
 # Get and clear a flash message
 func Cannoli_get_flash(scalar $self, str $key) str {
     my scalar $session = $self->session();
-    my scalar $flash = Session_get($session, "_flash");
+    my scalar $flash = Cannoli::Session::get($session, "_flash");
 
     if (!defined($flash)) {
         return "";
@@ -1297,7 +1300,7 @@ func Cannoli_get_flash(scalar $self, str $key) str {
         }
         $i = $i + 1;
     }
-    Session_set($session, "_flash", \%new_flash);
+    Cannoli::Session::set($session, "_flash", \%new_flash);
 
     return $message;
 }
@@ -1305,7 +1308,7 @@ func Cannoli_get_flash(scalar $self, str $key) str {
 # Check if a flash message exists
 func Cannoli_has_flash(scalar $self, str $key) int {
     my scalar $session = $self->session();
-    my scalar $flash = Session_get($session, "_flash");
+    my scalar $flash = Cannoli::Session::get($session, "_flash");
 
     if (!defined($flash)) {
         return 0;
@@ -1317,7 +1320,7 @@ func Cannoli_has_flash(scalar $self, str $key) int {
 # Get all flash messages and clear them
 func Cannoli_get_all_flash(scalar $self) scalar {
     my scalar $session = $self->session();
-    my scalar $flash = Session_get($session, "_flash");
+    my scalar $flash = Cannoli::Session::get($session, "_flash");
 
     if (!defined($flash)) {
         my hash %empty = ();
@@ -1325,7 +1328,7 @@ func Cannoli_get_all_flash(scalar $self) scalar {
     }
 
     # Clear all flash messages
-    Session_set($session, "_flash", {});
+    Cannoli::Session::set($session, "_flash", {});
 
     return $flash;
 }

@@ -14,6 +14,8 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Log;
+
 
 # cannoli/src/log.strada - Logging support
 #
@@ -41,10 +43,10 @@ my int $g_log_to_stdout = 0;  # For access log to stdout
 my str $g_log_format = "%m %p %s %b %Tms";  # Default console format
 
 # Initialize logging
-func Log_init(hash %config) void {
-    $g_error_log_file = Config_get_str(%config, "log.error_file", "");
-    $g_access_log_file = Config_get_str(%config, "log.access_file", "");
-    my str $level_str = Config_get_str(%config, "log.level", "info");
+func Cannoli_Log_init(hash %config) void {
+    $g_error_log_file = Cannoli::Config::get_str(%config, "log.error_file", "");
+    $g_access_log_file = Cannoli::Config::get_str(%config, "log.access_file", "");
+    my str $level_str = Cannoli::Config::get_str(%config, "log.level", "info");
 
     # Set log level
     if ($level_str eq "error") {
@@ -58,14 +60,14 @@ func Log_init(hash %config) void {
     }
 
     # Check if logging to stdout is enabled (--debug flag)
-    my str $to_stdout = Config_get_str(%config, "log.to_stdout", "0");
+    my str $to_stdout = Cannoli::Config::get_str(%config, "log.to_stdout", "0");
     if ($to_stdout eq "1") {
         $g_log_to_stdout = 1;
         $g_log_to_stderr = 1;
     }
 
     # Get log format string
-    $g_log_format = Config_get_str(%config, "log.format", "%m %p %s %b %Tms");
+    $g_log_format = Cannoli::Config::get_str(%config, "log.format", "%m %p %s %b %Tms");
 
     # Test open error log
     if (length($g_error_log_file) > 0) {
@@ -91,12 +93,12 @@ func Log_init(hash %config) void {
 }
 
 # Close log files (no-op, we open/close per write for safety in forked processes)
-func Log_close() void {
+func Cannoli_Log_close() void {
     # Nothing to do - files are opened/closed per write
 }
 
 # Get current timestamp in log format
-func Log_timestamp() str {
+func Cannoli_Log_timestamp() str {
     my int $now = sys::time();
     # Format: [DD/Mon/YYYY:HH:MM:SS +0000]
     # For now, use Unix timestamp as we don't have strftime
@@ -104,14 +106,14 @@ func Log_timestamp() str {
 }
 
 # Get timestamp for access log
-func Log_access_timestamp() str {
+func Cannoli_Log_access_timestamp() str {
     my int $now = sys::time();
     return "[" . $now . "]";
 }
 
 # Write to error log
-func Log_write_error(str $level, str $message) void {
-    my str $timestamp = Log_timestamp();
+func Cannoli_Log_write_error(str $level, str $message) void {
+    my str $timestamp = ::timestamp();
     my str $line = $timestamp . " [" . $level . "] " . $message . "\n";
 
     if (length($g_error_log_file) > 0) {
@@ -128,37 +130,37 @@ func Log_write_error(str $level, str $message) void {
 }
 
 # Log error message
-func Log_error(str $message) void {
+func Cannoli_Log_error(str $message) void {
     if ($g_log_level >= 1) {
-        Log_write_error("ERROR", $message);
+        ::write_error("ERROR", $message);
     }
 }
 
 # Log warning message
-func Log_warn(str $message) void {
+func Cannoli_Log_warn(str $message) void {
     if ($g_log_level >= 2) {
-        Log_write_error("WARN", $message);
+        ::write_error("WARN", $message);
     }
 }
 
 # Log info message
-func Log_info(str $message) void {
+func Cannoli_Log_info(str $message) void {
     if ($g_log_level >= 3) {
-        Log_write_error("INFO", $message);
+        ::write_error("INFO", $message);
     }
 }
 
 # Log debug message
-func Log_debug(str $message) void {
+func Cannoli_Log_debug(str $message) void {
     if ($g_log_level >= 4) {
-        Log_write_error("DEBUG", $message);
+        ::write_error("DEBUG", $message);
     }
 }
 
 # Format a log line using the format string
 # Placeholders: %t=timestamp %m=method %p=path %s=status %b=bytes %T=time_ms
 #               %r=referer %a=user_agent %i=remote_ip %P=protocol
-func Log_format_line(str $format, str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
+func Cannoli_Log_format_line(str $format, str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
     my str $result = "";
     my str $timestamp = "" . sys::time();
     my str $status_str = "" . $status;
@@ -223,8 +225,8 @@ func Log_format_line(str $format, str $remote_ip, str $method, str $path, str $p
 
 # Log access in Combined Log Format
 # remote_ip - - [timestamp] "method path protocol" status size "referer" "user_agent"
-func Log_access(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) void {
-    my str $timestamp = Log_access_timestamp();
+func Cannoli_Log_access(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) void {
+    my str $timestamp = ::access_timestamp();
 
     # Escape or default values
     if (length($referer) == 0) {
@@ -250,13 +252,13 @@ func Log_access(str $remote_ip, str $method, str $path, str $protocol, int $stat
 
     # Log to stdout if --debug flag or debug level, using custom format
     if ($g_log_to_stdout == 1 || $g_log_level >= 4) {
-        my str $console_line = Log_format_line($g_log_format, $remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
+        my str $console_line = ::format_line($g_log_format, $remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
         say($console_line);
     }
 }
 
 # Convenience function for logging a request with timing
-func Log_request_timed(hash %req, hash %res, int $time_ms) void {
+func Cannoli_Log_request_timed(hash %req, hash %res, int $time_ms) void {
     my str $remote_ip = "127.0.0.1";  # TODO: Get from socket
     my str $method = $req{"method"};
     my str $path = $req{"path"};
@@ -264,15 +266,15 @@ func Log_request_timed(hash %req, hash %res, int $time_ms) void {
     my int $status = $res{"status"};
     my str $body = $res{"body"};
     my int $size = length($body);
-    my str $referer = Request_get_header(%req, "Referer");
-    my str $user_agent = Request_get_header(%req, "User-Agent");
+    my str $referer = Cannoli::Request::get_header(%req, "Referer");
+    my str $user_agent = Cannoli::Request::get_header(%req, "User-Agent");
 
-    Log_access($remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
+    ::access($remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
 }
 
-# Convenience function for logging a request (backwards compatible, 0ms timing)
-func Log_request(hash %req, hash %res) void {
-    Log_request_timed(%req, %res, 0);
+# Convenience function for logging a Cannoli::Log::request(backwards compatible, 0ms timing)
+func Cannoli_Log_request(hash %req, hash %res) void {
+    ::request_timed(%req, %res, 0);
 }
 
 # ============================================================
@@ -284,7 +286,7 @@ my int $g_rotate_size = 10485760;  # 10MB default
 my int $g_rotate_keep = 5;         # Keep 5 old files
 
 # Configure log rotation
-func Log_set_rotation(int $max_size, int $keep_files) void {
+func Cannoli_Log_set_rotation(int $max_size, int $keep_files) void {
     if ($max_size > 0) {
         $g_rotate_size = $max_size;
     }
@@ -294,7 +296,7 @@ func Log_set_rotation(int $max_size, int $keep_files) void {
 }
 
 # Get file size (returns 0 if file doesn't exist)
-func Log_file_size(str $path) int {
+func Cannoli_Log_file_size(str $path) int {
     if (sys::is_file($path) == 0) {
         return 0;
     }
@@ -304,13 +306,13 @@ func Log_file_size(str $path) int {
 
 # Rotate a log file
 # Renames: file -> file.1, file.1 -> file.2, etc.
-func Log_rotate(str $path) void {
+func Cannoli_Log_rotate(str $path) void {
     if (sys::is_file($path) == 0) {
         return;
     }
 
     # Check if file needs rotation
-    my int $size = Log_file_size($path);
+    my int $size = ::file_size($path);
     if ($size < $g_rotate_size) {
         return;
     }
@@ -339,12 +341,12 @@ func Log_rotate(str $path) void {
 }
 
 # Check and rotate all log files if needed
-func Log_check_rotation() void {
+func Cannoli_Log_check_rotation() void {
     if (length($g_error_log_file) > 0) {
-        Log_rotate($g_error_log_file);
+        ::rotate($g_error_log_file);
     }
     if (length($g_access_log_file) > 0) {
-        Log_rotate($g_access_log_file);
+        ::rotate($g_access_log_file);
     }
 }
 
@@ -356,30 +358,30 @@ func Log_check_rotation() void {
 my int $g_json_log = 0;
 
 # Enable/disable JSON logging
-func Log_set_json_format(int $enabled) void {
+func Cannoli_Log_set_json_format(int $enabled) void {
     $g_json_log = $enabled;
 }
 
 # Log access in JSON format
-func Log_access_json(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
+func Cannoli_Log_access_json(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
     my str $timestamp = "" . sys::time();
 
     my str $json = "{";
     $json = $json . "\"timestamp\":" . $timestamp;
     $json = $json . ",\"type\":\"access\"";
-    $json = $json . ",\"remote_ip\":\"" . Log_json_escape($remote_ip) . "\"";
+    $json = $json . ",\"remote_ip\":\"" . ::json_escape($remote_ip) . "\"";
     $json = $json . ",\"method\":\"" . $method . "\"";
-    $json = $json . ",\"path\":\"" . Log_json_escape($path) . "\"";
+    $json = $json . ",\"path\":\"" . ::json_escape($path) . "\"";
     $json = $json . ",\"protocol\":\"" . $protocol . "\"";
     $json = $json . ",\"status\":" . $status;
     $json = $json . ",\"size\":" . $size;
     $json = $json . ",\"time_ms\":" . $time_ms;
 
     if (length($referer) > 0 && $referer ne "-") {
-        $json = $json . ",\"referer\":\"" . Log_json_escape($referer) . "\"";
+        $json = $json . ",\"referer\":\"" . ::json_escape($referer) . "\"";
     }
     if (length($user_agent) > 0 && $user_agent ne "-") {
-        $json = $json . ",\"user_agent\":\"" . Log_json_escape($user_agent) . "\"";
+        $json = $json . ",\"user_agent\":\"" . ::json_escape($user_agent) . "\"";
     }
 
     $json = $json . "}";
@@ -387,20 +389,20 @@ func Log_access_json(str $remote_ip, str $method, str $path, str $protocol, int 
 }
 
 # Log error in JSON format
-func Log_error_json(str $level, str $message) str {
+func Cannoli_Log_error_json(str $level, str $message) str {
     my str $timestamp = "" . sys::time();
 
     my str $json = "{";
     $json = $json . "\"timestamp\":" . $timestamp;
     $json = $json . ",\"type\":\"error\"";
     $json = $json . ",\"level\":\"" . $level . "\"";
-    $json = $json . ",\"message\":\"" . Log_json_escape($message) . "\"";
+    $json = $json . ",\"message\":\"" . ::json_escape($message) . "\"";
     $json = $json . "}";
     return $json;
 }
 
 # JSON string escape helper
-func Log_json_escape(str $s) str {
+func Cannoli_Log_json_escape(str $s) str {
     my str $result = "";
     my int $len = length($s);
     my int $i = 0;
@@ -429,18 +431,18 @@ func Log_json_escape(str $s) str {
 }
 
 # Enhanced write to error log with optional JSON format
-func Log_write_error_enhanced(str $level, str $message) void {
+func Cannoli_Log_write_error_enhanced(str $level, str $message) void {
     my str $line = "";
 
     if ($g_json_log == 1) {
-        $line = Log_error_json($level, $message) . "\n";
+        $line = ::error_json($level, $message) . "\n";
     } else {
-        my str $timestamp = Log_timestamp();
+        my str $timestamp = ::timestamp();
         $line = $timestamp . " [" . $level . "] " . $message . "\n";
     }
 
     if (length($g_error_log_file) > 0) {
-        Log_check_rotation();  # Check rotation before writing
+        ::check_rotation();  # Check rotation before writing
         my scalar $fh = sys::open($g_error_log_file, "a");
         if (defined($fh)) {
             sys::fwrite($fh, $line);
@@ -454,7 +456,7 @@ func Log_write_error_enhanced(str $level, str $message) void {
 }
 
 # Enhanced access log with optional JSON format
-func Log_access_enhanced(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) void {
+func Cannoli_Log_access_enhanced(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) void {
     # Escape or default values
     if (length($referer) == 0) {
         $referer = "-";
@@ -465,13 +467,13 @@ func Log_access_enhanced(str $remote_ip, str $method, str $path, str $protocol, 
 
     # Write to file
     if (length($g_access_log_file) > 0) {
-        Log_check_rotation();  # Check rotation before writing
+        ::check_rotation();  # Check rotation before writing
 
         my str $line = "";
         if ($g_json_log == 1) {
-            $line = Log_access_json($remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms) . "\n";
+            $line = ::access_json($remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms) . "\n";
         } else {
-            my str $timestamp = Log_access_timestamp();
+            my str $timestamp = ::access_timestamp();
             $line = $remote_ip . " - - " . $timestamp . " \"";
             $line = $line . $method . " " . $path . " " . $protocol . "\" ";
             $line = $line . $status . " " . $size . " ";
@@ -489,9 +491,9 @@ func Log_access_enhanced(str $remote_ip, str $method, str $path, str $protocol, 
     if ($g_log_to_stdout == 1 || $g_log_level >= 4) {
         my str $console_line = "";
         if ($g_json_log == 1) {
-            $console_line = Log_access_json($remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
+            $console_line = ::access_json($remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
         } else {
-            $console_line = Log_format_line($g_log_format, $remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
+            $console_line = ::format_line($g_log_format, $remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms);
         }
         say($console_line);
     }

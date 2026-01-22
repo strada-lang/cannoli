@@ -14,6 +14,8 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Session;
+
 
 # cannoli/src/session.strada - Session management
 #
@@ -21,12 +23,12 @@
 # Sessions are stored in /tmp/cannoli_sessions/ directory.
 #
 # Usage:
-#   my scalar $session = Session_new();
-#   Session_set($session, "user_id", "42");
-#   Session_save($session);
+#   my scalar $session = Cannoli::Session::new();
+#   Cannoli::Session::set($session, "user_id", "42");
+#   Cannoli::Session::save($session);
 #
-#   my scalar $loaded = Session_load($session_id);
-#   my str $user = Session_get($loaded, "user_id");
+#   my scalar $loaded = Cannoli::Session::load($session_id);
+#   my str $user = Cannoli::Session::get($loaded, "user_id");
 
 # Session directory
 my str $g_session_dir = "/tmp/cannoli_sessions";
@@ -34,14 +36,14 @@ my str $g_session_cookie = "cannoli_session";
 my int $g_session_ttl = 3600;  # 1 hour default TTL
 
 # Initialize session system (creates directory if needed)
-func Session_init() void {
+func Cannoli_Session_init() void {
     if (sys::is_dir($g_session_dir) == 0) {
         sys::mkdir($g_session_dir);
     }
 }
 
 # Configure session settings
-func Session_configure(str $dir, str $cookie_name, int $ttl) void {
+func Cannoli_Session_configure(str $dir, str $cookie_name, int $ttl) void {
     if (length($dir) > 0) {
         $g_session_dir = $dir;
     }
@@ -51,11 +53,11 @@ func Session_configure(str $dir, str $cookie_name, int $ttl) void {
     if ($ttl > 0) {
         $g_session_ttl = $ttl;
     }
-    Session_init();
+    ::init();
 }
 
 # Generate a secure session ID (32 hex characters)
-func Session_generate_id() str {
+func Cannoli_Session_generate_id() str {
     my str $id = "";
     my int $i = 0;
     my str $hex = "0123456789abcdef";
@@ -75,16 +77,16 @@ func Session_generate_id() str {
 }
 
 # Get session file path
-func Session_file_path(str $id) str {
+func Cannoli_Session_file_path(str $id) str {
     return $g_session_dir . "/sess_" . $id;
 }
 
 # Create a new session
-func Session_new() scalar {
-    Session_init();
+func Cannoli_Session_new() scalar {
+    ::init();
 
     my hash %session = ();
-    $session{"id"} = Session_generate_id();
+    $session{"id"} = ::generate_id();
     $session{"created"} = sys::time();
     $session{"modified"} = sys::time();
     $session{"data"} = {};
@@ -93,13 +95,13 @@ func Session_new() scalar {
 }
 
 # Load a session by ID
-func Session_load(str $id) scalar {
+func Cannoli_Session_load(str $id) scalar {
     # Validate session ID (only hex chars allowed)
     if (length($id) != 32) {
         return undef;
     }
 
-    my str $path = Session_file_path($id);
+    my str $path = ::file_path($id);
 
     if (sys::is_file($path) == 0) {
         return undef;
@@ -141,7 +143,7 @@ func Session_load(str $id) scalar {
             } else {
                 # User data
                 my scalar $data = $session{"data"};
-                $data->{$key} = Session_decode_value($value);
+                $data->{$key} = ::decode_value($value);
             }
         }
 
@@ -153,7 +155,7 @@ func Session_load(str $id) scalar {
     my int $modified = $session{"modified"} + 0;
     if ($now - $modified > $g_session_ttl) {
         # Session expired
-        Session_destroy($id);
+        ::destroy($id);
         return undef;
     }
 
@@ -161,11 +163,11 @@ func Session_load(str $id) scalar {
 }
 
 # Save a session to file
-func Session_save(scalar $session) int {
-    Session_init();
+func Cannoli_Session_save(scalar $session) int {
+    ::init();
 
     my str $id = $session->{"id"};
-    my str $path = Session_file_path($id);
+    my str $path = ::file_path($id);
 
     # Update modified time
     $session->{"modified"} = sys::time();
@@ -182,7 +184,7 @@ func Session_save(scalar $session) int {
 
     while ($i < scalar(@keys)) {
         my str $key = @keys[$i];
-        my str $value = Session_encode_value($data->{$key});
+        my str $value = ::encode_value($data->{$key});
         $content = $content . $key . "=" . $value . "\n";
         $i = $i + 1;
     }
@@ -193,15 +195,15 @@ func Session_save(scalar $session) int {
 }
 
 # Destroy a session
-func Session_destroy(str $id) void {
-    my str $path = Session_file_path($id);
+func Cannoli_Session_destroy(str $id) void {
+    my str $path = ::file_path($id);
     if (sys::is_file($path) == 1) {
         sys::unlink($path);
     }
 }
 
 # Get a value from session
-func Session_get(scalar $session, str $key) scalar {
+func Cannoli_Session_get(scalar $session, str $key) scalar {
     my scalar $data = $session->{"data"};
     if (exists(%{$data}, $key)) {
         return $data->{$key};
@@ -210,14 +212,14 @@ func Session_get(scalar $session, str $key) scalar {
 }
 
 # Set a value in session
-func Session_set(scalar $session, str $key, scalar $value) void {
+func Cannoli_Session_set(scalar $session, str $key, scalar $value) void {
     my scalar $data = $session->{"data"};
     $data->{$key} = $value;
 }
 
 # Delete a value from session
 # Note: Sets value to undef rather than removing key
-func Session_delete(scalar $session, str $key) void {
+func Cannoli_Session_delete(scalar $session, str $key) void {
     my scalar $data = $session->{"data"};
     if (exists(%{$data}, $key)) {
         $data->{$key} = undef;
@@ -225,7 +227,7 @@ func Session_delete(scalar $session, str $key) void {
 }
 
 # Check if session has a key
-func Session_has(scalar $session, str $key) int {
+func Cannoli_Session_has(scalar $session, str $key) int {
     my scalar $data = $session->{"data"};
     if (exists(%{$data}, $key)) {
         return 1;
@@ -234,22 +236,22 @@ func Session_has(scalar $session, str $key) int {
 }
 
 # Get session ID
-func Session_id(scalar $session) str {
+func Cannoli_Session_id(scalar $session) str {
     return $session->{"id"};
 }
 
 # Get cookie name
-func Session_cookie_name() str {
+func Cannoli_Session_cookie_name() str {
     return $g_session_cookie;
 }
 
 # Get TTL
-func Session_ttl() int {
+func Cannoli_Session_ttl() int {
     return $g_session_ttl;
 }
 
 # Encode a value for storage (escape newlines and equals)
-func Session_encode_value(scalar $value) str {
+func Cannoli_Session_encode_value(scalar $value) str {
     if (!defined($value)) {
         return "";
     }
@@ -281,7 +283,7 @@ func Session_encode_value(scalar $value) str {
 }
 
 # Decode a stored value
-func Session_decode_value(str $s) str {
+func Cannoli_Session_decode_value(str $s) str {
     my str $result = "";
     my int $i = 0;
     my int $len = length($s);
@@ -314,7 +316,7 @@ func Session_decode_value(str $s) str {
 }
 
 # Clean up expired sessions (call periodically)
-func Session_cleanup() int {
+func Cannoli_Session_cleanup() int {
     if (sys::is_dir($g_session_dir) == 0) {
         return 0;
     }

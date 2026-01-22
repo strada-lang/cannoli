@@ -14,6 +14,8 @@
  You should have received a copy of the GNU General Public License 
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+package Cannoli::Router;
+
 
 # cannoli/src/router.strada - URL Router with regex support
 #
@@ -29,7 +31,7 @@
 #   Cannoli::Router::post($router, "/api/submit", \&submit_handler);
 
 # Create a new router
-func Router_new() scalar {
+func Cannoli_Router_new() scalar {
     my hash %router = ();
     $router{"routes"} = [];
     $router{"not_found_handler"} = undef;
@@ -41,27 +43,27 @@ func Router_new() scalar {
 }
 
 # Add global middleware (runs before route handler)
-func Router_use(scalar $router, scalar $middleware) void {
+func Cannoli_Router_use(scalar $router, scalar $middleware) void {
     push(@{$router->{"global_middleware"}}, $middleware);
 }
 
 # Add global after-middleware (runs after route handler)
-func Router_use_after(scalar $router, scalar $middleware) void {
+func Cannoli_Router_use_after(scalar $router, scalar $middleware) void {
     push(@{$router->{"after_middleware"}}, $middleware);
 }
 
 # Internal: Add a route
-func Router_add_route(scalar $router, str $method, str $pattern, scalar $handler) void {
-    Router_add_route_full($router, $method, $pattern, $handler, 0, undef);
+func Cannoli_Router_add_route(scalar $router, str $method, str $pattern, scalar $handler) void {
+    ::add_route_full($router, $method, $pattern, $handler, 0, undef);
 }
 
 # Internal: Add a route with Cannoli flag
-func Router_add_route_ex(scalar $router, str $method, str $pattern, scalar $handler, int $use_cannoli) void {
-    Router_add_route_full($router, $method, $pattern, $handler, $use_cannoli, undef);
+func Cannoli_Router_add_route_ex(scalar $router, str $method, str $pattern, scalar $handler, int $use_cannoli) void {
+    ::add_route_full($router, $method, $pattern, $handler, $use_cannoli, undef);
 }
 
 # Internal: Add a route with Cannoli flag and middleware
-func Router_add_route_full(scalar $router, str $method, str $pattern, scalar $handler, int $use_cannoli, scalar $middleware) void {
+func Cannoli_Router_add_route_full(scalar $router, str $method, str $pattern, scalar $handler, int $use_cannoli, scalar $middleware) void {
     my hash %route = ();
     $route{"method"} = $method;
     $route{"handler"} = $handler;
@@ -70,16 +72,16 @@ func Router_add_route_full(scalar $router, str $method, str $pattern, scalar $ha
     $route{"param_names"} = [];
 
     # Check for named parameters like :id, :name
-    my int $has_named = Router_contains_named_params($pattern);
+    my int $has_named = ::contains_named_params($pattern);
 
     if ($has_named == 1) {
         # Extract parameter names and convert to regex
-        $route{"param_names"} = Router_extract_param_names($pattern);
-        $route{"pattern"} = Router_convert_named_params($pattern);
+        $route{"param_names"} = ::extract_param_names($pattern);
+        $route{"pattern"} = ::convert_named_params($pattern);
         $route{"is_regex"} = 1;  # Named params require regex matching
     } else {
         $route{"pattern"} = $pattern;
-        $route{"is_regex"} = Router_contains_regex_chars($pattern);
+        $route{"is_regex"} = ::contains_regex_chars($pattern);
     }
 
     # Store route-specific middleware
@@ -94,7 +96,7 @@ func Router_add_route_full(scalar $router, str $method, str $pattern, scalar $ha
 }
 
 # Check if pattern contains regex special characters
-func Router_contains_regex_chars(str $pattern) int {
+func Cannoli_Router_contains_regex_chars(str $pattern) int {
     # Check for common regex patterns
     if (index($pattern, "(") >= 0) { return 1; }
     if (index($pattern, "[") >= 0) { return 1; }
@@ -109,13 +111,13 @@ func Router_contains_regex_chars(str $pattern) int {
 }
 
 # Check if pattern contains named parameters (e.g., :id, :name)
-func Router_contains_named_params(str $pattern) int {
+func Cannoli_Router_contains_named_params(str $pattern) int {
     if (index($pattern, ":") >= 0) { return 1; }
     return 0;
 }
 
 # Extract parameter names from pattern (e.g., "/users/:id/posts/:post_id" -> ["id", "post_id"])
-func Router_extract_param_names(str $pattern) scalar {
+func Cannoli_Router_extract_param_names(str $pattern) scalar {
     my array @names = ();
     my int $len = length($pattern);
     my int $i = 0;
@@ -149,7 +151,7 @@ func Router_extract_param_names(str $pattern) scalar {
 }
 
 # Convert named params to regex: "/users/:id/posts/:post_id" -> "/users/([^/]+)/posts/([^/]+)"
-func Router_convert_named_params(str $pattern) str {
+func Cannoli_Router_convert_named_params(str $pattern) str {
     my str $result = "";
     my int $len = length($pattern);
     my int $i = 0;
@@ -180,49 +182,49 @@ func Router_convert_named_params(str $pattern) str {
 }
 
 # Add GET route
-func Router_get(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route($router, "GET", $pattern, $handler);
+func Cannoli_Router_get(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route($router, "GET", $pattern, $handler);
 }
 
 # Add POST route
-func Router_post(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route($router, "POST", $pattern, $handler);
+func Cannoli_Router_post(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route($router, "POST", $pattern, $handler);
 }
 
 # Add PUT route
-func Router_put(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route($router, "PUT", $pattern, $handler);
+func Cannoli_Router_put(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route($router, "PUT", $pattern, $handler);
 }
 
 # Add DELETE route
-func Router_delete_route(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route($router, "DELETE", $pattern, $handler);
+func Cannoli_Router_delete_route(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route($router, "DELETE", $pattern, $handler);
 }
 
 # Add route for any method
-func Router_any(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route($router, "*", $pattern, $handler);
+func Cannoli_Router_any(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route($router, "*", $pattern, $handler);
 }
 
 # Set 404 handler
-func Router_set_not_found(scalar $router, scalar $handler) void {
+func Cannoli_Router_set_not_found(scalar $router, scalar $handler) void {
     $router->{"not_found_handler"} = $handler;
 }
 
 # Set error handler (generic catch-all)
-func Router_set_error_handler(scalar $router, scalar $handler) void {
+func Cannoli_Router_set_error_handler(scalar $router, scalar $handler) void {
     $router->{"error_handler"} = $handler;
 }
 
 # Set error handler for specific status code (404, 500, etc.)
-func Router_set_error_code_handler(scalar $router, int $code, scalar $handler) void {
+func Cannoli_Router_set_error_code_handler(scalar $router, int $code, scalar $handler) void {
     my scalar $handlers = $router->{"error_code_handlers"};
     my str $code_key = "" . $code;
     $handlers->{$code_key} = $handler;
 }
 
 # Get error handler for a specific code
-func Router_get_error_handler(scalar $router, int $code) scalar {
+func Cannoli_Router_get_error_handler(scalar $router, int $code) scalar {
     my scalar $handlers = $router->{"error_code_handlers"};
     my str $code_key = "" . $code;
     if (exists(%{$handlers}, $code_key)) {
@@ -236,33 +238,33 @@ func Router_get_error_handler(scalar $router, int $code) scalar {
 #
 
 # Add GET route with Cannoli handler
-func Router_get_c(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route_ex($router, "GET", $pattern, $handler, 1);
+func Cannoli_Router_get_c(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route_ex($router, "GET", $pattern, $handler, 1);
 }
 
 # Add POST route with Cannoli handler
-func Router_post_c(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route_ex($router, "POST", $pattern, $handler, 1);
+func Cannoli_Router_post_c(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route_ex($router, "POST", $pattern, $handler, 1);
 }
 
 # Add PUT route with Cannoli handler
-func Router_put_c(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route_ex($router, "PUT", $pattern, $handler, 1);
+func Cannoli_Router_put_c(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route_ex($router, "PUT", $pattern, $handler, 1);
 }
 
 # Add DELETE route with Cannoli handler
-func Router_delete_c(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route_ex($router, "DELETE", $pattern, $handler, 1);
+func Cannoli_Router_delete_c(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route_ex($router, "DELETE", $pattern, $handler, 1);
 }
 
 # Add PATCH route with Cannoli handler
-func Router_patch_c(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route_ex($router, "PATCH", $pattern, $handler, 1);
+func Cannoli_Router_patch_c(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route_ex($router, "PATCH", $pattern, $handler, 1);
 }
 
 # Add route for any method with Cannoli handler
-func Router_any_c(scalar $router, str $pattern, scalar $handler) void {
-    Router_add_route_ex($router, "*", $pattern, $handler, 1);
+func Cannoli_Router_any_c(scalar $router, str $pattern, scalar $handler) void {
+    ::add_route_ex($router, "*", $pattern, $handler, 1);
 }
 
 #
@@ -270,37 +272,37 @@ func Router_any_c(scalar $router, str $pattern, scalar $handler) void {
 #
 
 # Add GET route with Cannoli handler and middleware
-func Router_get_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
-    Router_add_route_full($router, "GET", $pattern, $handler, 1, $middleware);
+func Cannoli_Router_get_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
+    ::add_route_full($router, "GET", $pattern, $handler, 1, $middleware);
 }
 
 # Add POST route with Cannoli handler and middleware
-func Router_post_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
-    Router_add_route_full($router, "POST", $pattern, $handler, 1, $middleware);
+func Cannoli_Router_post_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
+    ::add_route_full($router, "POST", $pattern, $handler, 1, $middleware);
 }
 
 # Add PUT route with Cannoli handler and middleware
-func Router_put_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
-    Router_add_route_full($router, "PUT", $pattern, $handler, 1, $middleware);
+func Cannoli_Router_put_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
+    ::add_route_full($router, "PUT", $pattern, $handler, 1, $middleware);
 }
 
 # Add DELETE route with Cannoli handler and middleware
-func Router_delete_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
-    Router_add_route_full($router, "DELETE", $pattern, $handler, 1, $middleware);
+func Cannoli_Router_delete_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
+    ::add_route_full($router, "DELETE", $pattern, $handler, 1, $middleware);
 }
 
 # Add PATCH route with Cannoli handler and middleware
-func Router_patch_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
-    Router_add_route_full($router, "PATCH", $pattern, $handler, 1, $middleware);
+func Cannoli_Router_patch_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
+    ::add_route_full($router, "PATCH", $pattern, $handler, 1, $middleware);
 }
 
 # Add route for any method with Cannoli handler and middleware
-func Router_any_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
-    Router_add_route_full($router, "*", $pattern, $handler, 1, $middleware);
+func Cannoli_Router_any_m(scalar $router, str $pattern, scalar $handler, scalar $middleware) void {
+    ::add_route_full($router, "*", $pattern, $handler, 1, $middleware);
 }
 
 # Match a request against routes and return the matching route
-func Router_match(scalar $router, hash %req) scalar {
+func Cannoli_Router_match(scalar $router, hash %req) scalar {
     my str $method = $req{"method"};
     my str $path = $req{"path"};
     my scalar $routes = $router->{"routes"};
@@ -377,7 +379,7 @@ func Router_match(scalar $router, hash %req) scalar {
 # $c: Cannoli object
 # $idx: current index in middleware array
 # $final_handler: the route handler to call after all middleware
-func Router_run_middleware_chain(scalar $middlewares, scalar $c, int $idx, scalar $final_handler) hash {
+func Cannoli_Router_run_middleware_chain(scalar $middlewares, scalar $c, int $idx, scalar $final_handler) hash {
     my int $num_middleware = scalar(@{$middlewares});
 
     # If we've run all middleware, call the final handler
@@ -391,7 +393,7 @@ func Router_run_middleware_chain(scalar $middlewares, scalar $c, int $idx, scala
 
     # Create the next function that continues the chain
     my scalar $next_fn = func (scalar $ctx) {
-        return Router_run_middleware_chain($middlewares, $ctx, $idx + 1, $final_handler);
+        return ::run_middleware_chain($middlewares, $ctx, $idx + 1, $final_handler);
     };
 
     # Call middleware with context and next function
@@ -399,15 +401,15 @@ func Router_run_middleware_chain(scalar $middlewares, scalar $c, int $idx, scala
 }
 
 # Dispatch a request to the appropriate handler (with middleware support)
-func Router_dispatch(scalar $router, hash %req) hash {
-    my scalar $match_result = Router_match($router, %req);
+func Cannoli_Router_dispatch(scalar $router, hash %req) hash {
+    my scalar $match_result = ::match($router, %req);
 
     if (!defined($match_result)) {
         # No route matched - check for custom 404 handlers
         # First try error code handler
-        my scalar $code_handler = Router_get_error_handler($router, 404);
+        my scalar $code_handler = ::get_error_handler($router, 404);
         if (defined($code_handler)) {
-            my scalar $c = Cannoli_new(%req);
+            my scalar $c = Cannoli::new(%req);
             $c->{"_error_code"} = 404;
             $code_handler->($c);
             return $c->build_response();
@@ -420,7 +422,7 @@ func Router_dispatch(scalar $router, hash %req) hash {
         }
 
         # Default 404 response
-        return Response_not_found();
+        return Cannoli::Response::not_found();
     }
 
     # Get the matched route and captures
@@ -460,7 +462,7 @@ func Router_dispatch(scalar $router, hash %req) hash {
     try {
         if ($use_cannoli == 1) {
             # Cannoli-style handler: receives Cannoli object
-            my scalar $c = Cannoli_new(%req);
+            my scalar $c = Cannoli::new(%req);
 
             # Build middleware chain: global -> route-specific -> handler
             my array @all_middleware = ();
@@ -485,7 +487,7 @@ func Router_dispatch(scalar $router, hash %req) hash {
 
             # If there's middleware, run the chain
             if (scalar(@all_middleware) > 0) {
-                my hash %result = Router_run_middleware_chain(\@all_middleware, $c, 0, $handler);
+                my hash %result = ::run_middleware_chain(\@all_middleware, $c, 0, $handler);
 
                 # Run after-middleware (doesn't affect response, just for cleanup/logging)
                 my scalar $after_mw = $router->{"after_middleware"};
@@ -521,9 +523,9 @@ func Router_dispatch(scalar $router, hash %req) hash {
     } catch ($error) {
         # Handler threw an exception - use 500 error handler
         # First try error code handler
-        my scalar $code_handler = Router_get_error_handler($router, 500);
+        my scalar $code_handler = ::get_error_handler($router, 500);
         if (defined($code_handler)) {
-            my scalar $c = Cannoli_new(%req);
+            my scalar $c = Cannoli::new(%req);
             $c->{"_error_code"} = 500;
             $c->{"_error_message"} = $error;
             $code_handler->($c);
@@ -538,12 +540,12 @@ func Router_dispatch(scalar $router, hash %req) hash {
         }
 
         # Default 500 response
-        return Response_internal_error($error);
+        return Cannoli::Response::internal_error($error);
     }
 }
 
 # Print all registered routes (for debugging)
-func Router_dump_routes(scalar $router) void {
+func Cannoli_Router_dump_routes(scalar $router) void {
     say("=== Registered Routes ===");
     my scalar $routes = $router->{"routes"};
     my int $num_routes = scalar(@{$routes});
@@ -590,9 +592,9 @@ func Router_dump_routes(scalar $router) void {
 }
 
 # Group routes under a common prefix
-func Router_group(scalar $router, str $prefix, scalar $setup_func) void {
+func Cannoli_Router_group(scalar $router, str $prefix, scalar $setup_func) void {
     # Create a sub-router that prefixes all patterns
-    my scalar $sub_router = Router_new();
+    my scalar $sub_router = ::new();
 
     # Call the setup function to register routes on sub-router
     $setup_func->($sub_router);
@@ -605,13 +607,13 @@ func Router_group(scalar $router, str $prefix, scalar $setup_func) void {
     while ($i < $num) {
         my scalar $route = $sub_routes->[$i];
         my str $pattern = $prefix . $route->{"pattern"};
-        Router_add_route($router, $route->{"method"}, $pattern, $route->{"handler"});
+        ::add_route($router, $route->{"method"}, $pattern, $route->{"handler"});
         $i = $i + 1;
     }
 }
 
 # Guess content type from file extension
-func Router_guess_content_type(str $filename) str {
+func Cannoli_Router_guess_content_type(str $filename) str {
     my str $ext = sys::file_ext($filename);
 
     if ($ext eq "html" || $ext eq "htm") { return "text/html; charset=utf-8"; }
@@ -636,8 +638,8 @@ func Router_guess_content_type(str $filename) str {
 # ============================================================
 
 # Compression middleware - automatically compresses responses
-# Usage: Router_use($router, \&Router_compression_middleware);
-func Router_compression_middleware(scalar $c, scalar $next_fn) hash {
+# Usage: Cannoli::Router::use($router, \&Cannoli_Router_compression_middleware);
+func Cannoli_Router_compression_middleware(scalar $c, scalar $next_fn) hash {
     # Enable auto-compression based on Accept-Encoding
     $c->auto_compress();
 
@@ -646,8 +648,8 @@ func Router_compression_middleware(scalar $c, scalar $next_fn) hash {
 }
 
 # Logging middleware - logs all requests
-# Usage: Router_use($router, \&Router_logging_middleware);
-func Router_logging_middleware(scalar $c, scalar $next_fn) hash {
+# Usage: Cannoli::Router::use($router, \&Cannoli_Router_logging_middleware);
+func Cannoli_Router_logging_middleware(scalar $c, scalar $next_fn) hash {
     my str $method = $c->method();
     my str $path = $c->path();
     my str $remote = $c->remote_addr();
@@ -660,8 +662,8 @@ func Router_logging_middleware(scalar $c, scalar $next_fn) hash {
 }
 
 # CORS middleware - adds CORS headers
-# Usage: Router_use($router, Router_cors_middleware("*"));
-func Router_cors_middleware(str $origin) scalar {
+# Usage: Cannoli::Router::use($router, Cannoli::Router::cors_middleware("*"));
+func Cannoli_Router_cors_middleware(str $origin) scalar {
     return func (scalar $c, scalar $next_fn) {
         # Add CORS headers
         $c->set_header("Access-Control-Allow-Origin", $origin);
@@ -679,8 +681,8 @@ func Router_cors_middleware(str $origin) scalar {
 }
 
 # Session middleware - ensures session is saved after request
-# Usage: Router_use_after($router, \&Router_session_middleware);
-func Router_session_middleware(scalar $c) void {
+# Usage: Cannoli::Router::use_after($router, \&Cannoli_Router_session_middleware);
+func Cannoli_Router_session_middleware(scalar $c) void {
     # Save session if it was accessed
     $c->session_save();
 }
@@ -699,10 +701,10 @@ my hash %g_rate_limits = ();
 # $key: optional key for different limiters (default: "default")
 #
 # Usage:
-#   Router_use($router, Router_rate_limit(100, 60));  # 100 req/min
-#   Router_use($router, Router_rate_limit(10, 60, "api"));  # 10 req/min for API
+#   Cannoli::Router::use($router, Cannoli::Router::rate_limit(100, 60));  # 100 req/min
+#   Cannoli::Router::use($router, Cannoli::Router::rate_limit(10, 60, "api"));  # 10 req/min for API
 #
-func Router_rate_limit(int $requests, int $window, str $key) scalar {
+func Cannoli_Router_rate_limit(int $requests, int $window, str $key) scalar {
     if (length($key) == 0) {
         $key = "default";
     }
@@ -766,9 +768,9 @@ func Router_rate_limit(int $requests, int $window, str $key) scalar {
 }
 
 # Simple rate limit middleware with default key
-# Usage: Router_use($router, Router_rate_limit_simple(100, 60));  # 100 req/min
-func Router_rate_limit_simple(int $requests, int $window) scalar {
-    return Router_rate_limit($requests, $window, "default");
+# Usage: Cannoli::Router::use($router, Cannoli::Router::rate_limit_simple(100, 60));  # 100 req/min
+func Cannoli_Router_rate_limit_simple(int $requests, int $window) scalar {
+    return ::rate_limit($requests, $window, "default");
 }
 
 # Note: rate_limit_path removed due to compiler bug with regex interpolation
@@ -776,7 +778,7 @@ func Router_rate_limit_simple(int $requests, int $window) scalar {
 # manually in your middleware if needed.
 
 # Clear rate limit for an IP (useful for testing or after successful auth)
-func Router_rate_limit_clear(str $ip, str $key) void {
+func Cannoli_Router_rate_limit_clear(str $ip, str $key) void {
     if (length($key) == 0) {
         $key = "default";
     }
@@ -788,7 +790,7 @@ func Router_rate_limit_clear(str $ip, str $key) void {
 }
 
 # Get current rate limit status for an IP
-func Router_rate_limit_status(str $ip, str $key) scalar {
+func Cannoli_Router_rate_limit_status(str $ip, str $key) scalar {
     if (length($key) == 0) {
         $key = "default";
     }
@@ -804,8 +806,8 @@ func Router_rate_limit_status(str $ip, str $key) scalar {
 # ============================================================
 
 # Basic auth middleware with simple username/password check
-# Usage: Router_use($router, Router_basic_auth("admin", "secret", "Admin Area"));
-func Router_basic_auth(str $username, str $password, str $realm) scalar {
+# Usage: Cannoli::Router::use($router, Cannoli::Router::basic_auth("admin", "secret", "Admin Area"));
+func Cannoli_Router_basic_auth(str $username, str $password, str $realm) scalar {
     if (length($realm) == 0) {
         $realm = "Protected Area";
     }
@@ -819,9 +821,9 @@ func Router_basic_auth(str $username, str $password, str $realm) scalar {
 }
 
 # Basic auth middleware with validator callback
-# Usage: Router_use($router, Router_basic_auth_validate(\&check_user, "Members Only"));
+# Usage: Cannoli::Router::use($router, Cannoli::Router::basic_auth_validate(\&check_user, "Members Only"));
 # Validator receives (username, password) and returns 1 if valid
-func Router_basic_auth_validate(scalar $validator, str $realm) scalar {
+func Cannoli_Router_basic_auth_validate(scalar $validator, str $realm) scalar {
     if (length($realm) == 0) {
         $realm = "Protected Area";
     }
@@ -835,9 +837,9 @@ func Router_basic_auth_validate(scalar $validator, str $realm) scalar {
 }
 
 # Basic auth middleware with user hash lookup
-# Usage: Router_use($router, Router_basic_auth_users(\%users, "Admin Panel"));
+# Usage: Cannoli::Router::use($router, Cannoli::Router::basic_auth_users(\%users, "Admin Panel"));
 # Users hash: {"username" => "password", ...}
-func Router_basic_auth_users(scalar $users, str $realm) scalar {
+func Cannoli_Router_basic_auth_users(scalar $users, str $realm) scalar {
     if (length($realm) == 0) {
         $realm = "Protected Area";
     }

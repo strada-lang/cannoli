@@ -5,9 +5,9 @@
 #   2. cannoli_perl.so   - Main dispatch logic (Strada + C wrapper)
 
 # Paths
-STRADA_ROOT = ../../..
-STRADA_RUNTIME = $(STRADA_ROOT)/runtime
-STRADAC = $(STRADA_ROOT)/stradac
+STRADA_ROOT = /usr/local
+STRADA_RUNTIME = $(STRADA_ROOT)/lib/strada/runtime
+STRADAC = $(STRADA_ROOT)/bin/stradac
 
 # Get Perl compile flags
 PERL_CCOPTS := $(shell perl -MExtUtils::Embed -e ccopts 2>/dev/null)

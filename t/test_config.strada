@@ -19,7 +19,7 @@
 
 func test_defaults() int {
     say("Testing defaults...");
-    my hash %config = Config_defaults();
+    my hash %config = Cannoli::Config::defaults();
 
     if ($config{"server.port"} ne "8080") {
         say("  FAIL: default port should be 8080");
@@ -40,13 +40,13 @@ func test_get_int() int {
     my hash %config = ();
     $config{"test.value"} = "42";
 
-    my int $val = Config_get_int(%config, "test.value", 0);
+    my int $val = Cannoli::Config::get_int(%config, "test.value", 0);
     if ($val != 42) {
         say("  FAIL: expected 42, got " . $val);
         return 1;
     }
 
-    my int $default = Config_get_int(%config, "missing", 99);
+    my int $default = Cannoli::Config::get_int(%config, "missing", 99);
     if ($default != 99) {
         say("  FAIL: expected default 99, got " . $default);
         return 1;
@@ -66,27 +66,27 @@ func test_get_bool() int {
     $config{"bool.false2"} = "false";
     $config{"bool.false3"} = "no";
 
-    if (Config_get_bool(%config, "bool.true1", 0) != 1) {
+    if (Cannoli::Config::get_bool(%config, "bool.true1", 0) != 1) {
         say("  FAIL: '1' should be true");
         return 1;
     }
-    if (Config_get_bool(%config, "bool.true2", 0) != 1) {
+    if (Cannoli::Config::get_bool(%config, "bool.true2", 0) != 1) {
         say("  FAIL: 'true' should be true");
         return 1;
     }
-    if (Config_get_bool(%config, "bool.true3", 0) != 1) {
+    if (Cannoli::Config::get_bool(%config, "bool.true3", 0) != 1) {
         say("  FAIL: 'yes' should be true");
         return 1;
     }
-    if (Config_get_bool(%config, "bool.false1", 1) != 0) {
+    if (Cannoli::Config::get_bool(%config, "bool.false1", 1) != 0) {
         say("  FAIL: '0' should be false");
         return 1;
     }
-    if (Config_get_bool(%config, "bool.false2", 1) != 0) {
+    if (Cannoli::Config::get_bool(%config, "bool.false2", 1) != 0) {
         say("  FAIL: 'false' should be false");
         return 1;
     }
-    if (Config_get_bool(%config, "bool.false3", 1) != 0) {
+    if (Cannoli::Config::get_bool(%config, "bool.false3", 1) != 0) {
         say("  FAIL: 'no' should be false");
         return 1;
     }
