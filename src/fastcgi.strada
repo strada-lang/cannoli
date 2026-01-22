@@ -400,6 +400,7 @@ func Cannoli_FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_reques
 func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int {
     # For now, use TCP port 9000 (standard FastCGI port)
     # socket_path is ignored - would need Unix socket support in runtime
+    length($socket_path);
     my int $port = 9000;
 
     my int $fd = sys::socket_server($port, 128);

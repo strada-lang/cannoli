@@ -835,11 +835,13 @@ my scalar $_g_server_ref = undef;
 
 # Worker signal handler for SIGTERM - exit cleanly
 func Cannoli_Server_worker_handle_term(int $sig) void {
+    defined($sig);
     exit(0);
 }
 
 # Signal handler for SIGINT (Ctrl+C)
 func Cannoli_Server_handle_sigint(int $sig) void {
+    defined($sig);
     if (defined($_g_server_ref)) {
         ::graceful_shutdown($_g_server_ref);
     }
@@ -847,6 +849,7 @@ func Cannoli_Server_handle_sigint(int $sig) void {
 
 # Signal handler for SIGTERM
 func Cannoli_Server_handle_sigterm(int $sig) void {
+    defined($sig);
     if (defined($_g_server_ref)) {
         ::graceful_shutdown($_g_server_ref);
     }

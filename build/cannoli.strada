@@ -1097,6 +1097,7 @@ func Cannoli_Template_merge_scope(scalar $parent_vars, scalar $obj) scalar {
 # Dump a value for debugging (returns formatted string)
 # Simple implementation: shows type and top-level contents
 func Cannoli_Template_dump(scalar $val, int $indent) str {
+    defined($indent);
     if (!defined($val)) {
         return "undef";
     }
@@ -4557,6 +4558,7 @@ func Cannoli_filename(scalar $self) str {
 
 # $r->unescape(text) - URL decode
 func Cannoli_unescape(scalar $self, str $text) str {
+    defined($self);
     return Cannoli_url_decode($text);
 }
 
@@ -5114,6 +5116,7 @@ func Cannoli_error_message(scalar $self) str {
 
 # Throw an exception (will be caught by error handler)
 func Cannoli_throw_error(scalar $self, str $message) void {
+    defined($self);
     throw $message;
 }
 
@@ -7605,11 +7608,13 @@ my scalar $_g_server_ref = undef;
 
 # Worker signal handler for SIGTERM - exit cleanly
 func Cannoli_Server_worker_handle_term(int $sig) void {
+    defined($sig);
     exit(0);
 }
 
 # Signal handler for SIGINT (Ctrl+C)
 func Cannoli_Server_handle_sigint(int $sig) void {
+    defined($sig);
     if (defined($_g_server_ref)) {
         ::graceful_shutdown($_g_server_ref);
     }
@@ -7617,6 +7622,7 @@ func Cannoli_Server_handle_sigint(int $sig) void {
 
 # Signal handler for SIGTERM
 func Cannoli_Server_handle_sigterm(int $sig) void {
+    defined($sig);
     if (defined($_g_server_ref)) {
         ::graceful_shutdown($_g_server_ref);
     }
@@ -8272,6 +8278,7 @@ func Cannoli_FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_reques
 func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int {
     # For now, use TCP port 9000 (standard FastCGI port)
     # socket_path is ignored - would need Unix socket support in runtime
+    length($socket_path);
     my int $port = 9000;
 
     my int $fd = sys::socket_server($port, 128);
@@ -8687,6 +8694,7 @@ func Cannoli_Main_print_version() void {
 # Handler functions for the demo app
 
 func Cannoli_Main_handle_home(hash %req) hash {
+    exists(%req, "__unused__");
     my str $html = "<!DOCTYPE html>\n";
     $html = $html . "<html>\n<head>\n";
     $html = $html . "<title>Welcome to Cannoli</title>\n";
@@ -8712,6 +8720,7 @@ func Cannoli_Main_handle_home(hash %req) hash {
 }
 
 func Cannoli_Main_handle_hello(hash %req) hash {
+    exists(%req, "__unused__");
     return Cannoli::Response::text(200, "Hello, World!");
 }
 
@@ -8725,6 +8734,7 @@ func Cannoli_Main_handle_static_request(hash %req) hash {
 }
 
 func Cannoli_Main_handle_json(hash %req) hash {
+    exists(%req, "__unused__");
     my str $json = "{\"message\":\"Hello from Cannoli\",\"status\":\"ok\",\"version\":\"1.0.0\"}";
     return Cannoli::Response::json(200, $json);
 }

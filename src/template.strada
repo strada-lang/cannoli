@@ -388,6 +388,7 @@ func Cannoli_Template_merge_scope(scalar $parent_vars, scalar $obj) scalar {
 # Dump a value for debugging (returns formatted string)
 # Simple implementation: shows type and top-level contents
 func Cannoli_Template_dump(scalar $val, int $indent) str {
+    defined($indent);
     if (!defined($val)) {
         return "undef";
     }

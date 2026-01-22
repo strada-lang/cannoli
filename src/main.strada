@@ -120,6 +120,7 @@ func Cannoli_Main_print_version() void {
 # Handler functions for the demo app
 
 func Cannoli_Main_handle_home(hash %req) hash {
+    exists(%req, "__unused__");
     my str $html = "<!DOCTYPE html>\n";
     $html = $html . "<html>\n<head>\n";
     $html = $html . "<title>Welcome to Cannoli</title>\n";
@@ -145,6 +146,7 @@ func Cannoli_Main_handle_home(hash %req) hash {
 }
 
 func Cannoli_Main_handle_hello(hash %req) hash {
+    exists(%req, "__unused__");
     return Cannoli::Response::text(200, "Hello, World!");
 }
 
@@ -158,6 +160,7 @@ func Cannoli_Main_handle_static_request(hash %req) hash {
 }
 
 func Cannoli_Main_handle_json(hash %req) hash {
+    exists(%req, "__unused__");
     my str $json = "{\"message\":\"Hello from Cannoli\",\"status\":\"ok\",\"version\":\"1.0.0\"}";
     return Cannoli::Response::json(200, $json);
 }

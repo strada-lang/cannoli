@@ -389,6 +389,7 @@ func Cannoli_filename(scalar $self) str {
 
 # $r->unescape(text) - URL decode
 func Cannoli_unescape(scalar $self, str $text) str {
+    defined($self);
     return Cannoli_url_decode($text);
 }
 
@@ -946,6 +947,7 @@ func Cannoli_error_message(scalar $self) str {
 
 # Throw an exception (will be caught by error handler)
 func Cannoli_throw_error(scalar $self, str $message) void {
+    defined($self);
     throw $message;
 }
 
