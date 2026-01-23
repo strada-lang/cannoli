@@ -4102,6 +4102,17 @@ func Cannoli_Response_empty() hash {
     return %res;
 }
 
+# Create an empty response with status for logging
+func Cannoli_Response_sent(int $status = 200) hash {
+    my hash %res = ();
+    $res{"status"} = $status;
+    $res{"headers"} = {};
+    $res{"body"} = "";
+    $res{"sent"} = 1;
+    $res{"_chunked"} = 1;
+    return %res;
+}
+
 # Check if response is chunked
 func Cannoli_Response_is_chunked(hash %res) int {
     if (exists(%res, "_chunked")) {
@@ -4166,6 +4177,583 @@ func Cannoli_Response_is_compressed(hash %res) int {
         return 1;
     }
     return 0;
+}
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+package Cannoli::WebSocket;
+
+
+# cannoli/src/websocket.strada - Basic WebSocket support
+#
+# Provides handshake helpers and simple frame send/receive utilities.
+
+# WebSocket GUID for Sec-WebSocket-Accept
+func Cannoli_WebSocket_guid() str {
+    return "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+}
+
+# Check if request looks like a WebSocket upgrade
+func Cannoli_WebSocket_is_upgrade_request(hash %req) int {
+    my str $method = $req{"method"};
+    if ($method ne "GET") {
+        return 0;
+    }
+
+    my str $upgrade = lc(Cannoli::Request::get_header(%req, "Upgrade"));
+    my str $connection = lc(Cannoli::Request::get_header(%req, "Connection"));
+
+    if ($upgrade ne "websocket") {
+        return 0;
+    }
+    if (index($connection, "upgrade") < 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+# Create a WebSocket connection from a request hash
+func Cannoli_WebSocket_from_request(hash %req) scalar {
+    my hash %ws = ();
+
+    $ws{"_buffer"} = "";
+    $ws{"_ssl"} = 0;
+    $ws{"_client"} = undef;
+
+    if (exists(%req, "_ssl") && $req{"_ssl"} == 1) {
+        $ws{"_ssl"} = 1;
+        $ws{"_ssl_conn"} = $req{"_ssl_conn"};
+        $ws{"_ssl_read_fn"} = $req{"_ssl_read_fn"};
+        $ws{"_ssl_write_fn"} = $req{"_ssl_write_fn"};
+        $ws{"_ssl_close_fn"} = $req{"_ssl_close_fn"};
+    } else {
+        $ws{"_client"} = $req{"_client"};
+        $ws{"_fd"} = $req{"_fd"};
+    }
+
+    return \%ws;
+}
+
+# Perform WebSocket handshake and return ws handle (undef on failure)
+func Cannoli_WebSocket_accept(hash %req, str $protocol = "") scalar {
+    if (::is_upgrade_request(%req) == 0) {
+        return undef;
+    }
+
+    my str $version = Cannoli::Request::get_header(%req, "Sec-WebSocket-Version");
+    if (length($version) > 0 && $version ne "13") {
+        return undef;
+    }
+
+    my str $key = Cannoli::Request::get_header(%req, "Sec-WebSocket-Key");
+    if (length($key) == 0) {
+        return undef;
+    }
+
+    my str $accept = ::make_accept($key);
+    my str $resp = "HTTP/1.1 101 Switching Protocols\r\n";
+    $resp = $resp . "Upgrade: websocket\r\n";
+    $resp = $resp . "Connection: Upgrade\r\n";
+    $resp = $resp . "Sec-WebSocket-Accept: " . $accept . "\r\n";
+
+    if (length($protocol) > 0) {
+        $resp = $resp . "Sec-WebSocket-Protocol: " . $protocol . "\r\n";
+    }
+
+    $resp = $resp . "\r\n";
+
+    my int $written = ::write_response(%req, $resp);
+    if ($written <= 0) {
+        return undef;
+    }
+
+    return ::from_request(%req);
+}
+
+# Send a text message (opcode 1)
+func Cannoli_WebSocket_send_text(scalar $ws, str $payload) int {
+    return ::send_frame($ws, 1, $payload);
+}
+
+# Send a binary message (opcode 2)
+func Cannoli_WebSocket_send_binary(scalar $ws, str $payload) int {
+    return ::send_frame($ws, 2, $payload);
+}
+
+# Send ping (opcode 9)
+func Cannoli_WebSocket_send_ping(scalar $ws, str $payload) int {
+    return ::send_frame($ws, 9, $payload);
+}
+
+# Send pong (opcode 10)
+func Cannoli_WebSocket_send_pong(scalar $ws, str $payload) int {
+    return ::send_frame($ws, 10, $payload);
+}
+
+# Send close frame (opcode 8)
+func Cannoli_WebSocket_send_close(scalar $ws, int $code, str $reason) int {
+    my str $payload = "";
+    if ($code > 0) {
+        $payload = ::pack_u16($code) . $reason;
+    }
+    return ::send_frame($ws, 8, $payload);
+}
+
+# Close connection (sends close frame then closes socket)
+func Cannoli_WebSocket_close(scalar $ws, int $code, str $reason) void {
+    ::send_close($ws, $code, $reason);
+    ::close_socket($ws);
+}
+
+# Receive a single frame, returns hash {fin, opcode, payload} or undef on EOF
+func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
+    # Ensure at least 2 bytes for header
+    if (::ensure_bytes($ws, 2) == 0) {
+        return undef;
+    }
+
+    my str $buffer = $ws->{"_buffer"};
+    my int $b1 = sys::get_byte($buffer, 0);
+    my int $b2 = sys::get_byte($buffer, 1);
+
+    my int $fin = $b1 / 128;
+    my int $opcode = $b1 % 16;
+    my int $masked = $b2 / 128;
+    my int $payload_len = $b2 % 128;
+    my int $offset = 2;
+
+    if ($payload_len == 126) {
+        if (::ensure_bytes($ws, $offset + 2) == 0) {
+            return undef;
+        }
+        $buffer = $ws->{"_buffer"};
+        my int $b3 = sys::get_byte($buffer, $offset);
+        my int $b4 = sys::get_byte($buffer, $offset + 1);
+        $payload_len = ($b3 * 256) + $b4;
+        $offset = $offset + 2;
+    } elsif ($payload_len == 127) {
+        if (::ensure_bytes($ws, $offset + 8) == 0) {
+            return undef;
+        }
+        $buffer = $ws->{"_buffer"};
+        my num $len = 0;
+        my int $i = 0;
+        while ($i < 8) {
+            my int $b = sys::get_byte($buffer, $offset + $i);
+            $len = ($len * 256) + $b;
+            $i = $i + 1;
+        }
+        $payload_len = $len;
+        $offset = $offset + 8;
+    }
+
+    my int $mask0 = 0;
+    my int $mask1 = 0;
+    my int $mask2 = 0;
+    my int $mask3 = 0;
+    if ($masked == 1) {
+        if (::ensure_bytes($ws, $offset + 4) == 0) {
+            return undef;
+        }
+        $buffer = $ws->{"_buffer"};
+        $mask0 = sys::get_byte($buffer, $offset);
+        $mask1 = sys::get_byte($buffer, $offset + 1);
+        $mask2 = sys::get_byte($buffer, $offset + 2);
+        $mask3 = sys::get_byte($buffer, $offset + 3);
+        $offset = $offset + 4;
+    }
+
+    if (::ensure_bytes($ws, $offset + $payload_len) == 0) {
+        return undef;
+    }
+    $buffer = $ws->{"_buffer"};
+
+    my str $payload = "";
+    if ($payload_len > 0) {
+        $payload = sys::byte_substr($buffer, $offset, $payload_len);
+    }
+
+    my int $remaining_start = $offset + $payload_len;
+    my int $remaining_len = sys::byte_length($buffer) - $remaining_start;
+    if ($remaining_len > 0) {
+        $ws->{"_buffer"} = sys::byte_substr($buffer, $remaining_start, $remaining_len);
+    } else {
+        $ws->{"_buffer"} = "";
+    }
+
+    if ($masked == 1 && $payload_len > 0) {
+        my str $decoded = "";
+        my int $i = 0;
+        while ($i < $payload_len) {
+            my int $byte = sys::get_byte($payload, $i);
+            my int $mask = 0;
+            my int $m = $i % 4;
+            if ($m == 0) { $mask = $mask0; }
+            elsif ($m == 1) { $mask = $mask1; }
+            elsif ($m == 2) { $mask = $mask2; }
+            else { $mask = $mask3; }
+            my int $out = ::xor8($byte, $mask);
+            $decoded = $decoded . chr($out);
+            $i = $i + 1;
+        }
+        $payload = $decoded;
+    }
+
+    my hash %frame = ();
+    $frame{"fin"} = $fin;
+    $frame{"opcode"} = $opcode;
+    $frame{"payload"} = $payload;
+    return \%frame;
+}
+
+# ============================================================
+# Internal helpers (binary/frame building)
+# ============================================================
+
+func Cannoli_WebSocket_send_frame(scalar $ws, int $opcode, str $payload) int {
+    my int $len = sys::byte_length($payload);
+    my int $byte1 = 128 + ($opcode % 16);
+    my str $header = chr($byte1);
+
+    if ($len <= 125) {
+        $header = $header . chr($len);
+    } elsif ($len <= 65535) {
+        $header = $header . chr(126) . ::pack_u16($len);
+    } else {
+        $header = $header . chr(127) . ::pack_u64($len);
+    }
+
+    return ::write_ws($ws, $header . $payload);
+}
+
+func Cannoli_WebSocket_pack_u16(int $value) str {
+    return sys::pack("n", $value);
+}
+
+func Cannoli_WebSocket_pack_u64(num $value) str {
+    my num $len = $value;
+    my int $high = math::floor($len / 4294967296);
+    my int $low = $len - ($high * 4294967296);
+    return sys::pack("N2", $high, $low);
+}
+
+func Cannoli_WebSocket_write_ws(scalar $ws, str $data) int {
+    if ($ws->{"_ssl"} == 1) {
+        my scalar $ssl_conn = $ws->{"_ssl_conn"};
+        my scalar $ssl_write_fn = $ws->{"_ssl_write_fn"};
+        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+    }
+    my int $fd = $ws->{"_fd"};
+    return sys::write_fd($fd, $data);
+}
+
+func Cannoli_WebSocket_close_socket(scalar $ws) void {
+    if ($ws->{"_ssl"} == 1) {
+        my scalar $ssl_conn = $ws->{"_ssl_conn"};
+        my scalar $ssl_close_fn = $ws->{"_ssl_close_fn"};
+        sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
+    } else {
+        sys::socket_close($ws->{"_client"});
+    }
+}
+
+func Cannoli_WebSocket_write_response(hash %req, str $data) int {
+    if (exists(%req, "_ssl") && $req{"_ssl"} == 1) {
+        my scalar $ssl_conn = $req{"_ssl_conn"};
+        my scalar $ssl_write_fn = $req{"_ssl_write_fn"};
+        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+    }
+    my int $fd = $req{"_fd"};
+    return sys::write_fd($fd, $data);
+}
+
+func Cannoli_WebSocket_read_ws(scalar $ws, int $len) str {
+    if ($ws->{"_ssl"} == 1) {
+        my scalar $ssl_conn = $ws->{"_ssl_conn"};
+        my scalar $ssl_read_fn = $ws->{"_ssl_read_fn"};
+        return sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, $len]);
+    }
+    return sys::socket_recv($ws->{"_client"}, $len);
+}
+
+func Cannoli_WebSocket_ensure_bytes(scalar $ws, int $needed) int {
+    my str $buffer = $ws->{"_buffer"};
+    while (sys::byte_length($buffer) < $needed) {
+        my str $chunk = ::read_ws($ws, 4096);
+        if (sys::byte_length($chunk) == 0) {
+            $ws->{"_buffer"} = $buffer;
+            return 0;
+        }
+        $buffer = $buffer . $chunk;
+    }
+    $ws->{"_buffer"} = $buffer;
+    return 1;
+}
+
+func Cannoli_WebSocket_make_accept(str $key) str {
+    my str $digest = ::sha1_bin($key . ::guid());
+    return sys::base64_encode($digest);
+}
+
+# ============================================================
+# SHA1 implementation (pure Strada, uses arithmetic-only bit ops)
+# ============================================================
+
+func Cannoli_WebSocket_sha1_bin(str $data) str {
+    my int $len = sys::byte_length($data);
+    my array @bytes = ();
+
+    my int $i = 0;
+    while ($i < $len) {
+        push(@bytes, sys::get_byte($data, $i));
+        $i = $i + 1;
+    }
+
+    # Append 0x80 then pad with 0x00 to 56 mod 64
+    push(@bytes, 128);
+    while ((scalar(@bytes) % 64) != 56) {
+        push(@bytes, 0);
+    }
+
+    # Append length in bits as 64-bit big-endian
+    my num $bit_len = $len * 8;
+    my array @len_bytes = (0, 0, 0, 0, 0, 0, 0, 0);
+    $i = 7;
+    while ($i >= 0) {
+        @len_bytes[$i] = $bit_len % 256;
+        $bit_len = math::floor($bit_len / 256);
+        $i = $i - 1;
+    }
+    $i = 0;
+    while ($i < 8) {
+        push(@bytes, @len_bytes[$i]);
+        $i = $i + 1;
+    }
+
+    my int $h0 = 1732584193;
+    my int $h1 = 4023233417;
+    my int $h2 = 2562383102;
+    my int $h3 = 271733878;
+    my int $h4 = 3285377520;
+
+    my int $chunk = 0;
+    my int $total = scalar(@bytes);
+    while ($chunk < $total) {
+        my array @w = ();
+        $i = 0;
+        while ($i < 16) {
+            my int $idx = $chunk + ($i * 4);
+            my int $b0 = @bytes[$idx];
+            my int $b1 = @bytes[$idx + 1];
+            my int $b2 = @bytes[$idx + 2];
+            my int $b3 = @bytes[$idx + 3];
+            my int $word = ($b0 * 16777216) + ($b1 * 65536) + ($b2 * 256) + $b3;
+            push(@w, $word);
+            $i = $i + 1;
+        }
+
+        $i = 16;
+        while ($i < 80) {
+            my int $v = ::xor32(::xor32(@w[$i - 3], @w[$i - 8]), ::xor32(@w[$i - 14], @w[$i - 16]));
+            my int $word = ::rol32($v, 1);
+            push(@w, $word);
+            $i = $i + 1;
+        }
+
+        my int $a = $h0;
+        my int $b = $h1;
+        my int $c = $h2;
+        my int $d = $h3;
+        my int $e = $h4;
+
+        $i = 0;
+        while ($i < 80) {
+            my int $f = 0;
+            my int $k = 0;
+
+            if ($i < 20) {
+                $f = ::or32(::and32($b, $c), ::and32(::not32($b), $d));
+                $k = 1518500249;
+            } elsif ($i < 40) {
+                $f = ::xor32(::xor32($b, $c), $d);
+                $k = 1859775393;
+            } elsif ($i < 60) {
+                $f = ::or32(::or32(::and32($b, $c), ::and32($b, $d)), ::and32($c, $d));
+                $k = 2400959708;
+            } else {
+                $f = ::xor32(::xor32($b, $c), $d);
+                $k = 3395469782;
+            }
+
+            my int $temp = ::add32(::rol32($a, 5), $f, $e, $k, @w[$i]);
+            $e = $d;
+            $d = $c;
+            $c = ::rol32($b, 30);
+            $b = $a;
+            $a = $temp;
+
+            $i = $i + 1;
+        }
+
+        $h0 = ::add32($h0, $a);
+        $h1 = ::add32($h1, $b);
+        $h2 = ::add32($h2, $c);
+        $h3 = ::add32($h3, $d);
+        $h4 = ::add32($h4, $e);
+
+        $chunk = $chunk + 64;
+    }
+
+    my str $out = "";
+    $out = $out . sys::pack("N", ::u32($h0));
+    $out = $out . sys::pack("N", ::u32($h1));
+    $out = $out . sys::pack("N", ::u32($h2));
+    $out = $out . sys::pack("N", ::u32($h3));
+    $out = $out . sys::pack("N", ::u32($h4));
+    return $out;
+}
+
+func Cannoli_WebSocket_add32(int ...@vals) int {
+    my num $sum = 0;
+    my int $i = 0;
+    while ($i < scalar(@vals)) {
+        $sum = $sum + @vals[$i];
+        $i = $i + 1;
+    }
+    return ::u32($sum);
+}
+
+func Cannoli_WebSocket_u32(num $value) int {
+    my num $mod = 4294967296;
+    my num $div = $value / $mod;
+    my int $q = math::floor($div);
+    my num $res = $value - ($q * $mod);
+    if ($res < 0) {
+        $res = $res + $mod;
+    }
+    return $res;
+}
+
+func Cannoli_WebSocket_pow2(int $n) num {
+    my num $v = 1;
+    my int $i = 0;
+    while ($i < $n) {
+        $v = $v * 2;
+        $i = $i + 1;
+    }
+    return $v;
+}
+
+func Cannoli_WebSocket_rol32(int $value, int $bits) int {
+    my int $shift = $bits % 32;
+    if ($shift == 0) {
+        return ::u32($value);
+    }
+    my num $pow = ::pow2($shift);
+    my num $pow_rev = ::pow2(32 - $shift);
+    my int $left = ::u32($value * $pow);
+    my int $right = ::u32($value / $pow_rev);
+    return ::u32($left + $right);
+}
+
+func Cannoli_WebSocket_and32(int $a, int $b) int {
+    my int $aa = ::u32($a);
+    my int $bb = ::u32($b);
+    my int $result = 0;
+    my int $bit = 1;
+    my int $i = 0;
+
+    while ($i < 32) {
+        if (($aa % 2) == 1 && ($bb % 2) == 1) {
+            $result = $result + $bit;
+        }
+        $aa = $aa / 2;
+        $bb = $bb / 2;
+        $bit = $bit * 2;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+func Cannoli_WebSocket_or32(int $a, int $b) int {
+    my int $aa = ::u32($a);
+    my int $bb = ::u32($b);
+    my int $result = 0;
+    my int $bit = 1;
+    my int $i = 0;
+
+    while ($i < 32) {
+        if (($aa % 2) == 1 || ($bb % 2) == 1) {
+            $result = $result + $bit;
+        }
+        $aa = $aa / 2;
+        $bb = $bb / 2;
+        $bit = $bit * 2;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+func Cannoli_WebSocket_xor32(int $a, int $b) int {
+    my int $aa = ::u32($a);
+    my int $bb = ::u32($b);
+    my int $result = 0;
+    my int $bit = 1;
+    my int $i = 0;
+
+    while ($i < 32) {
+        my int $bit_val = ($aa % 2) + ($bb % 2);
+        if (($bit_val % 2) == 1) {
+            $result = $result + $bit;
+        }
+        $aa = $aa / 2;
+        $bb = $bb / 2;
+        $bit = $bit * 2;
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+func Cannoli_WebSocket_not32(int $a) int {
+    return ::u32(4294967295 - ::u32($a));
+}
+
+func Cannoli_WebSocket_xor8(int $a, int $b) int {
+    my int $aa = $a % 256;
+    my int $bb = $b % 256;
+    my int $result = 0;
+    my int $bit = 1;
+    my int $i = 0;
+
+    while ($i < 8) {
+        my int $bit_val = ($aa % 2) + ($bb % 2);
+        if (($bit_val % 2) == 1) {
+            $result = $result + $bit;
+        }
+        $aa = $aa / 2;
+        $bb = $bb / 2;
+        $bit = $bit * 2;
+        $i = $i + 1;
+    }
+
+    return $result;
 }
 /*
  This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
@@ -4237,7 +4825,13 @@ func Cannoli_new(hash %req) scalar {
     if (exists(%req, "_ssl")) {
         $self{"_ssl"} = $req{"_ssl"};
         $self{"_ssl_conn"} = $req{"_ssl_conn"};
+        if (exists(%req, "_ssl_read_fn")) {
+            $self{"_ssl_read_fn"} = $req{"_ssl_read_fn"};
+        }
         $self{"_ssl_write_fn"} = $req{"_ssl_write_fn"};
+        if (exists(%req, "_ssl_close_fn")) {
+            $self{"_ssl_close_fn"} = $req{"_ssl_close_fn"};
+        }
     }
 
     # Response data
@@ -4897,10 +5491,52 @@ func Cannoli_is_chunked(scalar $self) int {
 }
 
 #
+# WebSocket Methods
+#
+
+func Cannoli_ws_accept(scalar $self, str $protocol = "") scalar {
+    my hash %req = ();
+    $req{"method"} = $self->{"_method"};
+    $req{"headers"} = $self->{"_headers"};
+
+    if (exists(%{$self}, "_client")) {
+        $req{"_client"} = $self->{"_client"};
+        $req{"_fd"} = $self->{"_fd"};
+    }
+
+    if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
+        $req{"_ssl"} = $self->{"_ssl"};
+        $req{"_ssl_conn"} = $self->{"_ssl_conn"};
+        if (exists(%{$self}, "_ssl_read_fn")) {
+            $req{"_ssl_read_fn"} = $self->{"_ssl_read_fn"};
+        }
+        $req{"_ssl_write_fn"} = $self->{"_ssl_write_fn"};
+        if (exists(%{$self}, "_ssl_close_fn")) {
+            $req{"_ssl_close_fn"} = $self->{"_ssl_close_fn"};
+        }
+    }
+
+    my scalar $ws = Cannoli::WebSocket::accept(%req, $protocol);
+    if (defined($ws)) {
+        $self->{"_ws_active"} = 1;
+        $self->{"_ws_status"} = 101;
+    }
+    return $ws;
+}
+
+#
 # Build response hash from Cannoli state
 #
 
 func Cannoli_build_response(scalar $self) hash {
+    if (exists(%{$self}, "_ws_active") && $self->{"_ws_active"} == 1) {
+        my int $status = 101;
+        if (exists(%{$self}, "_ws_status")) {
+            $status = $self->{"_ws_status"};
+        }
+        return Cannoli::Response::sent($status);
+    }
+
     # If chunked mode, response was already sent
     if ($self->is_chunked() == 1) {
         return Cannoli::Response::empty();
@@ -7156,110 +7792,322 @@ func Cannoli_Server_parse_response(str $response_body) hash {
     return %res;
 }
 
+# Build an error result for read_request
+func Cannoli_Server_read_error(str $code, int $limit) scalar {
+    my hash %result = ();
+    $result{"error"} = $code;
+    $result{"limit"} = $limit;
+    return \%result;
+}
+
+# Parse Content-Length from request headers (returns 0 if missing)
+func Cannoli_Server_parse_content_length(str $header_section) int {
+    my array @lines = split("\r\n", $header_section);
+    my int $i = 1;  # skip request line
+    while ($i < scalar(@lines)) {
+        my str $line = @lines[$i];
+        my int $colon = index($line, ":");
+        if ($colon > 0) {
+            my str $name = trim(substr($line, 0, $colon));
+            my str $value = trim(substr($line, $colon + 1, length($line) - $colon - 1));
+            $name = lc($name);
+            if ($name eq "content-length") {
+                return $value + 0;
+            }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Decide if the connection should be kept alive
+func Cannoli_Server_should_keep_alive(hash %req) int {
+    my str $version = $req{"http_version"};
+    my str $conn = lc(Cannoli::Request::get_header(%req, "Connection"));
+
+    if ($version eq "HTTP/1.1") {
+        if (index($conn, "close") >= 0) {
+            return 0;
+        }
+        return 1;
+    }
+
+    if ($version eq "HTTP/1.0") {
+        if (index($conn, "keep-alive") >= 0) {
+            return 1;
+        }
+        return 0;
+    }
+
+    return 0;
+}
+
+# Read and parse a full HTTP request from a socket (supports keep-alive buffer)
+func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer) scalar {
+    my int $max_header = $server_ref->{"max_header_size"};
+    my int $max_body = $server_ref->{"max_body_size"};
+    my int $timeout_ms = $server_ref->{"timeout"} * 1000;
+
+    if (length($buffer) == 0) {
+        my int $ready = sys::socket_select($client, $timeout_ms);
+        if ($ready == 0) {
+            return undef;
+        }
+    }
+
+    my int $header_end = index($buffer, "\r\n\r\n");
+    while ($header_end < 0) {
+        if (length($buffer) > $max_header) {
+            return ::read_error("header_too_large", $max_header);
+        }
+        my str $chunk = sys::socket_recv($client, 65536);
+        if (length($chunk) == 0) {
+            return undef;
+        }
+        $buffer = $buffer . $chunk;
+        $header_end = index($buffer, "\r\n\r\n");
+    }
+
+    if ($header_end > $max_header) {
+        return ::read_error("header_too_large", $max_header);
+    }
+
+    my str $header_section = substr($buffer, 0, $header_end);
+    my int $content_len = ::parse_content_length($header_section);
+    if ($content_len > $max_body) {
+        return ::read_error("body_too_large", $max_body);
+    }
+
+    my int $total_needed = $header_end + 4 + $content_len;
+    while (length($buffer) < $total_needed) {
+        my str $chunk = sys::socket_recv($client, 65536);
+        if (length($chunk) == 0) {
+            return undef;
+        }
+        $buffer = $buffer . $chunk;
+    }
+
+    my str $request_data = substr($buffer, 0, $total_needed);
+    my int $remaining_len = length($buffer) - $total_needed;
+    my str $remaining = "";
+    if ($remaining_len > 0) {
+        $remaining = substr($buffer, $total_needed, $remaining_len);
+    }
+
+    my hash %req = Cannoli::Request::parse($request_data);
+    my hash %result = ();
+    $result{"req"} = \%req;
+    $result{"buffer"} = $remaining;
+    return \%result;
+}
+
+# Read and parse a full HTTP request from an SSL connection
+func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scalar $ssl_read_fn, int $ssl_fd, str $buffer) scalar {
+    my int $max_header = $server_ref->{"max_header_size"};
+    my int $max_body = $server_ref->{"max_body_size"};
+    my int $timeout_ms = $server_ref->{"timeout"} * 1000;
+
+    if (length($buffer) == 0 && $ssl_fd > 0) {
+        my int $ready = sys::socket_select($ssl_fd, $timeout_ms);
+        if ($ready == 0) {
+            return undef;
+        }
+    }
+
+    my int $header_end = index($buffer, "\r\n\r\n");
+    while ($header_end < 0) {
+        if (length($buffer) > $max_header) {
+            return ::read_error("header_too_large", $max_header);
+        }
+        my str $chunk = sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        if (length($chunk) == 0) {
+            return undef;
+        }
+        $buffer = $buffer . $chunk;
+        $header_end = index($buffer, "\r\n\r\n");
+    }
+
+    if ($header_end > $max_header) {
+        return ::read_error("header_too_large", $max_header);
+    }
+
+    my str $header_section = substr($buffer, 0, $header_end);
+    my int $content_len = ::parse_content_length($header_section);
+    if ($content_len > $max_body) {
+        return ::read_error("body_too_large", $max_body);
+    }
+
+    my int $total_needed = $header_end + 4 + $content_len;
+    while (length($buffer) < $total_needed) {
+        my str $chunk = sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        if (length($chunk) == 0) {
+            return undef;
+        }
+        $buffer = $buffer . $chunk;
+    }
+
+    my str $request_data = substr($buffer, 0, $total_needed);
+    my int $remaining_len = length($buffer) - $total_needed;
+    my str $remaining = "";
+    if ($remaining_len > 0) {
+        $remaining = substr($buffer, $total_needed, $remaining_len);
+    }
+
+    my hash %req = Cannoli::Request::parse($request_data);
+    my hash %result = ();
+    $result{"req"} = \%req;
+    $result{"buffer"} = $remaining;
+    return \%result;
+}
+
 # Handle a single client connection
 func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
-    # Start timing
-    my hash %start_time = sys::gettimeofday();
-    my int $start_sec = $start_time{"sec"};
-    my int $start_usec = $start_time{"usec"};
-
     my scalar $router = $server_ref->{"router"};
     my scalar $dispatch_funcs = $server_ref->{"dispatch_funcs"};
     my scalar $library_routes = $server_ref->{"library_routes"};
-
-    # Read the request
-    my str $data = sys::socket_recv($client, 65536);
-
-    if (length($data) == 0) {
-        sys::socket_close($client);
-        return;
-    }
-
-    # Parse the request
-    my hash %req = Cannoli::Request::parse($data);
-    my str $method = $req{"method"};
-    my str $path = $req{"path"};
-    my str $body = $req{"body"};
-
-    # Check request size limits
-    my int $max_body = $server_ref->{"max_body_size"};
-    my int $content_len = $req{"content_length"} + 0;
-    my int $body_len = length($body);
-
-    # Check Content-Length header against limit
-    if ($content_len > $max_body) {
-        my hash %err_res = Cannoli::Response::payload_too_large($max_body);
-        my str $err_data = Cannoli::Response::build(%err_res);
-        sys::socket_send($client, $err_data);
-        sys::socket_close($client);
-        return;
-    }
-
-    # Check actual body size against limit
-    if ($body_len > $max_body) {
-        my hash %err_res = Cannoli::Response::payload_too_large($max_body);
-        my str $err_data = Cannoli::Response::build(%err_res);
-        sys::socket_send($client, $err_data);
-        sys::socket_close($client);
-        return;
-    }
-
-    # Store client fd in request for chunked responses
     my int $client_fd = sys::socket_fd($client);
-    $req{"_fd"} = $client_fd;
-    $req{"_client"} = $client;
+    my str $buffer = "";
 
-    my hash %res = ();
-    my int $handled = 0;
+    while (1) {
+        my scalar $read_result = ::read_request($server_ref, $client, $buffer);
+        if (!defined($read_result)) {
+            break;
+        }
 
-    # Try prefix-based library routes first (new style)
-    my int $num_routes = scalar(@{$library_routes});
-    if ($num_routes > 0 && $handled == 0) {
-        my int $i = 0;
-        while ($i < $num_routes && $handled == 0) {
-            my scalar $route = $library_routes->[$i];
-            my str $prefix = $route->{"prefix"};
-            my scalar $dispatch = $route->{"dispatch"};
+        if (exists(%{$read_result}, "error")) {
+            my str $err = $read_result->{"error"};
+            my int $limit = $read_result->{"limit"};
+            my hash %err_res = ();
+            if ($err eq "header_too_large") {
+                %err_res = Cannoli::Response::header_too_large($limit);
+            } elsif ($err eq "body_too_large") {
+                %err_res = Cannoli::Response::payload_too_large($limit);
+            } else {
+                %err_res = Cannoli::Response::error_page(400, "Bad Request");
+            }
+            my str $err_data = Cannoli::Response::build(%err_res);
+            sys::socket_send($client, $err_data);
+            break;
+        }
 
-            # Check if path starts with prefix
-            my int $prefix_len = length($prefix);
-            my int $matches = 0;
+        $buffer = $read_result->{"buffer"};
+        my hash %req = %{$read_result->{"req"}};
 
-            if ($prefix eq "/") {
-                # Root prefix matches everything
-                $matches = 1;
-            } elsif (length($path) >= $prefix_len) {
-                my str $path_prefix = substr($path, 0, $prefix_len);
-                if ($path_prefix eq $prefix) {
-                    # Ensure it's a proper prefix (followed by / or end of path)
-                    if (length($path) == $prefix_len) {
-                        $matches = 1;
-                    } elsif (substr($path, $prefix_len, 1) eq "/") {
-                        $matches = 1;
-                    } elsif (substr($prefix, $prefix_len - 1, 1) eq "/") {
-                        # Prefix ends with /, already matched
-                        $matches = 1;
+        # Start timing
+        my hash %start_time = sys::gettimeofday();
+        my int $start_sec = $start_time{"sec"};
+        my int $start_usec = $start_time{"usec"};
+
+        my str $method = $req{"method"};
+        my str $path = $req{"path"};
+        my str $body = $req{"body"};
+
+        # Check request size limits
+        my int $max_body = $server_ref->{"max_body_size"};
+        my int $content_len = $req{"content_length"} + 0;
+        my int $body_len = length($body);
+
+        # Check Content-Length header against limit
+        if ($content_len > $max_body) {
+            my hash %err_res = Cannoli::Response::payload_too_large($max_body);
+            my str $err_data = Cannoli::Response::build(%err_res);
+            sys::socket_send($client, $err_data);
+            break;
+        }
+
+        # Check actual body size against limit
+        if ($body_len > $max_body) {
+            my hash %err_res = Cannoli::Response::payload_too_large($max_body);
+            my str $err_data = Cannoli::Response::build(%err_res);
+            sys::socket_send($client, $err_data);
+            break;
+        }
+
+        # Store client fd in request for chunked responses
+        $req{"_fd"} = $client_fd;
+        $req{"_client"} = $client;
+
+        my hash %res = ();
+        my int $handled = 0;
+
+        # Try prefix-based library routes first (new style)
+        my int $num_routes = scalar(@{$library_routes});
+        if ($num_routes > 0 && $handled == 0) {
+            my int $i = 0;
+            while ($i < $num_routes && $handled == 0) {
+                my scalar $route = $library_routes->[$i];
+                my str $prefix = $route->{"prefix"};
+                my scalar $dispatch = $route->{"dispatch"};
+
+                # Check if path starts with prefix
+                my int $prefix_len = length($prefix);
+                my int $matches = 0;
+
+                if ($prefix eq "/") {
+                    # Root prefix matches everything
+                    $matches = 1;
+                } elsif (length($path) >= $prefix_len) {
+                    my str $path_prefix = substr($path, 0, $prefix_len);
+                    if ($path_prefix eq $prefix) {
+                        # Ensure it's a proper prefix (followed by / or end of path)
+                        if (length($path) == $prefix_len) {
+                            $matches = 1;
+                        } elsif (substr($path, $prefix_len, 1) eq "/") {
+                            $matches = 1;
+                        } elsif (substr($prefix, $prefix_len - 1, 1) eq "/") {
+                            # Prefix ends with /, already matched
+                            $matches = 1;
+                        }
                     }
                 }
-            }
 
-            if ($matches == 1) {
-                # Calculate path_info (part of path after prefix)
-                my str $path_info = "";
-                if ($prefix eq "/") {
-                    $path_info = $path;
-                } elsif (length($path) > $prefix_len) {
-                    $path_info = substr($path, $prefix_len, length($path) - $prefix_len);
-                } else {
-                    $path_info = "/";
+                if ($matches == 1) {
+                    # Calculate path_info (part of path after prefix)
+                    my str $path_info = "";
+                    if ($prefix eq "/") {
+                        $path_info = $path;
+                    } elsif (length($path) > $prefix_len) {
+                        $path_info = substr($path, $prefix_len, length($path) - $prefix_len);
+                    } else {
+                        $path_info = "/";
+                    }
+
+                    # Prepare request data for dispatch
+                    my str $query_string = $req{"query_string"};
+                    my str $headers_str = ::serialize_headers($req{"headers"});
+                    my str $remote_addr = $req{"remote_addr"};
+                    my str $content_type = $req{"content_type"};
+
+                    my str $response_body = sys::dl_call_str_sv($dispatch, [
+                        $method, $path, $path_info, $query_string,
+                        $body, $headers_str, $remote_addr, $content_type
+                    ]);
+
+                    if (length($response_body) > 0) {
+                        %res = ::parse_response($response_body);
+                        $handled = 1;
+                    }
                 }
+                $i = $i + 1;
+            }
+        }
 
-                # Prepare request data for dispatch
-                my str $query_string = $req{"query_string"};
-                my str $headers_str = ::serialize_headers($req{"headers"});
-                my str $remote_addr = $req{"remote_addr"};
-                my str $content_type = $req{"content_type"};
+        # Try chain-of-responsibility dispatch (old style: app.library)
+        my int $num_funcs = scalar(@{$dispatch_funcs});
+        if ($num_funcs > 0 && $handled == 0) {
+            # Prepare request data once for all dispatch attempts
+            my str $query_string = $req{"query_string"};
+            my str $headers_str = ::serialize_headers($req{"headers"});
+            my str $remote_addr = $req{"remote_addr"};
+            my str $content_type = $req{"content_type"};
 
+            my int $i = 0;
+            while ($i < $num_funcs && $handled == 0) {
+                my scalar $dispatch = $dispatch_funcs->[$i];
+
+                # Call: cannoli_dispatch(method, path, path_info, query_string, body, headers, remote_addr, content_type)
+                # path_info is empty - libraries handle their own prefix matching
+                my str $path_info = "";
                 my str $response_body = sys::dl_call_str_sv($dispatch, [
                     $method, $path, $path_info, $query_string,
                     $body, $headers_str, $remote_addr, $content_type
@@ -7269,65 +8117,52 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                     %res = ::parse_response($response_body);
                     $handled = 1;
                 }
+                $i = $i + 1;
             }
-            $i = $i + 1;
+        }
+
+        # Fall back to router if no library handled the request
+        if ($handled == 0 && defined($router)) {
+            %res = Cannoli::Router::dispatch($router, %req);
+            $handled = 1;
+        }
+
+        # Default response
+        if ($handled == 0) {
+            %res = Cannoli::Response::not_found();
+        }
+
+        my int $keep_alive = ::should_keep_alive(%req);
+
+        # Build and send response (skip if already sent, e.g., chunked)
+        if ($res{"sent"} != 1) {
+            if ($keep_alive == 1) {
+                Cannoli::Response::header(%res, "Connection", "keep-alive");
+                Cannoli::Response::header(%res, "Keep-Alive", "timeout=" . $server_ref->{"timeout"});
+            } else {
+                Cannoli::Response::header(%res, "Connection", "close");
+            }
+            my str $response = Cannoli::Response::build(%res);
+            sys::socket_send($client, $response);
+        }
+
+        # Calculate elapsed time in milliseconds
+        my hash %end_time = sys::gettimeofday();
+        my int $end_sec = $end_time{"sec"};
+        my int $end_usec = $end_time{"usec"};
+        my int $elapsed_ms = ($end_sec - $start_sec) * 1000 + ($end_usec - $start_usec) / 1000;
+
+        # Log the request with timing
+        Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
+
+        if ($res{"sent"} == 1) {
+            break;
+        }
+
+        if ($keep_alive == 0) {
+            break;
         }
     }
-
-    # Try chain-of-responsibility dispatch (old style: app.library)
-    my int $num_funcs = scalar(@{$dispatch_funcs});
-    if ($num_funcs > 0 && $handled == 0) {
-        # Prepare request data once for all dispatch attempts
-        my str $query_string = $req{"query_string"};
-        my str $headers_str = ::serialize_headers($req{"headers"});
-        my str $remote_addr = $req{"remote_addr"};
-        my str $content_type = $req{"content_type"};
-
-        my int $i = 0;
-        while ($i < $num_funcs && $handled == 0) {
-            my scalar $dispatch = $dispatch_funcs->[$i];
-
-            # Call: cannoli_dispatch(method, path, path_info, query_string, body, headers, remote_addr, content_type)
-            # path_info is empty - libraries handle their own prefix matching
-            my str $path_info = "";
-            my str $response_body = sys::dl_call_str_sv($dispatch, [
-                $method, $path, $path_info, $query_string,
-                $body, $headers_str, $remote_addr, $content_type
-            ]);
-
-            if (length($response_body) > 0) {
-                %res = ::parse_response($response_body);
-                $handled = 1;
-            }
-            $i = $i + 1;
-        }
-    }
-
-    # Fall back to router if no library handled the request
-    if ($handled == 0 && defined($router)) {
-        %res = Cannoli::Router::dispatch($router, %req);
-        $handled = 1;
-    }
-
-    # Default response
-    if ($handled == 0) {
-        %res = Cannoli::Response::not_found();
-    }
-
-    # Build and send response (skip if already sent, e.g., chunked)
-    if ($res{"sent"} != 1) {
-        my str $response = Cannoli::Response::build(%res);
-        sys::socket_send($client, $response);
-    }
-
-    # Calculate elapsed time in milliseconds
-    my hash %end_time = sys::gettimeofday();
-    my int $end_sec = $end_time{"sec"};
-    my int $end_usec = $end_time{"usec"};
-    my int $elapsed_ms = ($end_sec - $start_sec) * 1000 + ($end_usec - $start_usec) / 1000;
-
-    # Log the request with timing
-    Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
 
     # Close connection
     sys::socket_close($client);
@@ -7335,107 +8170,156 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
 
 # Handle a single SSL client connection
 func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void {
-    # Start timing
-    my hash %start_time = sys::gettimeofday();
-    my int $start_sec = $start_time{"sec"};
-    my int $start_usec = $start_time{"usec"};
-
     my scalar $router = $server_ref->{"router"};
     my scalar $dispatch_funcs = $server_ref->{"dispatch_funcs"};
     my scalar $library_routes = $server_ref->{"library_routes"};
     my scalar $ssl_read_fn = $server_ref->{"ssl_read_fn"};
     my scalar $ssl_write_fn = $server_ref->{"ssl_write_fn"};
     my scalar $ssl_close_fn = $server_ref->{"ssl_close_fn"};
-
-    # Read the request using SSL
-    my str $data = sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
-
-    if (length($data) == 0) {
-        sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
-        return;
+    my scalar $ssl_fd_fn = $server_ref->{"ssl_fd_fn"};
+    my int $ssl_fd = -1;
+    if (defined($ssl_fd_fn)) {
+        $ssl_fd = sys::dl_call_int_sv($ssl_fd_fn, [$ssl_conn]);
     }
+    my str $buffer = "";
 
-    # Parse the request
-    my hash %req = Cannoli::Request::parse($data);
-    my str $method = $req{"method"};
-    my str $path = $req{"path"};
-    my str $body = $req{"body"};
+    while (1) {
+        my scalar $read_result = ::read_ssl_request($server_ref, $ssl_conn, $ssl_read_fn, $ssl_fd, $buffer);
+        if (!defined($read_result)) {
+            break;
+        }
 
-    # Check request size limits
-    my int $max_body = $server_ref->{"max_body_size"};
-    my int $content_len = $req{"content_length"} + 0;
-    my int $body_len = length($body);
+        if (exists(%{$read_result}, "error")) {
+            my str $err = $read_result->{"error"};
+            my int $limit = $read_result->{"limit"};
+            my hash %err_res = ();
+            if ($err eq "header_too_large") {
+                %err_res = Cannoli::Response::header_too_large($limit);
+            } elsif ($err eq "body_too_large") {
+                %err_res = Cannoli::Response::payload_too_large($limit);
+            } else {
+                %err_res = Cannoli::Response::error_page(400, "Bad Request");
+            }
+            my str $err_data = Cannoli::Response::build(%err_res);
+            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            break;
+        }
 
-    # Check Content-Length header against limit
-    if ($content_len > $max_body) {
-        my hash %err_res = Cannoli::Response::payload_too_large($max_body);
-        my str $err_data = Cannoli::Response::build(%err_res);
-        sys::dl_call_void_sv($ssl_write_fn, [$ssl_conn, $err_data]);
-        sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
-        return;
-    }
+        $buffer = $read_result->{"buffer"};
+        my hash %req = %{$read_result->{"req"}};
 
-    # Check actual body size against limit
-    if ($body_len > $max_body) {
-        my hash %err_res = Cannoli::Response::payload_too_large($max_body);
-        my str $err_data = Cannoli::Response::build(%err_res);
-        sys::dl_call_void_sv($ssl_write_fn, [$ssl_conn, $err_data]);
-        sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
-        return;
-    }
+        # Start timing
+        my hash %start_time = sys::gettimeofday();
+        my int $start_sec = $start_time{"sec"};
+        my int $start_usec = $start_time{"usec"};
 
-    # Store SSL connection info in request for chunked responses
-    $req{"_ssl"} = 1;
-    $req{"_ssl_conn"} = $ssl_conn;
-    $req{"_ssl_write_fn"} = $ssl_write_fn;
+        my str $method = $req{"method"};
+        my str $path = $req{"path"};
+        my str $body = $req{"body"};
 
-    my hash %res = ();
-    my int $handled = 0;
+        # Check request size limits
+        my int $max_body = $server_ref->{"max_body_size"};
+        my int $content_len = $req{"content_length"} + 0;
+        my int $body_len = length($body);
 
-    # Try prefix-based library routes first (new style)
-    my int $num_routes = scalar(@{$library_routes});
-    if ($num_routes > 0 && $handled == 0) {
-        my int $i = 0;
-        while ($i < $num_routes && $handled == 0) {
-            my scalar $route = $library_routes->[$i];
-            my str $prefix = $route->{"prefix"};
-            my scalar $dispatch = $route->{"dispatch"};
+        # Check Content-Length header against limit
+        if ($content_len > $max_body) {
+            my hash %err_res = Cannoli::Response::payload_too_large($max_body);
+            my str $err_data = Cannoli::Response::build(%err_res);
+            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            break;
+        }
 
-            # Check if path starts with prefix
-            my int $prefix_len = length($prefix);
-            my int $matches = 0;
+        # Check actual body size against limit
+        if ($body_len > $max_body) {
+            my hash %err_res = Cannoli::Response::payload_too_large($max_body);
+            my str $err_data = Cannoli::Response::build(%err_res);
+            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            break;
+        }
 
-            if ($prefix eq "/") {
-                $matches = 1;
-            } elsif (length($path) >= $prefix_len) {
-                my str $path_prefix = substr($path, 0, $prefix_len);
-                if ($path_prefix eq $prefix) {
-                    if (length($path) == $prefix_len) {
-                        $matches = 1;
-                    } elsif (substr($path, $prefix_len, 1) eq "/") {
-                        $matches = 1;
-                    } elsif (substr($prefix, $prefix_len - 1, 1) eq "/") {
-                        $matches = 1;
+        # Store SSL connection info in request for chunked responses
+        $req{"_ssl"} = 1;
+        $req{"_ssl_conn"} = $ssl_conn;
+        $req{"_ssl_read_fn"} = $ssl_read_fn;
+        $req{"_ssl_write_fn"} = $ssl_write_fn;
+        $req{"_ssl_close_fn"} = $ssl_close_fn;
+
+        my hash %res = ();
+        my int $handled = 0;
+
+        # Try prefix-based library routes first (new style)
+        my int $num_routes = scalar(@{$library_routes});
+        if ($num_routes > 0 && $handled == 0) {
+            my int $i = 0;
+            while ($i < $num_routes && $handled == 0) {
+                my scalar $route = $library_routes->[$i];
+                my str $prefix = $route->{"prefix"};
+                my scalar $dispatch = $route->{"dispatch"};
+
+                # Check if path starts with prefix
+                my int $prefix_len = length($prefix);
+                my int $matches = 0;
+
+                if ($prefix eq "/") {
+                    $matches = 1;
+                } elsif (length($path) >= $prefix_len) {
+                    my str $path_prefix = substr($path, 0, $prefix_len);
+                    if ($path_prefix eq $prefix) {
+                        if (length($path) == $prefix_len) {
+                            $matches = 1;
+                        } elsif (substr($path, $prefix_len, 1) eq "/") {
+                            $matches = 1;
+                        } elsif (substr($prefix, $prefix_len - 1, 1) eq "/") {
+                            $matches = 1;
+                        }
                     }
                 }
-            }
 
-            if ($matches == 1) {
-                my str $path_info = "";
-                if ($prefix eq "/") {
-                    $path_info = $path;
-                } elsif (length($path) > $prefix_len) {
-                    $path_info = substr($path, $prefix_len, length($path) - $prefix_len);
-                } else {
-                    $path_info = "/";
+                if ($matches == 1) {
+                    my str $path_info = "";
+                    if ($prefix eq "/") {
+                        $path_info = $path;
+                    } elsif (length($path) > $prefix_len) {
+                        $path_info = substr($path, $prefix_len, length($path) - $prefix_len);
+                    } else {
+                        $path_info = "/";
+                    }
+
+                    # Prepare request data for dispatch
+                    my str $query_string = $req{"query_string"};
+                    my str $headers_str = ::serialize_headers($req{"headers"});
+                    my str $remote_addr = $req{"remote_addr"};
+                    my str $content_type = $req{"content_type"};
+
+                    my str $response_body = sys::dl_call_str_sv($dispatch, [
+                        $method, $path, $path_info, $query_string,
+                        $body, $headers_str, $remote_addr, $content_type
+                    ]);
+
+                    if (length($response_body) > 0) {
+                        %res = ::parse_response($response_body);
+                        $handled = 1;
+                    }
                 }
+                $i = $i + 1;
+            }
+        }
 
-                # Prepare request data for dispatch
-                my str $query_string = $req{"query_string"};
-                my str $headers_str = ::serialize_headers($req{"headers"});
-                my str $remote_addr = $req{"remote_addr"};
-                my str $content_type = $req{"content_type"};
+        # Try chain-of-responsibility dispatch (old style: app.library)
+        my int $num_funcs = scalar(@{$dispatch_funcs});
+        if ($num_funcs > 0 && $handled == 0) {
+            # Prepare request data once for all dispatch attempts
+            my str $query_string = $req{"query_string"};
+            my str $headers_str = ::serialize_headers($req{"headers"});
+            my str $remote_addr = $req{"remote_addr"};
+            my str $content_type = $req{"content_type"};
 
+            my int $i = 0;
+            while ($i < $num_funcs && $handled == 0) {
+                my scalar $dispatch = $dispatch_funcs->[$i];
+
+                my str $path_info = "";
                 my str $response_body = sys::dl_call_str_sv($dispatch, [
                     $method, $path, $path_info, $query_string,
                     $body, $headers_str, $remote_addr, $content_type
@@ -7445,63 +8329,51 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                     %res = ::parse_response($response_body);
                     $handled = 1;
                 }
+                $i = $i + 1;
             }
-            $i = $i + 1;
+        }
+
+        # Fall back to router if no library handled the request
+        if ($handled == 0 && defined($router)) {
+            %res = Cannoli::Router::dispatch($router, %req);
+            $handled = 1;
+        }
+
+        # Default response
+        if ($handled == 0) {
+            %res = Cannoli::Response::not_found();
+        }
+
+        # Build and send response via SSL (skip if already sent, e.g., chunked)
+        my int $keep_alive = ::should_keep_alive(%req);
+        if ($res{"sent"} != 1) {
+            if ($keep_alive == 1) {
+                Cannoli::Response::header(%res, "Connection", "keep-alive");
+                Cannoli::Response::header(%res, "Keep-Alive", "timeout=" . $server_ref->{"timeout"});
+            } else {
+                Cannoli::Response::header(%res, "Connection", "close");
+            }
+            my str $response = Cannoli::Response::build(%res);
+            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $response]);
+        }
+
+        # Calculate elapsed time in milliseconds
+        my hash %end_time = sys::gettimeofday();
+        my int $end_sec = $end_time{"sec"};
+        my int $end_usec = $end_time{"usec"};
+        my int $elapsed_ms = ($end_sec - $start_sec) * 1000 + ($end_usec - $start_usec) / 1000;
+
+        # Log the request with timing
+        Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
+
+        if ($res{"sent"} == 1) {
+            break;
+        }
+
+        if ($keep_alive == 0) {
+            break;
         }
     }
-
-    # Try chain-of-responsibility dispatch (old style: app.library)
-    my int $num_funcs = scalar(@{$dispatch_funcs});
-    if ($num_funcs > 0 && $handled == 0) {
-        # Prepare request data once for all dispatch attempts
-        my str $query_string = $req{"query_string"};
-        my str $headers_str = ::serialize_headers($req{"headers"});
-        my str $remote_addr = $req{"remote_addr"};
-        my str $content_type = $req{"content_type"};
-
-        my int $i = 0;
-        while ($i < $num_funcs && $handled == 0) {
-            my scalar $dispatch = $dispatch_funcs->[$i];
-
-            my str $path_info = "";
-            my str $response_body = sys::dl_call_str_sv($dispatch, [
-                $method, $path, $path_info, $query_string,
-                $body, $headers_str, $remote_addr, $content_type
-            ]);
-
-            if (length($response_body) > 0) {
-                %res = ::parse_response($response_body);
-                $handled = 1;
-            }
-            $i = $i + 1;
-        }
-    }
-
-    # Fall back to router if no library handled the request
-    if ($handled == 0 && defined($router)) {
-        %res = Cannoli::Router::dispatch($router, %req);
-        $handled = 1;
-    }
-
-    # Default response
-    if ($handled == 0) {
-        %res = Cannoli::Response::not_found();
-    }
-
-    # Build and send response via SSL (skip if already sent, e.g., chunked)
-    if ($res{"sent"} != 1) {
-        my str $response = Cannoli::Response::build(%res);
-        sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $response]);
-    }
-
-    # Calculate elapsed time in milliseconds
-    my hash %end_time = sys::gettimeofday();
-    my int $end_sec = $end_time{"sec"};
-    my int $end_usec = $end_time{"usec"};
-    my int $elapsed_ms = ($end_sec - $start_sec) * 1000 + ($end_usec - $start_usec) / 1000;
-
-    # Log the request with timing
-    Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
 
     # Close SSL connection
     sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);

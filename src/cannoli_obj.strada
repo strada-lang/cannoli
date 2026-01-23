@@ -68,7 +68,13 @@ func Cannoli_new(hash %req) scalar {
     if (exists(%req, "_ssl")) {
         $self{"_ssl"} = $req{"_ssl"};
         $self{"_ssl_conn"} = $req{"_ssl_conn"};
+        if (exists(%req, "_ssl_read_fn")) {
+            $self{"_ssl_read_fn"} = $req{"_ssl_read_fn"};
+        }
         $self{"_ssl_write_fn"} = $req{"_ssl_write_fn"};
+        if (exists(%req, "_ssl_close_fn")) {
+            $self{"_ssl_close_fn"} = $req{"_ssl_close_fn"};
+        }
     }
 
     # Response data
@@ -728,10 +734,52 @@ func Cannoli_is_chunked(scalar $self) int {
 }
 
 #
+# WebSocket Methods
+#
+
+func Cannoli_ws_accept(scalar $self, str $protocol = "") scalar {
+    my hash %req = ();
+    $req{"method"} = $self->{"_method"};
+    $req{"headers"} = $self->{"_headers"};
+
+    if (exists(%{$self}, "_client")) {
+        $req{"_client"} = $self->{"_client"};
+        $req{"_fd"} = $self->{"_fd"};
+    }
+
+    if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
+        $req{"_ssl"} = $self->{"_ssl"};
+        $req{"_ssl_conn"} = $self->{"_ssl_conn"};
+        if (exists(%{$self}, "_ssl_read_fn")) {
+            $req{"_ssl_read_fn"} = $self->{"_ssl_read_fn"};
+        }
+        $req{"_ssl_write_fn"} = $self->{"_ssl_write_fn"};
+        if (exists(%{$self}, "_ssl_close_fn")) {
+            $req{"_ssl_close_fn"} = $self->{"_ssl_close_fn"};
+        }
+    }
+
+    my scalar $ws = Cannoli::WebSocket::accept(%req, $protocol);
+    if (defined($ws)) {
+        $self->{"_ws_active"} = 1;
+        $self->{"_ws_status"} = 101;
+    }
+    return $ws;
+}
+
+#
 # Build response hash from Cannoli state
 #
 
 func Cannoli_build_response(scalar $self) hash {
+    if (exists(%{$self}, "_ws_active") && $self->{"_ws_active"} == 1) {
+        my int $status = 101;
+        if (exists(%{$self}, "_ws_status")) {
+            $status = $self->{"_ws_status"};
+        }
+        return Cannoli::Response::sent($status);
+    }
+
     # If chunked mode, response was already sent
     if ($self->is_chunked() == 1) {
         return Cannoli::Response::empty();

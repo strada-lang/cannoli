@@ -477,6 +477,17 @@ func Cannoli_Response_empty() hash {
     return %res;
 }
 
+# Create an empty response with status for logging
+func Cannoli_Response_sent(int $status = 200) hash {
+    my hash %res = ();
+    $res{"status"} = $status;
+    $res{"headers"} = {};
+    $res{"body"} = "";
+    $res{"sent"} = 1;
+    $res{"_chunked"} = 1;
+    return %res;
+}
+
 # Check if response is chunked
 func Cannoli_Response_is_chunked(hash %res) int {
     if (exists(%res, "_chunked")) {

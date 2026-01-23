@@ -12,6 +12,8 @@ A preforking web server and framework for [Strada](https://github.com/strada-lan
 - **Static File Serving**: Built-in static file server with directory listing
 - **SSL/HTTPS Support**: Secure connections via OpenSSL
 - **FastCGI Support**: Run behind nginx, Apache, or other web servers
+- **WebSockets**: Basic upgrade + frame helpers
+- **Keep-Alive**: Basic HTTP/1.1 persistent connections
 - **Dynamic Libraries**: Load handlers from shared libraries (.so)
 - **HTTP Method Filtering**: Route handlers for GET, POST, PUT, DELETE, etc.
 - **Simple API**: Easy-to-use application framework
@@ -276,6 +278,42 @@ my scalar $headers = Cannoli::Response::get_headers(%res);
 Cannoli::Response::remove_header(%res, "X-Unwanted");
 ```
 
+## WebSockets
+
+Cannoli provides a basic WebSocket upgrade helper and frame utilities.
+
+```strada
+func ws_echo(scalar $c) hash {
+    my scalar $ws = $c->ws_accept();
+    if (!defined($ws)) {
+        $c->bad_request("Missing WebSocket headers");
+        return $c->build_response();
+    }
+
+    while (1) {
+        my scalar $frame = Cannoli::WebSocket::recv_frame($ws);
+        if (!defined($frame)) { last; }
+
+        my int $opcode = $frame->{"opcode"};
+        if ($opcode == 8) { last; }  # close
+        if ($opcode == 9) {
+            Cannoli::WebSocket::send_pong($ws, $frame->{"payload"});
+            next;
+        }
+
+        Cannoli::WebSocket::send_text($ws, $frame->{"payload"});
+    }
+
+    Cannoli::WebSocket::close($ws, 1000, "");
+    return $c->build_response();
+}
+```
+
+For hash-based handlers, call `Cannoli::WebSocket::accept(%req)` and return
+`Cannoli::Response::sent(101)` after the WebSocket loop completes.
+
+Limitations: no fragmentation reassembly and no extension support (e.g. permessage-deflate).
+
 ## Complete Header Example
 
 ```strada
@@ -351,6 +389,7 @@ func handle_api(hash %req) hash {
 | `Cannoli::Response::error_page($code, $msg)` | Error page |
 | `Cannoli::Response::method_not_allowed($allowed)` | 405 response |
 | `Cannoli::Response::internal_error($msg)` | 500 response |
+| `Cannoli::Response::sent($status)` | Mark response already sent (status for logging) |
 | `Cannoli::Response::header(%res, $name, $val)` | Set single header |
 | `Cannoli::Response::headers(%res, %hdrs)` | Set multiple headers |
 | `Cannoli::Response::get_header(%res, $name)` | Get header value |
@@ -397,6 +436,8 @@ library = lib1.so, lib2.so
 [log]
 level = info
 ```
+
+`server.timeout` also controls the keep-alive idle timeout (seconds).
 
 ## Dynamic Library Interface
 
