@@ -8108,10 +8108,12 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                 # Call: cannoli_dispatch(method, path, path_info, query_string, body, headers, remote_addr, content_type)
                 # path_info is empty - libraries handle their own prefix matching
                 my str $path_info = "";
-                my str $response_body = sys::dl_call_str_sv($dispatch, [
+                # Use dl_call_sv for Strada libraries (returns StradaValue*), convert to string
+                my scalar $result = sys::dl_call_sv($dispatch, [
                     $method, $path, $path_info, $query_string,
                     $body, $headers_str, $remote_addr, $content_type
                 ]);
+                my str $response_body = defined($result) ? ("" . $result) : "";
 
                 if (length($response_body) > 0) {
                     %res = ::parse_response($response_body);
