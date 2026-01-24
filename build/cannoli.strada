@@ -7507,7 +7507,7 @@ func Cannoli_Server_new(hash %config) scalar {
     # Load dynamic libraries if specified
     my str $lib_paths = $server{"app_library"};
     if (length($lib_paths) > 0) {
-        my array @paths = split($lib_paths, ",");
+        my array @paths = split(",", $lib_paths);
         my int $i = 0;
         while ($i < scalar(@paths)) {
             my str $lib_spec = trim(@paths[$i]);
