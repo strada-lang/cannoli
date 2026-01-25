@@ -440,8 +440,10 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
     my int $timeout_ms = $server_ref->{"timeout"} * 1000;
 
     if (length($buffer) == 0) {
-        my int $ready = sys::socket_select($client, $timeout_ms);
-        if ($ready == 0) {
+        my int $client_fd = sys::socket_fd($client);
+        my array @fds = ($client_fd);
+        my array @ready = sys::select_fds(\@fds, $timeout_ms);
+        if (scalar(@ready) == 0) {
             return undef;
         }
     }
@@ -562,7 +564,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
     while (1) {
         my scalar $read_result = ::read_request($server_ref, $client, $buffer);
         if (!defined($read_result)) {
-            break;
+            last;
         }
 
         if (exists(%{$read_result}, "error")) {
@@ -578,7 +580,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
             }
             my str $err_data = Cannoli::Response::build(%err_res);
             sys::socket_send($client, $err_data);
-            break;
+            last;
         }
 
         $buffer = $read_result->{"buffer"};
@@ -603,7 +605,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
             sys::socket_send($client, $err_data);
-            break;
+            last;
         }
 
         # Check actual body size against limit
@@ -611,7 +613,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
             sys::socket_send($client, $err_data);
-            break;
+            last;
         }
 
         # Store client fd in request for chunked responses
@@ -749,11 +751,11 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
 
         if ($res{"sent"} == 1) {
-            break;
+            last;
         }
 
         if ($keep_alive == 0) {
-            break;
+            last;
         }
     }
 
@@ -779,7 +781,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
     while (1) {
         my scalar $read_result = ::read_ssl_request($server_ref, $ssl_conn, $ssl_read_fn, $ssl_fd, $buffer);
         if (!defined($read_result)) {
-            break;
+            last;
         }
 
         if (exists(%{$read_result}, "error")) {
@@ -795,7 +797,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
             }
             my str $err_data = Cannoli::Response::build(%err_res);
             sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
-            break;
+            last;
         }
 
         $buffer = $read_result->{"buffer"};
@@ -820,7 +822,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
             sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
-            break;
+            last;
         }
 
         # Check actual body size against limit
@@ -828,7 +830,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
             sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
-            break;
+            last;
         }
 
         # Store SSL connection info in request for chunked responses
@@ -960,11 +962,11 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
 
         if ($res{"sent"} == 1) {
-            break;
+            last;
         }
 
         if ($keep_alive == 0) {
-            break;
+            last;
         }
     }
 

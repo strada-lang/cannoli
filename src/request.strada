@@ -45,6 +45,7 @@ func Cannoli_Request_new() hash {
 # Parse an HTTP request from raw data
 func Cannoli_Request_parse(str $data) hash {
     my hash %req = ::new();
+    say("DEBUG parse: data=[" . substr($data, 0, 100) . "]");
 
     # Split headers and body
     my int $body_start = index($data, "\r\n\r\n");
