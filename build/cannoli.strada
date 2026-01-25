@@ -7438,7 +7438,8 @@ package Cannoli::Server;
 #   - Regex and prefix matching with path_info
 #
 # Library interface:
-#   cannoli_dispatch(method, path, path_info, body) -> response_body
+#   cannoli_dispatch($c) -> response_body
+#   $c is a Cannoli object with all request data and response methods
 
 # Create a new server from configuration
 # Returns a reference to the server hash
@@ -7744,7 +7745,7 @@ func Cannoli_Server_parse_response(str $response_body) hash {
                 my scalar $res_headers = $res{"headers"};
 
                 # Parse and apply custom headers (Content-Type:value\nHeader:value...)
-                my array @header_lines = split($headers_str, "\n");
+                my array @header_lines = split("\n", $headers_str);
                 my int $j = 0;
                 while ($j < scalar(@header_lines)) {
                     my str $line = @header_lines[$j];
@@ -8075,16 +8076,12 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                         $path_info = "/";
                     }
 
-                    # Prepare request data for dispatch
-                    my str $query_string = $req{"query_string"};
-                    my str $headers_str = ::serialize_headers($req{"headers"});
-                    my str $remote_addr = $req{"remote_addr"};
-                    my str $content_type = $req{"content_type"};
+                    # Create Cannoli object and pass to dispatch
+                    $req{"path_info"} = $path_info;
+                    my scalar $c = Cannoli::new(%req);
 
-                    my str $response_body = sys::dl_call_str_sv($dispatch, [
-                        $method, $path, $path_info, $query_string,
-                        $body, $headers_str, $remote_addr, $content_type
-                    ]);
+                    my scalar $result = sys::dl_call_sv($dispatch, [$c]);
+                    my str $response_body = defined($result) ? ("" . $result) : "";
 
                     if (length($response_body) > 0) {
                         %res = ::parse_response($response_body);
@@ -8098,24 +8095,16 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         # Try chain-of-responsibility dispatch (old style: app.library)
         my int $num_funcs = scalar(@{$dispatch_funcs});
         if ($num_funcs > 0 && $handled == 0) {
-            # Prepare request data once for all dispatch attempts
-            my str $query_string = $req{"query_string"};
-            my str $headers_str = ::serialize_headers($req{"headers"});
-            my str $remote_addr = $req{"remote_addr"};
-            my str $content_type = $req{"content_type"};
+            # Create Cannoli object once for all dispatch attempts
+            $req{"path_info"} = "";  # Libraries handle their own prefix matching
+            my scalar $c = Cannoli::new(%req);
 
             my int $i = 0;
             while ($i < $num_funcs && $handled == 0) {
                 my scalar $dispatch = $dispatch_funcs->[$i];
 
-                # Call: cannoli_dispatch(method, path, path_info, query_string, body, headers, remote_addr, content_type)
-                # path_info is empty - libraries handle their own prefix matching
-                my str $path_info = "";
-                # Use dl_call_sv for Strada libraries (returns StradaValue*), convert to string
-                my scalar $result = sys::dl_call_sv($dispatch, [
-                    $method, $path, $path_info, $query_string,
-                    $body, $headers_str, $remote_addr, $content_type
-                ]);
+                # Call: cannoli_dispatch($c) - pass Cannoli object
+                my scalar $result = sys::dl_call_sv($dispatch, [$c]);
                 my str $response_body = defined($result) ? ("" . $result) : "";
 
                 if (length($response_body) > 0) {
@@ -8291,16 +8280,12 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                         $path_info = "/";
                     }
 
-                    # Prepare request data for dispatch
-                    my str $query_string = $req{"query_string"};
-                    my str $headers_str = ::serialize_headers($req{"headers"});
-                    my str $remote_addr = $req{"remote_addr"};
-                    my str $content_type = $req{"content_type"};
+                    # Create Cannoli object and pass to dispatch
+                    $req{"path_info"} = $path_info;
+                    my scalar $c = Cannoli::new(%req);
 
-                    my str $response_body = sys::dl_call_str_sv($dispatch, [
-                        $method, $path, $path_info, $query_string,
-                        $body, $headers_str, $remote_addr, $content_type
-                    ]);
+                    my scalar $result = sys::dl_call_sv($dispatch, [$c]);
+                    my str $response_body = defined($result) ? ("" . $result) : "";
 
                     if (length($response_body) > 0) {
                         %res = ::parse_response($response_body);
@@ -8314,21 +8299,17 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         # Try chain-of-responsibility dispatch (old style: app.library)
         my int $num_funcs = scalar(@{$dispatch_funcs});
         if ($num_funcs > 0 && $handled == 0) {
-            # Prepare request data once for all dispatch attempts
-            my str $query_string = $req{"query_string"};
-            my str $headers_str = ::serialize_headers($req{"headers"});
-            my str $remote_addr = $req{"remote_addr"};
-            my str $content_type = $req{"content_type"};
+            # Create Cannoli object once for all dispatch attempts
+            $req{"path_info"} = "";  # Libraries handle their own prefix matching
+            my scalar $c = Cannoli::new(%req);
 
             my int $i = 0;
             while ($i < $num_funcs && $handled == 0) {
                 my scalar $dispatch = $dispatch_funcs->[$i];
 
-                my str $path_info = "";
-                my str $response_body = sys::dl_call_str_sv($dispatch, [
-                    $method, $path, $path_info, $query_string,
-                    $body, $headers_str, $remote_addr, $content_type
-                ]);
+                # Call: cannoli_dispatch($c) - pass Cannoli object
+                my scalar $result = sys::dl_call_sv($dispatch, [$c]);
+                my str $response_body = defined($result) ? ("" . $result) : "";
 
                 if (length($response_body) > 0) {
                     %res = ::parse_response($response_body);
@@ -9519,17 +9500,16 @@ func Cannoli_Main_print_help() void {
     say("  --version            Show version information");
     say("");
     say("Dynamic Library Interface:");
-    say("  Export: char* cannoli_dispatch(method, path, path_info, body)");
-    say("  - method: HTTP method (GET, POST, etc.)");
-    say("  - path: Full request path");
-    say("  - path_info: Remainder after prefix match (for your use)");
-    say("  - body: Request body");
+    say("  Export: str cannoli_dispatch(scalar $c)");
+    say("  - $c: Cannoli object with all request data");
+    say("  - Use $c->method(), $c->path(), $c->body(), $c->param(), etc.");
     say("");
     say("  Return values:");
     say("  - Response body (auto-detects JSON/HTML)");
     say("  - Empty string for 404");
     say("  - \"STATUS:code:content\" for custom status");
     say("  - \"REDIRECT:url\" for redirects");
+    say("  - \"RESPONSE:status:headers_len:headers:body\" for full control");
     say("");
     say("Configuration file (cannoli.conf):");
     say("  [server]");
