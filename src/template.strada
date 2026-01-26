@@ -369,14 +369,14 @@ func Cannoli_Template_merge_scope(scalar $parent_vars, scalar $obj) scalar {
     my scalar $new_vars = {};
 
     # Copy parent vars first
-    if (ref($parent_vars) eq "hash") {
+    if (ref($parent_vars) eq "HASH") {
         foreach my str $k (keys(%{$parent_vars})) {
             $new_vars->{$k} = $parent_vars->{$k};
         }
     }
 
     # Merge object fields (overrides parent)
-    if (ref($obj) eq "hash") {
+    if (ref($obj) eq "HASH") {
         foreach my str $k (keys(%{$obj})) {
             $new_vars->{$k} = $obj->{$k};
         }
@@ -395,7 +395,7 @@ func Cannoli_Template_dump(scalar $val, int $indent) str {
 
     my str $r = ref($val);
 
-    if ($r eq "hash") {
+    if ($r eq "HASH") {
         my str $out = "{\n";
         foreach my str $k (keys(%{$val})) {
             my scalar $v = $val->{$k};
@@ -405,7 +405,7 @@ func Cannoli_Template_dump(scalar $val, int $indent) str {
         return $out;
     }
 
-    if ($r eq "array") {
+    if ($r eq "ARRAY") {
         my str $out = "[\n";
         my int $arr_len = scalar(@{$val});
         my int $arr_i = 0;
@@ -430,7 +430,7 @@ func Cannoli_Template_dump_value(scalar $val) str {
 
     my str $r = ref($val);
 
-    if ($r eq "hash") {
+    if ($r eq "HASH") {
         my str $out = "{";
         my int $count = 0;
         foreach my str $k (keys(%{$val})) {
@@ -444,7 +444,7 @@ func Cannoli_Template_dump_value(scalar $val) str {
         return $out;
     }
 
-    if ($r eq "array") {
+    if ($r eq "ARRAY") {
         my int $arr_len = scalar(@{$val});
         return "[" . $arr_len . " items]";
     }
@@ -525,7 +525,7 @@ func Cannoli_Template_resolve_var(str $name, scalar $vars) str {
         my str $rest = substr($name, $dot + 1, length($name) - $dot - 1);
 
         # Get nested value
-        if (ref($vars) eq "hash" && exists(%{$vars}, $first)) {
+        if (ref($vars) eq "HASH" && exists(%{$vars}, $first)) {
             my scalar $nested = $vars->{$first};
             return ::resolve_var($rest, $nested);
         }
@@ -533,7 +533,7 @@ func Cannoli_Template_resolve_var(str $name, scalar $vars) str {
     }
 
     # Simple variable lookup
-    if (ref($vars) eq "hash" && exists(%{$vars}, $name)) {
+    if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
         my scalar $value = $vars->{$name};
 
         # Convert to string
@@ -558,7 +558,7 @@ func Cannoli_Template_get_var(str $name, scalar $vars) scalar {
         my str $first = substr($name, 0, $dot);
         my str $rest = substr($name, $dot + 1, length($name) - $dot - 1);
 
-        if (ref($vars) eq "hash" && exists(%{$vars}, $first)) {
+        if (ref($vars) eq "HASH" && exists(%{$vars}, $first)) {
             my scalar $nested = $vars->{$first};
             return ::get_var($rest, $nested);
         }
@@ -566,7 +566,7 @@ func Cannoli_Template_get_var(str $name, scalar $vars) scalar {
     }
 
     # Simple variable lookup
-    if (ref($vars) eq "hash" && exists(%{$vars}, $name)) {
+    if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
         return $vars->{$name};
     }
 
@@ -580,11 +580,11 @@ func Cannoli_Template_is_truthy(scalar $val) int {
     }
 
     my str $r = ref($val);
-    if ($r eq "array") {
+    if ($r eq "ARRAY") {
         my int $len = scalar(@{$val});
         return $len > 0;
     }
-    if ($r eq "hash") {
+    if ($r eq "HASH") {
         return 1;
     }
 
@@ -684,7 +684,7 @@ func Cannoli_Template_find_else(str $template, int $start, int $block_end) int {
 func Cannoli_Template_process_each_named(str $collection_name, str $loop_var, str $body, scalar $vars) str {
     my scalar $arr = ::get_var($collection_name, $vars);
 
-    if (!defined($arr) || ref($arr) ne "array") {
+    if (!defined($arr) || ref($arr) ne "ARRAY") {
         return "";
     }
 
@@ -697,7 +697,7 @@ func Cannoli_Template_process_each_named(str $collection_name, str $loop_var, st
         my scalar $iter_vars = {};
 
         # Copy parent vars
-        if (ref($vars) eq "hash") {
+        if (ref($vars) eq "HASH") {
             foreach my str $k (keys(%{$vars})) {
                 $iter_vars->{$k} = $vars->{$k};
             }
@@ -709,7 +709,7 @@ func Cannoli_Template_process_each_named(str $collection_name, str $loop_var, st
             $iter_vars->{$loop_var} = $item;
         } else {
             # Legacy mode: merge hash fields into scope, or use "this" for scalars
-            if (ref($item) eq "hash") {
+            if (ref($item) eq "HASH") {
                 foreach my str $k (keys(%{$item})) {
                     $iter_vars->{$k} = $item->{$k};
                 }

@@ -6,7 +6,7 @@
 #
 # Requires Strada to be installed (run 'make install' in strada directory)
 
-STRADA := strada
+STRADA := /home/mflickin/p/strada/strada
 
 SRC_DIR := src
 LIB_DIR := lib

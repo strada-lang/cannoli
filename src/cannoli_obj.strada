@@ -147,7 +147,7 @@ func Cannoli_json_param(scalar $self, str $key) scalar {
     if (!defined($json)) {
         return undef;
     }
-    if (ref($json) ne "hash") {
+    if (ref($json) ne "HASH") {
         return undef;
     }
     if (exists(%{$json}, $key)) {
@@ -898,7 +898,7 @@ func Cannoli_to_json(scalar $data) str {
 
     my str $type = ref($data);
 
-    if ($type eq "hash") {
+    if ($type eq "HASH") {
         my array @keys = keys(%{$data});
         my int $num = scalar(@keys);
         my str $result = "{";
@@ -918,7 +918,7 @@ func Cannoli_to_json(scalar $data) str {
     }
 
     # Array (both anonymous arrays and named array refs)
-    if ($type eq "array" || $type eq "ref") {
+    if ($type eq "ARRAY" || $type eq "REF") {
         my int $num = scalar(@{$data});
         my str $result = "[";
         my int $i = 0;
@@ -1221,7 +1221,7 @@ func Cannoli_validate(scalar $self, scalar $rules) scalar {
     # Also include JSON body params if available
     if ($self->is_json() == 1) {
         my scalar $json_body = $self->json_body();
-        if (defined($json_body) && ref($json_body) eq "hash") {
+        if (defined($json_body) && ref($json_body) eq "HASH") {
             # Merge JSON body into Cannoli_params(JSON takes precedence)
             my array @json_keys = keys(%{$json_body});
             my int $i = 0;
