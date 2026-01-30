@@ -57,7 +57,7 @@ func handle_home(hash %req) hash {
     my array @names = Cannoli::Request::header_names(%req);
     my int $i = 0;
     while ($i < scalar(@names)) {
-        my str $name = @names[$i];
+        my str $name = $names[$i];
         my str $value = Cannoli::Request::get_header(%req, $name);
         $html = $html . "<tr><td><code>" . $name . "</code></td><td>" . Cannoli::Response::html_escape($value) . "</td></tr>\n";
         $i = $i + 1;
@@ -133,7 +133,7 @@ func handle_read_cookie(hash %req) hash {
         $html = $html . "<h2>All Cookies</h2>\n<ul>\n";
         my int $i = 0;
         while ($i < scalar(@names)) {
-            my str $name = @names[$i];
+            my str $name = $names[$i];
             $html = $html . "<li><code>" . $name . "</code> = <code>" . $cookies{$name} . "</code></li>\n";
             $i = $i + 1;
         }

@@ -103,7 +103,7 @@ func Cannoli_Response_build(hash %res) str {
     my array @header_names = keys(%{$headers});
     my int $i = 0;
     while ($i < scalar(@header_names)) {
-        my str $name = @header_names[$i];
+        my str $name = $header_names[$i];
         my str $value = $headers->{$name};
         if (length($value) > 0) {
             $response = $response . $name . ": " . $value . "\r\n";
@@ -258,7 +258,7 @@ func Cannoli_Response_headers(hash %res, hash %hdrs) void {
     my array @names = keys(%hdrs);
     my int $i = 0;
     while ($i < scalar(@names)) {
-        my str $name = @names[$i];
+        my str $name = $names[$i];
         ::header(%res, $name, $hdrs{$name});
         $i = $i + 1;
     }
@@ -394,7 +394,7 @@ func Cannoli_Response_build_headers(hash %res) str {
     my array @header_names = keys(%{$headers});
     my int $i = 0;
     while ($i < scalar(@header_names)) {
-        my str $name = @header_names[$i];
+        my str $name = $header_names[$i];
         my str $value = $headers->{$name};
         # Skip Content-Length for chunked (it's not allowed)
         if (length($value) > 0 && $name ne "Content-Length") {

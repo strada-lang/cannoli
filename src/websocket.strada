@@ -354,13 +354,13 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
     my array @len_bytes = (0, 0, 0, 0, 0, 0, 0, 0);
     $i = 7;
     while ($i >= 0) {
-        @len_bytes[$i] = $bit_len % 256;
+        $len_bytes[$i] = $bit_len % 256;
         $bit_len = math::floor($bit_len / 256);
         $i = $i - 1;
     }
     $i = 0;
     while ($i < 8) {
-        push(@bytes, @len_bytes[$i]);
+        push(@bytes, $len_bytes[$i]);
         $i = $i + 1;
     }
 
@@ -377,10 +377,10 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
         $i = 0;
         while ($i < 16) {
             my int $idx = $chunk + ($i * 4);
-            my int $b0 = @bytes[$idx];
-            my int $b1 = @bytes[$idx + 1];
-            my int $b2 = @bytes[$idx + 2];
-            my int $b3 = @bytes[$idx + 3];
+            my int $b0 = $bytes[$idx];
+            my int $b1 = $bytes[$idx + 1];
+            my int $b2 = $bytes[$idx + 2];
+            my int $b3 = $bytes[$idx + 3];
             my int $word = ($b0 * 16777216) + ($b1 * 65536) + ($b2 * 256) + $b3;
             push(@w, $word);
             $i = $i + 1;
@@ -388,7 +388,7 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
 
         $i = 16;
         while ($i < 80) {
-            my int $v = ::xor32(::xor32(@w[$i - 3], @w[$i - 8]), ::xor32(@w[$i - 14], @w[$i - 16]));
+            my int $v = ::xor32(::xor32($w[$i - 3], $w[$i - 8]), ::xor32($w[$i - 14], $w[$i - 16]));
             my int $word = ::rol32($v, 1);
             push(@w, $word);
             $i = $i + 1;
@@ -419,7 +419,7 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
                 $k = 3395469782;
             }
 
-            my int $temp = ::add32(::rol32($a, 5), $f, $e, $k, @w[$i]);
+            my int $temp = ::add32(::rol32($a, 5), $f, $e, $k, $w[$i]);
             $e = $d;
             $d = $c;
             $c = ::rol32($b, 30);
@@ -451,7 +451,7 @@ func Cannoli_WebSocket_add32(int ...@vals) int {
     my num $sum = 0;
     my int $i = 0;
     while ($i < scalar(@vals)) {
-        $sum = $sum + @vals[$i];
+        $sum = $sum + $vals[$i];
         $i = $i + 1;
     }
     return ::u32($sum);

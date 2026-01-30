@@ -226,7 +226,7 @@ func cannoli_init(str $config) int {
     my array @lib_paths = config_get_all($config, "lib");
     my int $i = 0;
     while ($i < scalar(@lib_paths)) {
-        my str $lib_path = @lib_paths[$i];
+        my str $lib_path = $lib_paths[$i];
         sys::dl_call_int_sv($g_add_inc_fn, [$lib_path]);
         $i = $i + 1;
     }
@@ -245,7 +245,7 @@ func cannoli_init(str $config) int {
     my array @modules = config_get_all($config, "use");
     $i = 0;
     while ($i < scalar(@modules)) {
-        my str $module = @modules[$i];
+        my str $module = $modules[$i];
         my int $use_result = sys::dl_call_int_sv($g_use_fn, [$module]);
         if ($use_result == 0) {
             say("cannoli_perl: ERROR - Failed to use " . $module);

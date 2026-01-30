@@ -80,7 +80,7 @@ func Cannoli_Config_parse_file(str $filename) hash {
     my int $len = scalar(@lines);
 
     while ($i < $len) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         $line = ::trim($line);
 
         # Skip empty lines and comments
@@ -206,29 +206,29 @@ func Cannoli_Config_merge_args(hash %config, int $argc, array @argv) hash {
     my int $i = 1;
 
     while ($i < $argc) {
-        my str $arg = @argv[$i];
+        my str $arg = $argv[$i];
 
         if ($arg eq "-p" || $arg eq "--port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.port"} = @argv[$i];
+                $config{"server.port"} = $argv[$i];
             }
         } elsif ($arg eq "-h" || $arg eq "--host") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.host"} = @argv[$i];
+                $config{"server.host"} = $argv[$i];
             }
         } elsif ($arg eq "-w" || $arg eq "--workers") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.workers"} = @argv[$i];
+                $config{"server.workers"} = $argv[$i];
             }
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
         } elsif ($arg eq "--socket") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"fastcgi.socket"} = @argv[$i];
+                $config{"fastcgi.socket"} = $argv[$i];
                 $config{"fastcgi.enabled"} = "1";
             }
         }
@@ -248,7 +248,7 @@ func Cannoli_Config_get_library_routes(hash %config) scalar {
     my int $i = 0;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         # Look for keys starting with "library."
         if (length($key) > 8 && substr($key, 0, 8) eq "library.") {
             my str $prefix = substr($key, 8, length($key) - 8);
@@ -292,7 +292,7 @@ func Cannoli_Config_dump(hash %config) void {
     my array @k = keys(%config);
     my int $i = 0;
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         say("  " . $key . " = " . $config{$key});
         $i = $i + 1;
     }
@@ -469,7 +469,7 @@ func Cannoli_Session_load(str $id) scalar {
     my int $in_data = 0;
 
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
 
         if (length($line) == 0) {
             $i = $i + 1;
@@ -529,7 +529,7 @@ func Cannoli_Session_save(scalar $session) int {
     my int $i = 0;
 
     while ($i < scalar(@keys)) {
-        my str $key = @keys[$i];
+        my str $key = $keys[$i];
         my str $value = ::encode_value($data->{$key});
         $content = $content . $key . "=" . $value . "\n";
         $i = $i + 1;
@@ -674,7 +674,7 @@ func Cannoli_Session_cleanup() int {
     my int $i = 0;
 
     while ($i < scalar(@files)) {
-        my str $file = @files[$i];
+        my str $file = $files[$i];
 
         # Only process session files
         if (substr($file, 0, 5) eq "sess_") {
@@ -2032,7 +2032,7 @@ func Cannoli_Validation_from_rules(scalar $params, scalar $rules) scalar {
     my int $i = 0;
 
     while ($i < scalar(@fields)) {
-        my str $field = @fields[$i];
+        my str $field = $fields[$i];
         my scalar $field_rules = $rules->{$field};
 
         # Get value from params
@@ -2131,16 +2131,16 @@ func Cannoli_Request_parse(str $data) hash {
         return %req;
     }
 
-    my str $request_line = @lines[0];
+    my str $request_line = $lines[0];
     my array @parts = split(" ", $request_line);
 
     if (scalar(@parts) >= 3) {
-        $req{"method"} = @parts[0];
-        $req{"uri"} = @parts[1];
-        $req{"http_version"} = @parts[2];
+        $req{"method"} = $parts[0];
+        $req{"uri"} = $parts[1];
+        $req{"http_version"} = $parts[2];
 
         # Parse path and query string
-        my str $uri = @parts[1];
+        my str $uri = $parts[1];
         my int $q_pos = index($uri, "?");
         if ($q_pos >= 0) {
             $req{"path"} = substr($uri, 0, $q_pos);
@@ -2154,7 +2154,7 @@ func Cannoli_Request_parse(str $data) hash {
     my hash %headers = ();
     my int $i = 1;
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         my int $colon = index($line, ":");
 
         if ($colon > 0) {
@@ -2210,7 +2210,7 @@ func Cannoli_Request_parse(str $data) hash {
                 my array @k = keys(%{$mp_params});
                 my int $j = 0;
                 while ($j < scalar(@k)) {
-                    my str $key = @k[$j];
+                    my str $key = $k[$j];
                     $params{$key} = $mp_params->{$key};
                     $j = $j + 1;
                 }
@@ -2223,7 +2223,7 @@ func Cannoli_Request_parse(str $data) hash {
             my array @k = keys(%{$body_params});
             my int $j = 0;
             while ($j < scalar(@k)) {
-                my str $key = @k[$j];
+                my str $key = $k[$j];
                 $params{$key} = $body_params->{$key};
                 $j = $j + 1;
             }
@@ -2252,7 +2252,7 @@ func Cannoli_Request_parse_query(str $qs) scalar {
     my int $i = 0;
 
     while ($i < scalar(@pairs)) {
-        my str $pair = @pairs[$i];
+        my str $pair = $pairs[$i];
         my int $eq_idx = index($pair, "=");
 
         if ($eq_idx > 0) {
@@ -2419,7 +2419,7 @@ func Cannoli_Request_get_cookie(hash %req, str $name) str {
     my array @pairs = split(";", $cookie_header);
     my int $i = 0;
     while ($i < scalar(@pairs)) {
-        my str $pair = trim(@pairs[$i]);
+        my str $pair = trim($pairs[$i]);
         my int $eq_pos = index($pair, "=");
         if ($eq_pos > 0) {
             my str $cookie_name = substr($pair, 0, $eq_pos);
@@ -2443,7 +2443,7 @@ func Cannoli_Request_cookies(hash %req) hash {
     my array @pairs = split(";", $cookie_header);
     my int $i = 0;
     while ($i < scalar(@pairs)) {
-        my str $pair = trim(@pairs[$i]);
+        my str $pair = trim($pairs[$i]);
         my int $eq_pos = index($pair, "=");
         if ($eq_pos > 0) {
             my str $name = substr($pair, 0, $eq_pos);
@@ -2595,7 +2595,7 @@ func Cannoli_Request_parse_multipart_part(str $part) hash {
         my array @header_lines = split("\r\n", $headers_section);
         my int $i = 0;
         while ($i < scalar(@header_lines)) {
-            my str $line = @header_lines[$i];
+            my str $line = $header_lines[$i];
             my str $line_lower = ::header_normalize($line);
 
             if (index($line_lower, "content-disposition:") == 0) {
@@ -2643,7 +2643,7 @@ func Cannoli_Request_parse_multipart(str $body, str $boundary) hash {
     my int $i = 0;
 
     while ($i < scalar(@parts)) {
-        my str $part = @parts[$i];
+        my str $part = $parts[$i];
 
         # Skip empty parts and preamble
         if (length($part) > 2) {
@@ -3729,7 +3729,7 @@ func Cannoli_Response_build(hash %res) str {
     my array @header_names = keys(%{$headers});
     my int $i = 0;
     while ($i < scalar(@header_names)) {
-        my str $name = @header_names[$i];
+        my str $name = $header_names[$i];
         my str $value = $headers->{$name};
         if (length($value) > 0) {
             $response = $response . $name . ": " . $value . "\r\n";
@@ -3884,7 +3884,7 @@ func Cannoli_Response_headers(hash %res, hash %hdrs) void {
     my array @names = keys(%hdrs);
     my int $i = 0;
     while ($i < scalar(@names)) {
-        my str $name = @names[$i];
+        my str $name = $names[$i];
         ::header(%res, $name, $hdrs{$name});
         $i = $i + 1;
     }
@@ -4020,7 +4020,7 @@ func Cannoli_Response_build_headers(hash %res) str {
     my array @header_names = keys(%{$headers});
     my int $i = 0;
     while ($i < scalar(@header_names)) {
-        my str $name = @header_names[$i];
+        my str $name = $header_names[$i];
         my str $value = $headers->{$name};
         # Skip Content-Length for chunked (it's not allowed)
         if (length($value) > 0 && $name ne "Content-Length") {
@@ -4535,13 +4535,13 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
     my array @len_bytes = (0, 0, 0, 0, 0, 0, 0, 0);
     $i = 7;
     while ($i >= 0) {
-        @len_bytes[$i] = $bit_len % 256;
+        $len_bytes[$i] = $bit_len % 256;
         $bit_len = math::floor($bit_len / 256);
         $i = $i - 1;
     }
     $i = 0;
     while ($i < 8) {
-        push(@bytes, @len_bytes[$i]);
+        push(@bytes, $len_bytes[$i]);
         $i = $i + 1;
     }
 
@@ -4558,10 +4558,10 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
         $i = 0;
         while ($i < 16) {
             my int $idx = $chunk + ($i * 4);
-            my int $b0 = @bytes[$idx];
-            my int $b1 = @bytes[$idx + 1];
-            my int $b2 = @bytes[$idx + 2];
-            my int $b3 = @bytes[$idx + 3];
+            my int $b0 = $bytes[$idx];
+            my int $b1 = $bytes[$idx + 1];
+            my int $b2 = $bytes[$idx + 2];
+            my int $b3 = $bytes[$idx + 3];
             my int $word = ($b0 * 16777216) + ($b1 * 65536) + ($b2 * 256) + $b3;
             push(@w, $word);
             $i = $i + 1;
@@ -4569,7 +4569,7 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
 
         $i = 16;
         while ($i < 80) {
-            my int $v = ::xor32(::xor32(@w[$i - 3], @w[$i - 8]), ::xor32(@w[$i - 14], @w[$i - 16]));
+            my int $v = ::xor32(::xor32($w[$i - 3], $w[$i - 8]), ::xor32($w[$i - 14], $w[$i - 16]));
             my int $word = ::rol32($v, 1);
             push(@w, $word);
             $i = $i + 1;
@@ -4600,7 +4600,7 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
                 $k = 3395469782;
             }
 
-            my int $temp = ::add32(::rol32($a, 5), $f, $e, $k, @w[$i]);
+            my int $temp = ::add32(::rol32($a, 5), $f, $e, $k, $w[$i]);
             $e = $d;
             $d = $c;
             $c = ::rol32($b, 30);
@@ -4632,7 +4632,7 @@ func Cannoli_WebSocket_add32(int ...@vals) int {
     my num $sum = 0;
     my int $i = 0;
     while ($i < scalar(@vals)) {
-        $sum = $sum + @vals[$i];
+        $sum = $sum + $vals[$i];
         $i = $i + 1;
     }
     return ::u32($sum);
@@ -5412,7 +5412,7 @@ func Cannoli_start_chunked(scalar $self) scalar {
     my array @hdr_names = keys(%{$custom_hdrs});
     my int $i = 0;
     while ($i < scalar(@hdr_names)) {
-        my str $name = @hdr_names[$i];
+        my str $name = $hdr_names[$i];
         my str $value = $custom_hdrs->{$name};
         Cannoli::Response::header(%res, $name, $value);
         $i = $i + 1;
@@ -5566,7 +5566,7 @@ func Cannoli_build_response(scalar $self) hash {
     my array @hdr_names = keys(%{$custom_hdrs});
     my int $i = 0;
     while ($i < scalar(@hdr_names)) {
-        my str $name = @hdr_names[$i];
+        my str $name = $hdr_names[$i];
         my str $value = $custom_hdrs->{$name};
         Cannoli::Response::header(%res, $name, $value);
         $i = $i + 1;
@@ -5663,7 +5663,7 @@ func Cannoli_to_json(scalar $data) str {
         my int $i = 0;
 
         while ($i < $num) {
-            my str $key = @keys[$i];
+            my str $key = $keys[$i];
             my scalar $val = $data->{$key};
 
             if ($i > 0) {
@@ -5826,7 +5826,7 @@ func Cannoli_session(scalar $self) scalar {
         my array @cookies = split($cookie_header, "; ");
         my int $i = 0;
         while ($i < scalar(@cookies)) {
-            my str $cookie = @cookies[$i];
+            my str $cookie = $cookies[$i];
             my int $eq_pos = index($cookie, "=");
             if ($eq_pos > 0) {
                 my str $name = substr($cookie, 0, $eq_pos);
@@ -5984,7 +5984,7 @@ func Cannoli_validate(scalar $self, scalar $rules) scalar {
             my array @json_keys = keys(%{$json_body});
             my int $i = 0;
             while ($i < scalar(@json_keys)) {
-                my str $key = @json_keys[$i];
+                my str $key = $json_keys[$i];
                 $params->{$key} = $json_body->{$key};
                 $i = $i + 1;
             }
@@ -6102,7 +6102,7 @@ func Cannoli_get_flash(scalar $self, str $key) str {
     my array @flash_keys = keys(%{$flash});
     my int $i = 0;
     while ($i < scalar(@flash_keys)) {
-        my str $k = @flash_keys[$i];
+        my str $k = $flash_keys[$i];
         if ($k ne $key) {
             $new_flash{$k} = $flash->{$k};
         }
@@ -7252,7 +7252,7 @@ func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
     my str $target = "";
     my int $i = 0;
     while ($i < scalar(@keys)) {
-        my str $prefix = @keys[$i];
+        my str $prefix = $keys[$i];
         my int $plen = length($prefix);
         my int $ulen = length($url);
         if ($ulen >= $plen) {
@@ -7290,7 +7290,7 @@ func Cannoli_Static_find_index(scalar $srv, str $dir) str {
     my array @idx = split(",", $idx_list);
     my int $i = 0;
     while ($i < scalar(@idx)) {
-        my str $name = trim(@idx[$i]);
+        my str $name = trim($idx[$i]);
         my str $path = $dir . "/" . $name;
         if (sys::is_file($path)) { return $path; }
         $i = $i + 1;
@@ -7341,7 +7341,7 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
     my array @entries = sys::readdir_full($dir);
     my int $i = 0;
     while ($i < scalar(@entries)) {
-        my str $full_entry = @entries[$i];
+        my str $full_entry = $entries[$i];
         # Extract just the filename from the full path
         my str $name = sys::basename($full_entry);
 
@@ -7512,7 +7512,7 @@ func Cannoli_Server_new(hash %config) scalar {
         my array @paths = split(",", $lib_paths);
         my int $i = 0;
         while ($i < scalar(@paths)) {
-            my str $lib_spec = trim(@paths[$i]);
+            my str $lib_spec = trim($paths[$i]);
             if (length($lib_spec) > 0) {
                 # Parse library spec: path.so or path.so:config
                 my str $lib_path = $lib_spec;
@@ -7702,7 +7702,7 @@ func Cannoli_Server_serialize_headers(scalar $headers_ref) str {
     my array @keys = keys(%{$headers_ref});
     my int $i = 0;
     while ($i < scalar(@keys)) {
-        my str $name = @keys[$i];
+        my str $name = $keys[$i];
         my str $value = $headers_ref->{$name};
         $result = $result . $name . ":" . $value . "\n";
         $i = $i + 1;
@@ -7748,7 +7748,7 @@ func Cannoli_Server_parse_response(str $response_body) hash {
                 my array @header_lines = split("\n", $headers_str);
                 my int $j = 0;
                 while ($j < scalar(@header_lines)) {
-                    my str $line = @header_lines[$j];
+                    my str $line = $header_lines[$j];
                     my int $colon = index($line, ":");
                     if ($colon > 0) {
                         my str $name = substr($line, 0, $colon);
@@ -7807,7 +7807,7 @@ func Cannoli_Server_parse_content_length(str $header_section) int {
     my array @lines = split("\r\n", $header_section);
     my int $i = 1;  # skip request line
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         my int $colon = index($line, ":");
         if ($colon > 0) {
             my str $name = trim(substr($line, 0, $colon));
@@ -8406,7 +8406,7 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
 
         my int $i = 0;
         while ($i < $num_ready) {
-            my int $ready_fd = @ready[$i];
+            my int $ready_fd = $ready[$i];
 
             if ($ready_fd == $http_fd) {
                 # HTTP connection
@@ -8706,7 +8706,7 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
         my int $i = 0;
 
         while ($i < $num_ready) {
-            my int $ready_fd = @ready[$i];
+            my int $ready_fd = $ready[$i];
 
             if ($ready_fd == $http_fd) {
                 # HTTP connection
@@ -8929,7 +8929,7 @@ func Cannoli_FastCGI_params_to_request(hash %params) hash {
     my int $i = 0;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         if (substr($key, 0, 5) eq "HTTP_") {
             my str $header_name = substr($key, 5, length($key) - 5);
             # Convert HTTP_CONTENT_TYPE to content-type
@@ -9078,7 +9078,7 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
                 my array @k = keys(%new_params);
                 my int $i = 0;
                 while ($i < scalar(@k)) {
-                    my str $key = @k[$i];
+                    my str $key = $k[$i];
                     $params{$key} = $new_params{$key};
                     $i = $i + 1;
                 }
@@ -9355,7 +9355,7 @@ func Cannoli_App_render_template(str $template, scalar $vars_ref) str {
     my int $i = 0;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         my str $value = $vars{$key};
         my str $placeholder = "{{" . $key . "}}";
 
@@ -9413,7 +9413,7 @@ func Cannoli_App_json_object(scalar $data_ref) str {
     my int $first = 1;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         my str $value = $data{$key};
 
         if ($first == 0) {
@@ -9641,7 +9641,7 @@ func Cannoli_Main_handle_headers(hash %req) hash {
     my array @names = Cannoli::Request::header_names(%req);
     my int $i = 0;
     while ($i < scalar(@names)) {
-        my str $name = @names[$i];
+        my str $name = $names[$i];
         my str $value = Cannoli::Request::get_header(%req, $name);
         $html = $html . "<tr><td>" . $name . "</td><td>" . Cannoli::Response::html_escape($value) . "</td></tr>\n";
         $i = $i + 1;
@@ -9657,7 +9657,7 @@ func Cannoli_Main_handle_headers(hash %req) hash {
         my array @cookie_names = keys(%cookies);
         my int $j = 0;
         while ($j < scalar(@cookie_names)) {
-            my str $cname = @cookie_names[$j];
+            my str $cname = $cookie_names[$j];
             $html = $html . "<tr><td>" . $cname . "</td><td>" . $cookies{$cname} . "</td></tr>\n";
             $j = $j + 1;
         }
@@ -9720,7 +9720,7 @@ func Cannoli_Main_main(int $argc, array @argv) int {
     # Parse command line arguments
     my int $i = 1;
     while ($i < $argc) {
-        my str $arg = @argv[$i];
+        my str $arg = $argv[$i];
 
         if ($arg eq "--help") {
             $show_help = 1;
@@ -9733,39 +9733,39 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         } elsif ($arg eq "-c" || $arg eq "--config") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                %config = Cannoli::Config::parse_file(@argv[$i]);
+                %config = Cannoli::Config::parse_file($argv[$i]);
             }
         } elsif ($arg eq "-p" || $arg eq "--port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.port"} = @argv[$i];
+                $config{"server.port"} = $argv[$i];
             }
         } elsif ($arg eq "-h" || $arg eq "--host") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.host"} = @argv[$i];
+                $config{"server.host"} = $argv[$i];
             }
         } elsif ($arg eq "-w" || $arg eq "--workers") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.workers"} = @argv[$i];
+                $config{"server.workers"} = $argv[$i];
             }
         } elsif ($arg eq "--max-requests") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.max_requests"} = @argv[$i];
+                $config{"server.max_requests"} = $argv[$i];
             }
         } elsif ($arg eq "-l" || $arg eq "--library") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"app.library"} = @argv[$i];
+                $config{"app.library"} = $argv[$i];
             }
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
         } elsif ($arg eq "--socket") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"fastcgi.socket"} = @argv[$i];
+                $config{"fastcgi.socket"} = $argv[$i];
                 $config{"fastcgi.enabled"} = "1";
             }
         } elsif ($arg eq "--ssl") {
@@ -9773,22 +9773,22 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         } elsif ($arg eq "--ssl-port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"ssl.port"} = @argv[$i];
+                $config{"ssl.port"} = $argv[$i];
             }
         } elsif ($arg eq "--ssl-cert") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"ssl.cert"} = @argv[$i];
+                $config{"ssl.cert"} = $argv[$i];
             }
         } elsif ($arg eq "--ssl-key") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"ssl.key"} = @argv[$i];
+                $config{"ssl.key"} = $argv[$i];
             }
         } elsif ($arg eq "-s" || $arg eq "--static") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"static.root"} = @argv[$i];
+                $config{"static.root"} = $argv[$i];
             }
         } elsif ($arg eq "--listing") {
             $config{"static.listing"} = "1";
@@ -9798,22 +9798,22 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         } elsif ($arg eq "--log-level") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.level"} = @argv[$i];
+                $config{"log.level"} = $argv[$i];
             }
         } elsif ($arg eq "--log-format") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.format"} = @argv[$i];
+                $config{"log.format"} = $argv[$i];
             }
         } elsif ($arg eq "--access-log") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.access_file"} = @argv[$i];
+                $config{"log.access_file"} = $argv[$i];
             }
         } elsif ($arg eq "--error-log") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.error_file"} = @argv[$i];
+                $config{"log.error_file"} = $argv[$i];
             }
         } elsif (substr($arg, 0, 1) ne "-") {
             # Positional argument - treat as static directory

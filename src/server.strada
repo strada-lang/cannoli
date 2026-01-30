@@ -102,7 +102,7 @@ func Cannoli_Server_new(hash %config) scalar {
         my array @paths = split(",", $lib_paths);
         my int $i = 0;
         while ($i < scalar(@paths)) {
-            my str $lib_spec = trim(@paths[$i]);
+            my str $lib_spec = trim($paths[$i]);
             if (length($lib_spec) > 0) {
                 # Parse library spec: path.so or path.so:config
                 my str $lib_path = $lib_spec;
@@ -292,7 +292,7 @@ func Cannoli_Server_serialize_headers(scalar $headers_ref) str {
     my array @keys = keys(%{$headers_ref});
     my int $i = 0;
     while ($i < scalar(@keys)) {
-        my str $name = @keys[$i];
+        my str $name = $keys[$i];
         my str $value = $headers_ref->{$name};
         $result = $result . $name . ":" . $value . "\n";
         $i = $i + 1;
@@ -338,7 +338,7 @@ func Cannoli_Server_parse_response(str $response_body) hash {
                 my array @header_lines = split("\n", $headers_str);
                 my int $j = 0;
                 while ($j < scalar(@header_lines)) {
-                    my str $line = @header_lines[$j];
+                    my str $line = $header_lines[$j];
                     my int $colon = index($line, ":");
                     if ($colon > 0) {
                         my str $name = substr($line, 0, $colon);
@@ -397,7 +397,7 @@ func Cannoli_Server_parse_content_length(str $header_section) int {
     my array @lines = split("\r\n", $header_section);
     my int $i = 1;  # skip request line
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         my int $colon = index($line, ":");
         if ($colon > 0) {
             my str $name = trim(substr($line, 0, $colon));
@@ -996,7 +996,7 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
 
         my int $i = 0;
         while ($i < $num_ready) {
-            my int $ready_fd = @ready[$i];
+            my int $ready_fd = $ready[$i];
 
             if ($ready_fd == $http_fd) {
                 # HTTP connection
@@ -1296,7 +1296,7 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
         my int $i = 0;
 
         while ($i < $num_ready) {
-            my int $ready_fd = @ready[$i];
+            my int $ready_fd = $ready[$i];
 
             if ($ready_fd == $http_fd) {
                 # HTTP connection

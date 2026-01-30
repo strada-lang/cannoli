@@ -436,7 +436,7 @@ func Cannoli_Validation_from_rules(scalar $params, scalar $rules) scalar {
     my int $i = 0;
 
     while ($i < scalar(@fields)) {
-        my str $field = @fields[$i];
+        my str $field = $fields[$i];
         my scalar $field_rules = $rules->{$field};
 
         # Get value from params

@@ -63,16 +63,16 @@ func Cannoli_Request_parse(str $data) hash {
         return %req;
     }
 
-    my str $request_line = @lines[0];
+    my str $request_line = $lines[0];
     my array @parts = split(" ", $request_line);
 
     if (scalar(@parts) >= 3) {
-        $req{"method"} = @parts[0];
-        $req{"uri"} = @parts[1];
-        $req{"http_version"} = @parts[2];
+        $req{"method"} = $parts[0];
+        $req{"uri"} = $parts[1];
+        $req{"http_version"} = $parts[2];
 
         # Parse path and query string
-        my str $uri = @parts[1];
+        my str $uri = $parts[1];
         my int $q_pos = index($uri, "?");
         if ($q_pos >= 0) {
             $req{"path"} = substr($uri, 0, $q_pos);
@@ -86,7 +86,7 @@ func Cannoli_Request_parse(str $data) hash {
     my hash %headers = ();
     my int $i = 1;
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         my int $colon = index($line, ":");
 
         if ($colon > 0) {
@@ -142,7 +142,7 @@ func Cannoli_Request_parse(str $data) hash {
                 my array @k = keys(%{$mp_params});
                 my int $j = 0;
                 while ($j < scalar(@k)) {
-                    my str $key = @k[$j];
+                    my str $key = $k[$j];
                     $params{$key} = $mp_params->{$key};
                     $j = $j + 1;
                 }
@@ -155,7 +155,7 @@ func Cannoli_Request_parse(str $data) hash {
             my array @k = keys(%{$body_params});
             my int $j = 0;
             while ($j < scalar(@k)) {
-                my str $key = @k[$j];
+                my str $key = $k[$j];
                 $params{$key} = $body_params->{$key};
                 $j = $j + 1;
             }
@@ -184,7 +184,7 @@ func Cannoli_Request_parse_query(str $qs) scalar {
     my int $i = 0;
 
     while ($i < scalar(@pairs)) {
-        my str $pair = @pairs[$i];
+        my str $pair = $pairs[$i];
         my int $eq_idx = index($pair, "=");
 
         if ($eq_idx > 0) {
@@ -351,7 +351,7 @@ func Cannoli_Request_get_cookie(hash %req, str $name) str {
     my array @pairs = split(";", $cookie_header);
     my int $i = 0;
     while ($i < scalar(@pairs)) {
-        my str $pair = trim(@pairs[$i]);
+        my str $pair = trim($pairs[$i]);
         my int $eq_pos = index($pair, "=");
         if ($eq_pos > 0) {
             my str $cookie_name = substr($pair, 0, $eq_pos);
@@ -375,7 +375,7 @@ func Cannoli_Request_cookies(hash %req) hash {
     my array @pairs = split(";", $cookie_header);
     my int $i = 0;
     while ($i < scalar(@pairs)) {
-        my str $pair = trim(@pairs[$i]);
+        my str $pair = trim($pairs[$i]);
         my int $eq_pos = index($pair, "=");
         if ($eq_pos > 0) {
             my str $name = substr($pair, 0, $eq_pos);
@@ -527,7 +527,7 @@ func Cannoli_Request_parse_multipart_part(str $part) hash {
         my array @header_lines = split("\r\n", $headers_section);
         my int $i = 0;
         while ($i < scalar(@header_lines)) {
-            my str $line = @header_lines[$i];
+            my str $line = $header_lines[$i];
             my str $line_lower = ::header_normalize($line);
 
             if (index($line_lower, "content-disposition:") == 0) {
@@ -575,7 +575,7 @@ func Cannoli_Request_parse_multipart(str $body, str $boundary) hash {
     my int $i = 0;
 
     while ($i < scalar(@parts)) {
-        my str $part = @parts[$i];
+        my str $part = $parts[$i];
 
         # Skip empty parts and preamble
         if (length($part) > 2) {

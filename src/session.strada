@@ -123,7 +123,7 @@ func Cannoli_Session_load(str $id) scalar {
     my int $in_data = 0;
 
     while ($i < scalar(@lines)) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
 
         if (length($line) == 0) {
             $i = $i + 1;
@@ -183,7 +183,7 @@ func Cannoli_Session_save(scalar $session) int {
     my int $i = 0;
 
     while ($i < scalar(@keys)) {
-        my str $key = @keys[$i];
+        my str $key = $keys[$i];
         my str $value = ::encode_value($data->{$key});
         $content = $content . $key . "=" . $value . "\n";
         $i = $i + 1;
@@ -328,7 +328,7 @@ func Cannoli_Session_cleanup() int {
     my int $i = 0;
 
     while ($i < scalar(@files)) {
-        my str $file = @files[$i];
+        my str $file = $files[$i];
 
         # Only process session files
         if (substr($file, 0, 5) eq "sess_") {

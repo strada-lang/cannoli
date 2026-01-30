@@ -165,7 +165,7 @@ func Cannoli_App_render_template(str $template, scalar $vars_ref) str {
     my int $i = 0;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         my str $value = $vars{$key};
         my str $placeholder = "{{" . $key . "}}";
 
@@ -223,7 +223,7 @@ func Cannoli_App_json_object(scalar $data_ref) str {
     my int $first = 1;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         my str $value = $data{$key};
 
         if ($first == 0) {

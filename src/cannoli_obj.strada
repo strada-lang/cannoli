@@ -654,7 +654,7 @@ func Cannoli_start_chunked(scalar $self) scalar {
     my array @hdr_names = keys(%{$custom_hdrs});
     my int $i = 0;
     while ($i < scalar(@hdr_names)) {
-        my str $name = @hdr_names[$i];
+        my str $name = $hdr_names[$i];
         my str $value = $custom_hdrs->{$name};
         Cannoli::Response::header(%res, $name, $value);
         $i = $i + 1;
@@ -808,7 +808,7 @@ func Cannoli_build_response(scalar $self) hash {
     my array @hdr_names = keys(%{$custom_hdrs});
     my int $i = 0;
     while ($i < scalar(@hdr_names)) {
-        my str $name = @hdr_names[$i];
+        my str $name = $hdr_names[$i];
         my str $value = $custom_hdrs->{$name};
         Cannoli::Response::header(%res, $name, $value);
         $i = $i + 1;
@@ -905,7 +905,7 @@ func Cannoli_to_json(scalar $data) str {
         my int $i = 0;
 
         while ($i < $num) {
-            my str $key = @keys[$i];
+            my str $key = $keys[$i];
             my scalar $val = $data->{$key};
 
             if ($i > 0) {
@@ -1068,7 +1068,7 @@ func Cannoli_session(scalar $self) scalar {
         my array @cookies = split($cookie_header, "; ");
         my int $i = 0;
         while ($i < scalar(@cookies)) {
-            my str $cookie = @cookies[$i];
+            my str $cookie = $cookies[$i];
             my int $eq_pos = index($cookie, "=");
             if ($eq_pos > 0) {
                 my str $name = substr($cookie, 0, $eq_pos);
@@ -1226,7 +1226,7 @@ func Cannoli_validate(scalar $self, scalar $rules) scalar {
             my array @json_keys = keys(%{$json_body});
             my int $i = 0;
             while ($i < scalar(@json_keys)) {
-                my str $key = @json_keys[$i];
+                my str $key = $json_keys[$i];
                 $params->{$key} = $json_body->{$key};
                 $i = $i + 1;
             }
@@ -1344,7 +1344,7 @@ func Cannoli_get_flash(scalar $self, str $key) str {
     my array @flash_keys = keys(%{$flash});
     my int $i = 0;
     while ($i < scalar(@flash_keys)) {
-        my str $k = @flash_keys[$i];
+        my str $k = $flash_keys[$i];
         if ($k ne $key) {
             $new_flash{$k} = $flash->{$k};
         }

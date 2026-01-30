@@ -167,12 +167,12 @@ func test_any_method() int {
 
     while ($i < scalar(@methods)) {
         my hash %req = ();
-        $req{"method"} = @methods[$i];
+        $req{"method"} = $methods[$i];
         $req{"path"} = "/anything";
 
         my scalar $match = Cannoli::Router::match($router, %req);
         if (!defined($match)) {
-            say("  FAIL: " . @methods[$i] . " /anything should match");
+            say("  FAIL: " . $methods[$i] . " /anything should match");
             return 1;
         }
 

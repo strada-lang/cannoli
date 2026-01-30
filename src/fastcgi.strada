@@ -193,7 +193,7 @@ func Cannoli_FastCGI_params_to_request(hash %params) hash {
     my int $i = 0;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         if (substr($key, 0, 5) eq "HTTP_") {
             my str $header_name = substr($key, 5, length($key) - 5);
             # Convert HTTP_CONTENT_TYPE to content-type
@@ -342,7 +342,7 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
                 my array @k = keys(%new_params);
                 my int $i = 0;
                 while ($i < scalar(@k)) {
-                    my str $key = @k[$i];
+                    my str $key = $k[$i];
                     $params{$key} = $new_params{$key};
                     $i = $i + 1;
                 }

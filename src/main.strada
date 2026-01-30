@@ -209,7 +209,7 @@ func Cannoli_Main_handle_headers(hash %req) hash {
     my array @names = Cannoli::Request::header_names(%req);
     my int $i = 0;
     while ($i < scalar(@names)) {
-        my str $name = @names[$i];
+        my str $name = $names[$i];
         my str $value = Cannoli::Request::get_header(%req, $name);
         $html = $html . "<tr><td>" . $name . "</td><td>" . Cannoli::Response::html_escape($value) . "</td></tr>\n";
         $i = $i + 1;
@@ -225,7 +225,7 @@ func Cannoli_Main_handle_headers(hash %req) hash {
         my array @cookie_names = keys(%cookies);
         my int $j = 0;
         while ($j < scalar(@cookie_names)) {
-            my str $cname = @cookie_names[$j];
+            my str $cname = $cookie_names[$j];
             $html = $html . "<tr><td>" . $cname . "</td><td>" . $cookies{$cname} . "</td></tr>\n";
             $j = $j + 1;
         }
@@ -288,7 +288,7 @@ func Cannoli_Main_main(int $argc, array @argv) int {
     # Parse command line arguments
     my int $i = 1;
     while ($i < $argc) {
-        my str $arg = @argv[$i];
+        my str $arg = $argv[$i];
 
         if ($arg eq "--help") {
             $show_help = 1;
@@ -301,39 +301,39 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         } elsif ($arg eq "-c" || $arg eq "--config") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                %config = Cannoli::Config::parse_file(@argv[$i]);
+                %config = Cannoli::Config::parse_file($argv[$i]);
             }
         } elsif ($arg eq "-p" || $arg eq "--port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.port"} = @argv[$i];
+                $config{"server.port"} = $argv[$i];
             }
         } elsif ($arg eq "-h" || $arg eq "--host") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.host"} = @argv[$i];
+                $config{"server.host"} = $argv[$i];
             }
         } elsif ($arg eq "-w" || $arg eq "--workers") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.workers"} = @argv[$i];
+                $config{"server.workers"} = $argv[$i];
             }
         } elsif ($arg eq "--max-requests") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.max_requests"} = @argv[$i];
+                $config{"server.max_requests"} = $argv[$i];
             }
         } elsif ($arg eq "-l" || $arg eq "--library") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"app.library"} = @argv[$i];
+                $config{"app.library"} = $argv[$i];
             }
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
         } elsif ($arg eq "--socket") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"fastcgi.socket"} = @argv[$i];
+                $config{"fastcgi.socket"} = $argv[$i];
                 $config{"fastcgi.enabled"} = "1";
             }
         } elsif ($arg eq "--ssl") {
@@ -341,22 +341,22 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         } elsif ($arg eq "--ssl-port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"ssl.port"} = @argv[$i];
+                $config{"ssl.port"} = $argv[$i];
             }
         } elsif ($arg eq "--ssl-cert") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"ssl.cert"} = @argv[$i];
+                $config{"ssl.cert"} = $argv[$i];
             }
         } elsif ($arg eq "--ssl-key") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"ssl.key"} = @argv[$i];
+                $config{"ssl.key"} = $argv[$i];
             }
         } elsif ($arg eq "-s" || $arg eq "--static") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"static.root"} = @argv[$i];
+                $config{"static.root"} = $argv[$i];
             }
         } elsif ($arg eq "--listing") {
             $config{"static.listing"} = "1";
@@ -366,22 +366,22 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         } elsif ($arg eq "--log-level") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.level"} = @argv[$i];
+                $config{"log.level"} = $argv[$i];
             }
         } elsif ($arg eq "--log-format") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.format"} = @argv[$i];
+                $config{"log.format"} = $argv[$i];
             }
         } elsif ($arg eq "--access-log") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.access_file"} = @argv[$i];
+                $config{"log.access_file"} = $argv[$i];
             }
         } elsif ($arg eq "--error-log") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"log.error_file"} = @argv[$i];
+                $config{"log.error_file"} = $argv[$i];
             }
         } elsif (substr($arg, 0, 1) ne "-") {
             # Positional argument - treat as static directory

@@ -36,7 +36,7 @@ func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
     my str $target = "";
     my int $i = 0;
     while ($i < scalar(@keys)) {
-        my str $prefix = @keys[$i];
+        my str $prefix = $keys[$i];
         my int $plen = length($prefix);
         my int $ulen = length($url);
         if ($ulen >= $plen) {
@@ -74,7 +74,7 @@ func Cannoli_Static_find_index(scalar $srv, str $dir) str {
     my array @idx = split(",", $idx_list);
     my int $i = 0;
     while ($i < scalar(@idx)) {
-        my str $name = trim(@idx[$i]);
+        my str $name = trim($idx[$i]);
         my str $path = $dir . "/" . $name;
         if (sys::is_file($path)) { return $path; }
         $i = $i + 1;
@@ -125,7 +125,7 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
     my array @entries = sys::readdir_full($dir);
     my int $i = 0;
     while ($i < scalar(@entries)) {
-        my str $full_entry = @entries[$i];
+        my str $full_entry = $entries[$i];
         # Extract just the filename from the full path
         my str $name = sys::basename($full_entry);
 

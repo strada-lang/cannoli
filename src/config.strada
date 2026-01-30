@@ -80,7 +80,7 @@ func Cannoli_Config_parse_file(str $filename) hash {
     my int $len = scalar(@lines);
 
     while ($i < $len) {
-        my str $line = @lines[$i];
+        my str $line = $lines[$i];
         $line = ::trim($line);
 
         # Skip empty lines and comments
@@ -206,29 +206,29 @@ func Cannoli_Config_merge_args(hash %config, int $argc, array @argv) hash {
     my int $i = 1;
 
     while ($i < $argc) {
-        my str $arg = @argv[$i];
+        my str $arg = $argv[$i];
 
         if ($arg eq "-p" || $arg eq "--port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.port"} = @argv[$i];
+                $config{"server.port"} = $argv[$i];
             }
         } elsif ($arg eq "-h" || $arg eq "--host") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.host"} = @argv[$i];
+                $config{"server.host"} = $argv[$i];
             }
         } elsif ($arg eq "-w" || $arg eq "--workers") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"server.workers"} = @argv[$i];
+                $config{"server.workers"} = $argv[$i];
             }
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
         } elsif ($arg eq "--socket") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
-                $config{"fastcgi.socket"} = @argv[$i];
+                $config{"fastcgi.socket"} = $argv[$i];
                 $config{"fastcgi.enabled"} = "1";
             }
         }
@@ -248,7 +248,7 @@ func Cannoli_Config_get_library_routes(hash %config) scalar {
     my int $i = 0;
 
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         # Look for keys starting with "library."
         if (length($key) > 8 && substr($key, 0, 8) eq "library.") {
             my str $prefix = substr($key, 8, length($key) - 8);
@@ -292,7 +292,7 @@ func Cannoli_Config_dump(hash %config) void {
     my array @k = keys(%config);
     my int $i = 0;
     while ($i < scalar(@k)) {
-        my str $key = @k[$i];
+        my str $key = $k[$i];
         say("  " . $key . " = " . $config{$key});
         $i = $i + 1;
     }
