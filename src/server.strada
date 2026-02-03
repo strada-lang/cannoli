@@ -447,9 +447,33 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
 
     if (length($buffer) == 0) {
         my int $client_fd = sys::socket_fd($client);
+
+        # During keep-alive wait, also monitor the server socket so this
+        # worker can break out and accept new connections if needed
+        my scalar $server_sock = $server_ref->{"server_sock"};
+        my int $server_fd = defined($server_sock) ? sys::socket_fd($server_sock) : -1;
+
         my array @fds = ($client_fd);
+        if ($server_fd >= 0) {
+            push(@fds, $server_fd);
+        }
+
         my array @ready = sys::select_fds(\@fds, $timeout_ms);
         if (scalar(@ready) == 0) {
+            return undef;
+        }
+
+        # If server socket is ready but client is not, a new connection is
+        # waiting and this worker should drop keep-alive to go accept it
+        my int $client_ready = 0;
+        my int $j = 0;
+        while ($j < scalar(@ready)) {
+            if ($ready[$j] == $client_fd) {
+                $client_ready = 1;
+            }
+            $j++;
+        }
+        if ($client_ready == 0) {
             return undef;
         }
     }
@@ -507,9 +531,30 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
     my int $timeout_ms = $server_ref->{"timeout"} * 1000;
 
     if (length($buffer) == 0 && $ssl_fd > 0) {
+        # During keep-alive wait, also monitor the server socket
+        my scalar $server_sock = $server_ref->{"server_sock"};
+        my int $server_fd = defined($server_sock) ? sys::socket_fd($server_sock) : -1;
+
         my array @fds = ($ssl_fd);
+        if ($server_fd >= 0) {
+            push(@fds, $server_fd);
+        }
+
         my array @ready = sys::select_fds(\@fds, $timeout_ms);
         if (scalar(@ready) == 0) {
+            return undef;
+        }
+
+        # If server socket is ready but client is not, drop keep-alive
+        my int $client_ready = 0;
+        my int $j = 0;
+        while ($j < scalar(@ready)) {
+            if ($ready[$j] == $ssl_fd) {
+                $client_ready = 1;
+            }
+            $j++;
+        }
+        if ($client_ready == 0) {
             return undef;
         }
     }
