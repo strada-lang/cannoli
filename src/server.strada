@@ -280,6 +280,11 @@ func Cannoli_Server_create_socket(scalar $server_ref) scalar {
         return undef;
     }
 
+    # Set non-blocking to prevent thundering herd problem with multiple workers
+    # When select() wakes all workers, only one will get the connection;
+    # others will get EAGAIN from accept() instead of blocking
+    sys::socket_set_nonblocking($server_sock, 1);
+
     $server_ref->{"server_sock"} = $server_sock;
     say("Listening on " . $host . ":" . $port . " (backlog=" . $backlog . ")");
 
@@ -502,8 +507,9 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
     my int $timeout_ms = $server_ref->{"timeout"} * 1000;
 
     if (length($buffer) == 0 && $ssl_fd > 0) {
-        my int $ready = sys::socket_select($ssl_fd, $timeout_ms);
-        if ($ready == 0) {
+        my array @fds = ($ssl_fd);
+        my array @ready = sys::select_fds(\@fds, $timeout_ms);
+        if (scalar(@ready) == 0) {
             return undef;
         }
     }
