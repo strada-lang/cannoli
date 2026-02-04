@@ -7439,6 +7439,7 @@ package Cannoli::Server;
 #
 # Library interface:
 #   cannoli_dispatch($c) -> response_body
+#   cannoli_after_request($c, $elapsed_ms) -> void  (optional, called after response sent)
 #   $c is a Cannoli object with all request data and response methods
 
 # Create a new server from configuration
@@ -7479,6 +7480,7 @@ func Cannoli_Server_new(hash %config) scalar {
     $server{"app_library"} = Cannoli::Config::get_str(%config, "app.library", "");
     $server{"lib_handles"} = [];       # Array of library handles
     $server{"dispatch_funcs"} = [];    # Array of dispatch functions (old style)
+    $server{"after_funcs"} = [];       # Array of after-request functions (old style)
     $server{"library_routes"} = [];    # Array of {prefix, dispatch_func} (new style)
 
     # Load SSL library if SSL is enabled
@@ -7558,6 +7560,12 @@ func Cannoli_Server_new(hash %config) scalar {
                         push(@{$server{"lib_handles"}}, $lib);
                         push(@{$server{"dispatch_funcs"}}, $sym);
                         say("  Loaded: cannoli_dispatch");
+
+                        my scalar $after_sym = sys::dl_sym($lib, "cannoli_after_request");
+                        push(@{$server{"after_funcs"}}, $after_sym);
+                        if (defined($after_sym)) {
+                            say("  Loaded: cannoli_after_request");
+                        }
                     } else {
                         say("  Warning: cannoli_dispatch not found");
                     }
@@ -7624,8 +7632,12 @@ func Cannoli_Server_new(hash %config) scalar {
                     my hash %lib_route = ();
                     $lib_route{"prefix"} = $prefix;
                     $lib_route{"dispatch"} = $sym;
+                    $lib_route{"after"} = sys::dl_sym($lib, "cannoli_after_request");
                     push(@{$server{"library_routes"}}, \%lib_route);
                     say("    Loaded: cannoli_dispatch");
+                    if (defined($lib_route{"after"})) {
+                        say("    Loaded: cannoli_after_request");
+                    }
                 } else {
                     say("    Warning: cannoli_dispatch not found");
                 }
@@ -8019,6 +8031,7 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
 func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
     my scalar $router = $server_ref->{"router"};
     my scalar $dispatch_funcs = $server_ref->{"dispatch_funcs"};
+    my scalar $after_funcs = $server_ref->{"after_funcs"};
     my scalar $library_routes = $server_ref->{"library_routes"};
     my int $client_fd = sys::socket_fd($client);
     my str $buffer = "";
@@ -8090,6 +8103,8 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
 
         my hash %res = ();
         my int $handled = 0;
+        my scalar $c = undef;
+        my scalar $after_func = undef;
 
         # Try prefix-based library routes first (new style)
         my int $num_routes = scalar(@{$library_routes});
@@ -8135,7 +8150,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
 
                     # Create Cannoli object and pass to dispatch
                     $req{"path_info"} = $path_info;
-                    my scalar $c = Cannoli::new(%req);
+                    $c = Cannoli::new(%req);
 
                     my scalar $result = sys::dl_call_sv($dispatch, [$c]);
                     my str $response_body = defined($result) ? ("" . $result) : "";
@@ -8143,6 +8158,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                     if (length($response_body) > 0) {
                         %res = ::parse_response($response_body);
                         $handled = 1;
+                        $after_func = $route->{"after"};
                     }
                 }
                 $i = $i + 1;
@@ -8154,7 +8170,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         if ($num_funcs > 0 && $handled == 0) {
             # Create Cannoli object once for all dispatch attempts
             $req{"path_info"} = "";  # Libraries handle their own prefix matching
-            my scalar $c = Cannoli::new(%req);
+            $c = Cannoli::new(%req);
 
             my int $i = 0;
             while ($i < $num_funcs && $handled == 0) {
@@ -8167,6 +8183,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                 if (length($response_body) > 0) {
                     %res = ::parse_response($response_body);
                     $handled = 1;
+                    $after_func = $after_funcs->[$i];
                 }
                 $i = $i + 1;
             }
@@ -8206,6 +8223,11 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         # Log the request with timing
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
 
+        # Call after-request hook if defined
+        if (defined($after_func) && defined($c)) {
+            sys::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
+        }
+
         if ($res{"sent"} == 1) {
             last;
         }
@@ -8223,6 +8245,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
 func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void {
     my scalar $router = $server_ref->{"router"};
     my scalar $dispatch_funcs = $server_ref->{"dispatch_funcs"};
+    my scalar $after_funcs = $server_ref->{"after_funcs"};
     my scalar $library_routes = $server_ref->{"library_routes"};
     my scalar $ssl_read_fn = $server_ref->{"ssl_read_fn"};
     my scalar $ssl_write_fn = $server_ref->{"ssl_write_fn"};
@@ -8306,6 +8329,8 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
         my hash %res = ();
         my int $handled = 0;
+        my scalar $c = undef;
+        my scalar $after_func = undef;
 
         # Try prefix-based library routes first (new style)
         my int $num_routes = scalar(@{$library_routes});
@@ -8347,7 +8372,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
                     # Create Cannoli object and pass to dispatch
                     $req{"path_info"} = $path_info;
-                    my scalar $c = Cannoli::new(%req);
+                    $c = Cannoli::new(%req);
 
                     my scalar $result = sys::dl_call_sv($dispatch, [$c]);
                     my str $response_body = defined($result) ? ("" . $result) : "";
@@ -8355,6 +8380,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                     if (length($response_body) > 0) {
                         %res = ::parse_response($response_body);
                         $handled = 1;
+                        $after_func = $route->{"after"};
                     }
                 }
                 $i = $i + 1;
@@ -8366,7 +8392,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         if ($num_funcs > 0 && $handled == 0) {
             # Create Cannoli object once for all dispatch attempts
             $req{"path_info"} = "";  # Libraries handle their own prefix matching
-            my scalar $c = Cannoli::new(%req);
+            $c = Cannoli::new(%req);
 
             my int $i = 0;
             while ($i < $num_funcs && $handled == 0) {
@@ -8379,6 +8405,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                 if (length($response_body) > 0) {
                     %res = ::parse_response($response_body);
                     $handled = 1;
+                    $after_func = $after_funcs->[$i];
                 }
                 $i = $i + 1;
             }
@@ -8416,6 +8443,11 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
         # Log the request with timing
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
+
+        # Call after-request hook if defined
+        if (defined($after_func) && defined($c)) {
+            sys::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
+        }
 
         if ($res{"sent"} == 1) {
             last;
