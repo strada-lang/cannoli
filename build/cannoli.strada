@@ -8048,6 +8048,12 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         $buffer = $read_result->{"buffer"};
         my hash %req = %{$read_result->{"req"}};
 
+        # Set remote address from socket
+        my scalar $peer = sys::getpeername(sys::socket_fd($client));
+        if (defined($peer)) {
+            $req{"remote_addr"} = $peer->{"addr"};
+        }
+
         # Start timing
         my hash %start_time = sys::gettimeofday();
         my int $start_sec = $start_time{"sec"};
@@ -8252,6 +8258,14 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
         $buffer = $read_result->{"buffer"};
         my hash %req = %{$read_result->{"req"}};
+
+        # Set remote address from SSL socket
+        if ($ssl_fd >= 0) {
+            my scalar $peer = sys::getpeername($ssl_fd);
+            if (defined($peer)) {
+                $req{"remote_addr"} = $peer->{"addr"};
+            }
+        }
 
         # Start timing
         my hash %start_time = sys::gettimeofday();
