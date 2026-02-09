@@ -40,7 +40,11 @@ COMBINED := $(BUILD_DIR)/cannoli.strada
 # Target binary
 TARGET := cannoli
 
-.PHONY: all clean test examples
+# Tools
+TOOLS_DIR := tools
+TOOLS := $(TOOLS_DIR)/cannoli-status
+
+.PHONY: all clean test examples tools
 
 all: $(TARGET)
 	@echo ""
@@ -67,10 +71,20 @@ test: $(TARGET)
 	@chmod +x t/run_tests.sh build_test.sh
 	@./t/run_tests.sh
 
+# Build tools
+tools: $(TOOLS)
+	@echo ""
+	@echo "✓ Tools built: $(TOOLS)"
+
+$(TOOLS_DIR)/cannoli-status: $(TOOLS_DIR)/cannoli-status.strada
+	@echo "Building cannoli-status..."
+	@$(STRADA) $< -o $@
+
 # Clean build artifacts
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f $(TARGET)
+	rm -f $(TOOLS)
 	rm -f /tmp/cannoli_*
 
 # Install to /usr/local/bin
@@ -87,6 +101,7 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  make          - Build the cannoli binary"
+	@echo "  make tools    - Build admin tools (cannoli-status)"
 	@echo "  make test     - Run the test suite"
 	@echo "  make clean    - Remove build artifacts"
 	@echo "  make install  - Install to /usr/local/bin"
