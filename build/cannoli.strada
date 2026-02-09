@@ -7466,6 +7466,11 @@ func Cannoli_Server_new(hash %config) scalar {
     $server{"ssl_cert"} = Cannoli::Config::get_str(%config, "ssl.cert", "");
     $server{"ssl_key"} = Cannoli::Config::get_str(%config, "ssl.key", "");
 
+    # Admin endpoint configuration
+    $server{"admin_enabled"} = Cannoli::Config::get_bool(%config, "admin.enabled", 0);
+    $server{"admin_path"} = Cannoli::Config::get_str(%config, "admin.path", "/__admin");
+    $server{"admin_allowed_ips"} = Cannoli::Config::get_str(%config, "admin.allowed_ips", "127.0.0.1");
+
     $server{"ssl_ctx"} = undef;
     $server{"ssl_server"} = undef;
     $server{"ssl_lib"} = undef;
@@ -8027,6 +8032,76 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
     return \%result;
 }
 
+# Check if IP is in allowed list for admin access
+func Cannoli_Server_is_admin_allowed(str $remote_ip, str $allowed_ips) int {
+    if (length($allowed_ips) == 0) {
+        return 0;
+    }
+    my array @ips = split(",", $allowed_ips);
+    my int $i = 0;
+    while ($i < scalar(@ips)) {
+        my str $allowed = trim($ips[$i]);
+        if ($allowed eq "*" || $remote_ip eq $allowed) {
+            return 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Handle admin endpoint request - returns JSON stats
+# action: "" for status, "kill" to terminate worker
+func Cannoli_Server_handle_admin(scalar $server_ref, str $remote_ip, str $action) hash {
+    # Handle kill action
+    if ($action eq "kill") {
+        my int $pid = sys::getpid();
+        my str $json = "{\n";
+        $json = $json . "  \"status\": \"ok\",\n";
+        $json = $json . "  \"action\": \"kill\",\n";
+        $json = $json . "  \"message\": \"Worker " . $pid . " will terminate after this response\",\n";
+        $json = $json . "  \"pid\": " . $pid . "\n";
+        $json = $json . "}";
+
+        my hash %res = Cannoli::Response::json(200, $json);
+        $res{"_exit_after"} = 1;  # Signal to exit after response
+        return %res;
+    }
+
+    # Calculate worker uptime
+    my hash %now = sys::gettimeofday();
+    my int $uptime_sec = $now{"sec"} - $_g_worker_start_sec;
+
+    # Calculate average response time
+    my int $avg_time_ms = 0;
+    if ($_g_worker_requests > 0) {
+        $avg_time_ms = $_g_worker_total_time_ms / $_g_worker_requests;
+    }
+
+    # Build JSON response
+    my str $json = "{\n";
+    $json = $json . "  \"status\": \"ok\",\n";
+    $json = $json . "  \"worker\": {\n";
+    $json = $json . "    \"pid\": " . sys::getpid() . ",\n";
+    $json = $json . "    \"uptime_sec\": " . $uptime_sec . ",\n";
+    $json = $json . "    \"requests\": " . $_g_worker_requests . ",\n";
+    $json = $json . "    \"avg_response_ms\": " . $avg_time_ms . "\n";
+    $json = $json . "  },\n";
+    $json = $json . "  \"server\": {\n";
+    $json = $json . "    \"host\": \"" . $server_ref->{"host"} . "\",\n";
+    $json = $json . "    \"port\": " . $server_ref->{"port"} . ",\n";
+    $json = $json . "    \"num_workers\": " . $server_ref->{"num_workers"} . ",\n";
+    $json = $json . "    \"max_requests\": " . $server_ref->{"max_requests"} . ",\n";
+    $json = $json . "    \"ssl_enabled\": " . ($server_ref->{"ssl_enabled"} == 1 ? "true" : "false") . "\n";
+    $json = $json . "  },\n";
+    $json = $json . "  \"client\": {\n";
+    $json = $json . "    \"remote_ip\": \"" . $remote_ip . "\"\n";
+    $json = $json . "  }\n";
+    $json = $json . "}";
+
+    my hash %res = Cannoli::Response::json(200, $json);
+    return %res;
+}
+
 # Handle a single client connection
 func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
     my scalar $router = $server_ref->{"router"};
@@ -8105,6 +8180,35 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         my int $handled = 0;
         my scalar $c = undef;
         my scalar $after_func = undef;
+
+        # Check for admin endpoint (supports /__admin and /__admin/action)
+        my int $admin_enabled = $server_ref->{"admin_enabled"};
+        my str $admin_path = $server_ref->{"admin_path"};
+        my int $admin_path_len = length($admin_path);
+        my int $is_admin = 0;
+        my str $admin_action = "";
+
+        if ($admin_enabled == 1 && length($path) >= $admin_path_len) {
+            if ($path eq $admin_path) {
+                $is_admin = 1;
+            } elsif (substr($path, 0, $admin_path_len) eq $admin_path && substr($path, $admin_path_len, 1) eq "/") {
+                $is_admin = 1;
+                $admin_action = substr($path, $admin_path_len + 1, length($path) - $admin_path_len - 1);
+            }
+        }
+
+        if ($is_admin == 1) {
+            my str $remote_ip = $req{"remote_addr"} // "unknown";
+            my str $allowed_ips = $server_ref->{"admin_allowed_ips"};
+            if (::is_admin_allowed($remote_ip, $allowed_ips) == 1) {
+                %res = ::handle_admin($server_ref, $remote_ip, $admin_action);
+                $handled = 1;
+            } else {
+                # Forbidden - IP not allowed
+                %res = Cannoli::Response::error_page(403, "Forbidden");
+                $handled = 1;
+            }
+        }
 
         # Try prefix-based library routes first (new style)
         my int $num_routes = scalar(@{$library_routes});
@@ -8223,6 +8327,9 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         # Log the request with timing
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
 
+        # Record stats for admin endpoint
+        ::record_request($elapsed_ms);
+
         # Call after-request hook if defined
         if (defined($after_func) && defined($c)) {
             sys::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
@@ -8230,6 +8337,12 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
 
         if ($res{"sent"} == 1) {
             last;
+        }
+
+        # Check if admin requested worker termination
+        if ($res{"_exit_after"} == 1) {
+            sys::socket_close($client);
+            exit(0);
         }
 
         if ($keep_alive == 0) {
@@ -8331,6 +8444,35 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         my int $handled = 0;
         my scalar $c = undef;
         my scalar $after_func = undef;
+
+        # Check for admin endpoint (supports /__admin and /__admin/action)
+        my int $admin_enabled = $server_ref->{"admin_enabled"};
+        my str $admin_path = $server_ref->{"admin_path"};
+        my int $admin_path_len = length($admin_path);
+        my int $is_admin = 0;
+        my str $admin_action = "";
+
+        if ($admin_enabled == 1 && length($path) >= $admin_path_len) {
+            if ($path eq $admin_path) {
+                $is_admin = 1;
+            } elsif (substr($path, 0, $admin_path_len) eq $admin_path && substr($path, $admin_path_len, 1) eq "/") {
+                $is_admin = 1;
+                $admin_action = substr($path, $admin_path_len + 1, length($path) - $admin_path_len - 1);
+            }
+        }
+
+        if ($is_admin == 1) {
+            my str $remote_ip = $req{"remote_addr"} // "unknown";
+            my str $allowed_ips = $server_ref->{"admin_allowed_ips"};
+            if (::is_admin_allowed($remote_ip, $allowed_ips) == 1) {
+                %res = ::handle_admin($server_ref, $remote_ip, $admin_action);
+                $handled = 1;
+            } else {
+                # Forbidden - IP not allowed
+                %res = Cannoli::Response::error_page(403, "Forbidden");
+                $handled = 1;
+            }
+        }
 
         # Try prefix-based library routes first (new style)
         my int $num_routes = scalar(@{$library_routes});
@@ -8444,6 +8586,9 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         # Log the request with timing
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
 
+        # Record stats for admin endpoint
+        ::record_request($elapsed_ms);
+
         # Call after-request hook if defined
         if (defined($after_func) && defined($c)) {
             sys::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
@@ -8451,6 +8596,12 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
         if ($res{"sent"} == 1) {
             last;
+        }
+
+        # Check if admin requested worker termination
+        if ($res{"_exit_after"} == 1) {
+            sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
+            exit(0);
         }
 
         if ($keep_alive == 0) {
@@ -8544,6 +8695,8 @@ func Cannoli_Server_spawn_workers(scalar $server_ref) void {
             # Install worker signal handlers
             sys::signal("TERM", \&Cannoli_Server_worker_handle_term);
             sys::signal("INT", "IGNORE");  # Let master handle Ctrl+C
+            # Initialize per-worker stats
+            ::init_worker_stats();
             ::worker_loop($server_ref);
             exit(0);
         } elsif ($pid > 0) {
@@ -8560,6 +8713,27 @@ func Cannoli_Server_spawn_workers(scalar $server_ref) void {
 
 # Global server reference for signal handlers
 my scalar $_g_server_ref = undef;
+
+# Per-worker stats (reset on worker start)
+my int $_g_worker_requests = 0;
+my int $_g_worker_start_sec = 0;
+my int $_g_worker_start_usec = 0;
+my int $_g_worker_total_time_ms = 0;  # Total response time for averaging
+
+# Initialize worker stats (called when worker starts)
+func Cannoli_Server_init_worker_stats() void {
+    $_g_worker_requests = 0;
+    $_g_worker_total_time_ms = 0;
+    my hash %now = sys::gettimeofday();
+    $_g_worker_start_sec = $now{"sec"};
+    $_g_worker_start_usec = $now{"usec"};
+}
+
+# Record a completed request
+func Cannoli_Server_record_request(int $elapsed_ms) void {
+    $_g_worker_requests = $_g_worker_requests + 1;
+    $_g_worker_total_time_ms = $_g_worker_total_time_ms + $elapsed_ms;
+}
 
 # Worker signal handler for SIGTERM - exit cleanly
 func Cannoli_Server_worker_handle_term(int $sig) void {
