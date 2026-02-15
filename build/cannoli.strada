@@ -7502,10 +7502,10 @@ func Cannoli_Server_new(hash %config) scalar {
             $server{"ssl_lib"} = $ssl_lib;
             $server{"ssl_server_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_server_sv");
             $server{"ssl_accept_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_accept_sv");
-            $server{"ssl_read_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_read_str");
-            $server{"ssl_write_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_write_str");
-            $server{"ssl_close_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_close");
-            $server{"ssl_fd_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_fd");
+            $server{"ssl_read_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_read_sv");
+            $server{"ssl_write_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_write_sv");
+            $server{"ssl_close_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_close_sv");
+            $server{"ssl_fd_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_fd_sv");
             say("  SSL library loaded");
             if (defined($server{"ssl_server_fn"})) {
                 say("  Found strada_ssl_server_sv");
