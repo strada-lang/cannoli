@@ -7490,9 +7490,14 @@ func Cannoli_Server_new(hash %config) scalar {
 
     # Load SSL library if SSL is enabled
     if ($server{"ssl_enabled"} == 1) {
-        my str $ssl_lib_path = "../lib/ssl/libstrada_ssl.so";
-        say("Loading SSL library: " . $ssl_lib_path);
+        # Try installed path first, then development path
+        my str $ssl_lib_path = "/usr/local/lib/strada/lib/ssl/libstrada_ssl.so";
         my scalar $ssl_lib = sys::dl_open($ssl_lib_path);
+        if (!defined($ssl_lib)) {
+            $ssl_lib_path = "../lib/ssl/libstrada_ssl.so";
+            $ssl_lib = sys::dl_open($ssl_lib_path);
+        }
+        say("Loading SSL library: " . $ssl_lib_path);
         if (defined($ssl_lib)) {
             $server{"ssl_lib"} = $ssl_lib;
             $server{"ssl_server_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_server_sv");
