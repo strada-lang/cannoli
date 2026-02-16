@@ -7462,6 +7462,7 @@ func Cannoli_Server_new(hash %config) scalar {
 
     # SSL configuration
     $server{"ssl_enabled"} = Cannoli::Config::get_bool(%config, "ssl.enabled", 0);
+    $server{"ssl_only"} = Cannoli::Config::get_bool(%config, "ssl.only", 0);
     $server{"ssl_port"} = Cannoli::Config::get_int(%config, "ssl.port", 443);
     $server{"ssl_cert"} = Cannoli::Config::get_str(%config, "ssl.cert", "");
     $server{"ssl_key"} = Cannoli::Config::get_str(%config, "ssl.key", "");
@@ -8628,7 +8629,10 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
     # Save parent PID to detect if master dies
     my int $parent_pid = sys::getppid();
 
-    my int $http_fd = sys::socket_fd($server_sock);
+    my int $http_fd = -1;
+    if (defined($server_sock)) {
+        $http_fd = sys::socket_fd($server_sock);
+    }
     my int $ssl_fd = -1;
     if (defined($ssl_server)) {
         my scalar $ssl_fd_fn = $server_ref->{"ssl_fd_fn"};
@@ -8644,7 +8648,10 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
         }
 
         # Build array of file descriptors to monitor
-        my array @fds = ($http_fd);
+        my array @fds = ();
+        if ($http_fd >= 0) {
+            push(\@fds, $http_fd);
+        }
         if ($ssl_fd >= 0) {
             push(\@fds, $ssl_fd);
         }
@@ -8913,15 +8920,20 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
 
 # Run the server in preforking mode
 func Cannoli_Server_run(scalar $server_ref) int {
-    # Create HTTP listening socket
-    my scalar $server_sock = ::create_socket($server_ref);
-    if (!defined($server_sock)) {
-        return 1;
+    # Create HTTP listening socket (unless ssl_only mode)
+    if ($server_ref->{"ssl_only"} != 1) {
+        my scalar $server_sock = ::create_socket($server_ref);
+        if (!defined($server_sock)) {
+            return 1;
+        }
     }
 
     # Create SSL listening socket if SSL is enabled
     if ($server_ref->{"ssl_enabled"} == 1) {
         ::create_ssl_socket($server_ref);
+    } elsif ($server_ref->{"ssl_only"} == 1) {
+        say("Error: --ssl-only requires SSL to be enabled");
+        return 1;
     }
 
     # Install signal handlers for graceful Cannoli::Server::shutdown(before spawning workers)
@@ -8943,10 +8955,15 @@ func Cannoli_Server_run(scalar $server_ref) int {
 
 # Run the server in single-process mode (for development)
 func Cannoli_Server_run_single(scalar $server_ref) int {
-    # Create HTTP listening socket
-    my scalar $server_sock = ::create_socket($server_ref);
-    if (!defined($server_sock)) {
-        return 1;
+    # Create HTTP listening socket (unless ssl_only mode)
+    my scalar $server_sock = undef;
+    my int $http_fd = -1;
+    if ($server_ref->{"ssl_only"} != 1) {
+        $server_sock = ::create_socket($server_ref);
+        if (!defined($server_sock)) {
+            return 1;
+        }
+        $http_fd = sys::socket_fd($server_sock);
     }
 
     # Create SSL listening socket if SSL is enabled
@@ -8958,6 +8975,9 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
             my scalar $ssl_fd_fn = $server_ref->{"ssl_fd_fn"};
             $ssl_fd = sys::dl_call_int_sv($ssl_fd_fn, [$ssl_server]);
         }
+    } elsif ($server_ref->{"ssl_only"} == 1) {
+        say("Error: --ssl-only requires SSL to be enabled");
+        return 1;
     }
 
     # Install signal handlers for graceful shutdown
@@ -8967,11 +8987,13 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
     say("Press Ctrl+C to stop");
 
     $server_ref->{"running"} = 1;
-    my int $http_fd = sys::socket_fd($server_sock);
 
     while ($server_ref->{"running"} == 1) {
         # Build array of file descriptors to monitor
-        my array @fds = ($http_fd);
+        my array @fds = ();
+        if ($http_fd >= 0) {
+            push(\@fds, $http_fd);
+        }
         if ($ssl_fd >= 0) {
             push(\@fds, $ssl_fd);
         }
@@ -9760,6 +9782,7 @@ func Cannoli_Main_print_help() void {
     say("  -s, --static PATH    Serve static files from directory");
     say("  --listing            Enable directory listing (with --static)");
     say("  --ssl                Enable SSL/HTTPS");
+    say("  --ssl-only           SSL only (disable HTTP listener)");
     say("  --ssl-port PORT      SSL port (default: 443)");
     say("  --ssl-cert FILE      SSL certificate file");
     say("  --ssl-key FILE       SSL private key file");
@@ -10046,6 +10069,9 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             }
         } elsif ($arg eq "--ssl") {
             $config{"ssl.enabled"} = "1";
+        } elsif ($arg eq "--ssl-only") {
+            $config{"ssl.enabled"} = "1";
+            $config{"ssl.only"} = "1";
         } elsif ($arg eq "--ssl-port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;

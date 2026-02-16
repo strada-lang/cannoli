@@ -52,6 +52,7 @@ func Cannoli_Main_print_help() void {
     say("  -s, --static PATH    Serve static files from directory");
     say("  --listing            Enable directory listing (with --static)");
     say("  --ssl                Enable SSL/HTTPS");
+    say("  --ssl-only           SSL only (disable HTTP listener)");
     say("  --ssl-port PORT      SSL port (default: 443)");
     say("  --ssl-cert FILE      SSL certificate file");
     say("  --ssl-key FILE       SSL private key file");
@@ -338,6 +339,9 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             }
         } elsif ($arg eq "--ssl") {
             $config{"ssl.enabled"} = "1";
+        } elsif ($arg eq "--ssl-only") {
+            $config{"ssl.enabled"} = "1";
+            $config{"ssl.only"} = "1";
         } elsif ($arg eq "--ssl-port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
