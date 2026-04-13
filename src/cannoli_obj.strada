@@ -598,12 +598,12 @@ func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max
 
 # Send file content
 func Cannoli_sendfile(scalar $self, str $filepath) scalar {
-    if (!sys::is_file($filepath)) {
+    if (!core::is_file($filepath)) {
         $self->log_error(0, "File not found: " . $filepath);
         return $self;
     }
 
-    my str $content = sys::slurp($filepath);
+    my str $content = core::slurp($filepath);
 
     # Auto-detect content type
     my str $ct = "application/octet-stream";
@@ -669,7 +669,7 @@ func Cannoli_start_chunked(scalar $self) scalar {
         Cannoli::Response::header(%res, "Transfer-Encoding", "chunked");
         Cannoli::Response::remove_header(%res, "Content-Length");
         my str $headers = Cannoli::Response::build_headers(%res);
-        sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $headers]);
+        core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $headers]);
 
         $self->{"_chunked"} = 1;
         $self->{"_chunked_ssl"} = 1;
@@ -699,11 +699,11 @@ func Cannoli_write_chunk(scalar $self, str $data) int {
         # SSL write
         my scalar $ssl_conn = $self->{"_ssl_conn"};
         my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
-        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $chunk]);
+        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $chunk]);
     } else {
         # Regular socket write
         my int $fd = $self->{"_fd"};
-        return sys::write_fd($fd, $chunk);
+        return core::write_fd($fd, $chunk);
     }
 }
 
@@ -715,11 +715,11 @@ func Cannoli_end_chunked(scalar $self) scalar {
         # SSL write
         my scalar $ssl_conn = $self->{"_ssl_conn"};
         my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
-        sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $terminator]);
+        core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $terminator]);
     } else {
         # Regular socket write
         my int $fd = $self->{"_fd"};
-        sys::write_fd($fd, $terminator);
+        core::write_fd($fd, $terminator);
     }
 
     return $self;

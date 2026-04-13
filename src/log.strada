@@ -71,9 +71,9 @@ func Cannoli_Log_init(hash %config) void {
 
     # Test open error log
     if (length($g_error_log_file) > 0) {
-        my scalar $fh = sys::open($g_error_log_file, "a");
+        my scalar $fh = core::open($g_error_log_file, "a");
         if (defined($fh)) {
-            sys::close($fh);
+            core::close($fh);
         } else {
             say("Warning: Could not open error log: " . $g_error_log_file);
             $g_error_log_file = "";
@@ -82,9 +82,9 @@ func Cannoli_Log_init(hash %config) void {
 
     # Test open access log
     if (length($g_access_log_file) > 0) {
-        my scalar $fh = sys::open($g_access_log_file, "a");
+        my scalar $fh = core::open($g_access_log_file, "a");
         if (defined($fh)) {
-            sys::close($fh);
+            core::close($fh);
         } else {
             say("Warning: Could not open access log: " . $g_access_log_file);
             $g_access_log_file = "";
@@ -99,7 +99,7 @@ func Cannoli_Log_close() void {
 
 # Get current timestamp in log format
 func Cannoli_Log_timestamp() str {
-    my int $now = sys::time();
+    my int $now = core::time();
     # Format: [DD/Mon/YYYY:HH:MM:SS +0000]
     # For now, use Unix timestamp as we don't have strftime
     return "[" . $now . "]";
@@ -107,7 +107,7 @@ func Cannoli_Log_timestamp() str {
 
 # Get timestamp for access log
 func Cannoli_Log_access_timestamp() str {
-    my int $now = sys::time();
+    my int $now = core::time();
     return "[" . $now . "]";
 }
 
@@ -117,10 +117,10 @@ func Cannoli_Log_write_error(str $level, str $message) void {
     my str $line = $timestamp . " [" . $level . "] " . $message . "\n";
 
     if (length($g_error_log_file) > 0) {
-        my scalar $fh = sys::open($g_error_log_file, "a");
+        my scalar $fh = core::open($g_error_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 
@@ -162,7 +162,7 @@ func Cannoli_Log_debug(str $message) void {
 #               %r=referer %a=user_agent %i=remote_ip %P=protocol
 func Cannoli_Log_format_line(str $format, str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
     my str $result = "";
-    my str $timestamp = "" . sys::time();
+    my str $timestamp = "" . core::time();
     my str $status_str = "" . $status;
     my str $size_str = "" . $size;
     my str $time_str = "" . $time_ms;
@@ -243,10 +243,10 @@ func Cannoli_Log_access(str $remote_ip, str $method, str $path, str $protocol, i
         $line = $line . $status . " " . $size . " ";
         $line = $line . "\"" . $referer . "\" \"" . $user_agent . "\" " . $time_ms . "ms\n";
 
-        my scalar $fh = sys::open($g_access_log_file, "a");
+        my scalar $fh = core::open($g_access_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 
@@ -297,7 +297,7 @@ func Cannoli_Log_set_rotation(int $max_size, int $keep_files) void {
 
 # Get file size (returns 0 if file doesn't exist)
 func Cannoli_Log_file_size(str $path) int {
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return 0;
     }
     my str $content = slurp($path);
@@ -307,7 +307,7 @@ func Cannoli_Log_file_size(str $path) int {
 # Rotate a log file
 # Renames: file -> file.1, file.1 -> file.2, etc.
 func Cannoli_Log_rotate(str $path) void {
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return;
     }
 
@@ -323,13 +323,13 @@ func Cannoli_Log_rotate(str $path) void {
         my str $old_path = $path . "." . $i;
         my str $new_path = $path . "." . ($i + 1);
 
-        if (sys::is_file($old_path) == 1) {
+        if (core::is_file($old_path) == 1) {
             if ($i == $g_rotate_keep - 1) {
                 # Delete oldest file
-                sys::unlink($old_path);
+                core::unlink($old_path);
             } else {
                 # Rename to next number
-                sys::rename($old_path, $new_path);
+                core::rename($old_path, $new_path);
             }
         }
         $i = $i - 1;
@@ -337,7 +337,7 @@ func Cannoli_Log_rotate(str $path) void {
 
     # Rename current file to .1
     my str $rotated_path = $path . ".1";
-    sys::rename($path, $rotated_path);
+    core::rename($path, $rotated_path);
 }
 
 # Check and rotate all log files if needed
@@ -364,7 +364,7 @@ func Cannoli_Log_set_json_format(int $enabled) void {
 
 # Log access in JSON format
 func Cannoli_Log_access_json(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
-    my str $timestamp = "" . sys::time();
+    my str $timestamp = "" . core::time();
 
     my str $json = "{";
     $json = $json . "\"timestamp\":" . $timestamp;
@@ -390,7 +390,7 @@ func Cannoli_Log_access_json(str $remote_ip, str $method, str $path, str $protoc
 
 # Log error in JSON format
 func Cannoli_Log_error_json(str $level, str $message) str {
-    my str $timestamp = "" . sys::time();
+    my str $timestamp = "" . core::time();
 
     my str $json = "{";
     $json = $json . "\"timestamp\":" . $timestamp;
@@ -443,10 +443,10 @@ func Cannoli_Log_write_error_enhanced(str $level, str $message) void {
 
     if (length($g_error_log_file) > 0) {
         ::check_rotation();  # Check rotation before writing
-        my scalar $fh = sys::open($g_error_log_file, "a");
+        my scalar $fh = core::open($g_error_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 
@@ -480,10 +480,10 @@ func Cannoli_Log_access_enhanced(str $remote_ip, str $method, str $path, str $pr
             $line = $line . "\"" . $referer . "\" \"" . $user_agent . "\" " . $time_ms . "ms\n";
         }
 
-        my scalar $fh = sys::open($g_access_log_file, "a");
+        my scalar $fh = core::open($g_access_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 

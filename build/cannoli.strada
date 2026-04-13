@@ -68,7 +68,7 @@ func Cannoli_Config_defaults() hash {
 func Cannoli_Config_parse_file(str $filename) hash {
     my hash %config = ::defaults();
 
-    if (!sys::is_file($filename)) {
+    if (!core::is_file($filename)) {
         return %config;
     }
 
@@ -383,8 +383,8 @@ my int $g_session_ttl = 3600;  # 1 hour default TTL
 
 # Initialize session system (creates directory if needed)
 func Cannoli_Session_init() void {
-    if (sys::is_dir($g_session_dir) == 0) {
-        sys::mkdir($g_session_dir);
+    if (core::is_dir($g_session_dir) == 0) {
+        core::mkdir($g_session_dir);
     }
 }
 
@@ -433,8 +433,8 @@ func Cannoli_Session_new() scalar {
 
     my hash %session = ();
     $session{"id"} = ::generate_id();
-    $session{"created"} = sys::time();
-    $session{"modified"} = sys::time();
+    $session{"created"} = core::time();
+    $session{"modified"} = core::time();
     $session{"data"} = {};
 
     return \%session;
@@ -449,7 +449,7 @@ func Cannoli_Session_load(str $id) scalar {
 
     my str $path = ::file_path($id);
 
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return undef;
     }
 
@@ -497,7 +497,7 @@ func Cannoli_Session_load(str $id) scalar {
     }
 
     # Check TTL
-    my int $now = sys::time();
+    my int $now = core::time();
     my int $modified = $session{"modified"} + 0;
     if ($now - $modified > $g_session_ttl) {
         # Session expired
@@ -516,7 +516,7 @@ func Cannoli_Session_save(scalar $session) int {
     my str $path = ::file_path($id);
 
     # Update modified time
-    $session->{"modified"} = sys::time();
+    $session->{"modified"} = core::time();
 
     # Build file content
     my str $content = "";
@@ -543,8 +543,8 @@ func Cannoli_Session_save(scalar $session) int {
 # Destroy a session
 func Cannoli_Session_destroy(str $id) void {
     my str $path = ::file_path($id);
-    if (sys::is_file($path) == 1) {
-        sys::unlink($path);
+    if (core::is_file($path) == 1) {
+        core::unlink($path);
     }
 }
 
@@ -663,14 +663,14 @@ func Cannoli_Session_decode_value(str $s) str {
 
 # Clean up expired sessions (call periodically)
 func Cannoli_Session_cleanup() int {
-    if (sys::is_dir($g_session_dir) == 0) {
+    if (core::is_dir($g_session_dir) == 0) {
         return 0;
     }
 
-    my int $now = sys::time();
+    my int $now = core::time();
     my int $cleaned = 0;
 
-    my array @files = sys::readdir($g_session_dir);
+    my array @files = core::readdir($g_session_dir);
     my int $i = 0;
 
     while ($i < scalar(@files)) {
@@ -697,7 +697,7 @@ func Cannoli_Session_cleanup() int {
 
             # Remove if expired
             if ($modified > 0 && $now - $modified > $g_session_ttl) {
-                sys::unlink($path);
+                core::unlink($path);
                 $cleaned = $cleaned + 1;
             }
         }
@@ -809,7 +809,7 @@ func Cannoli_Template_load(str $name) str {
     my str $path = $g_template_dir . "/" . $name;
 
     # Check if file exists
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return "";
     }
 
@@ -3197,9 +3197,9 @@ func Cannoli_Log_init(hash %config) void {
 
     # Test open error log
     if (length($g_error_log_file) > 0) {
-        my scalar $fh = sys::open($g_error_log_file, "a");
+        my scalar $fh = core::open($g_error_log_file, "a");
         if (defined($fh)) {
-            sys::close($fh);
+            core::close($fh);
         } else {
             say("Warning: Could not open error log: " . $g_error_log_file);
             $g_error_log_file = "";
@@ -3208,9 +3208,9 @@ func Cannoli_Log_init(hash %config) void {
 
     # Test open access log
     if (length($g_access_log_file) > 0) {
-        my scalar $fh = sys::open($g_access_log_file, "a");
+        my scalar $fh = core::open($g_access_log_file, "a");
         if (defined($fh)) {
-            sys::close($fh);
+            core::close($fh);
         } else {
             say("Warning: Could not open access log: " . $g_access_log_file);
             $g_access_log_file = "";
@@ -3225,7 +3225,7 @@ func Cannoli_Log_close() void {
 
 # Get current timestamp in log format
 func Cannoli_Log_timestamp() str {
-    my int $now = sys::time();
+    my int $now = core::time();
     # Format: [DD/Mon/YYYY:HH:MM:SS +0000]
     # For now, use Unix timestamp as we don't have strftime
     return "[" . $now . "]";
@@ -3233,7 +3233,7 @@ func Cannoli_Log_timestamp() str {
 
 # Get timestamp for access log
 func Cannoli_Log_access_timestamp() str {
-    my int $now = sys::time();
+    my int $now = core::time();
     return "[" . $now . "]";
 }
 
@@ -3243,10 +3243,10 @@ func Cannoli_Log_write_error(str $level, str $message) void {
     my str $line = $timestamp . " [" . $level . "] " . $message . "\n";
 
     if (length($g_error_log_file) > 0) {
-        my scalar $fh = sys::open($g_error_log_file, "a");
+        my scalar $fh = core::open($g_error_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 
@@ -3288,7 +3288,7 @@ func Cannoli_Log_debug(str $message) void {
 #               %r=referer %a=user_agent %i=remote_ip %P=protocol
 func Cannoli_Log_format_line(str $format, str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
     my str $result = "";
-    my str $timestamp = "" . sys::time();
+    my str $timestamp = "" . core::time();
     my str $status_str = "" . $status;
     my str $size_str = "" . $size;
     my str $time_str = "" . $time_ms;
@@ -3369,10 +3369,10 @@ func Cannoli_Log_access(str $remote_ip, str $method, str $path, str $protocol, i
         $line = $line . $status . " " . $size . " ";
         $line = $line . "\"" . $referer . "\" \"" . $user_agent . "\" " . $time_ms . "ms\n";
 
-        my scalar $fh = sys::open($g_access_log_file, "a");
+        my scalar $fh = core::open($g_access_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 
@@ -3423,7 +3423,7 @@ func Cannoli_Log_set_rotation(int $max_size, int $keep_files) void {
 
 # Get file size (returns 0 if file doesn't exist)
 func Cannoli_Log_file_size(str $path) int {
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return 0;
     }
     my str $content = slurp($path);
@@ -3433,7 +3433,7 @@ func Cannoli_Log_file_size(str $path) int {
 # Rotate a log file
 # Renames: file -> file.1, file.1 -> file.2, etc.
 func Cannoli_Log_rotate(str $path) void {
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return;
     }
 
@@ -3449,13 +3449,13 @@ func Cannoli_Log_rotate(str $path) void {
         my str $old_path = $path . "." . $i;
         my str $new_path = $path . "." . ($i + 1);
 
-        if (sys::is_file($old_path) == 1) {
+        if (core::is_file($old_path) == 1) {
             if ($i == $g_rotate_keep - 1) {
                 # Delete oldest file
-                sys::unlink($old_path);
+                core::unlink($old_path);
             } else {
                 # Rename to next number
-                sys::rename($old_path, $new_path);
+                core::rename($old_path, $new_path);
             }
         }
         $i = $i - 1;
@@ -3463,7 +3463,7 @@ func Cannoli_Log_rotate(str $path) void {
 
     # Rename current file to .1
     my str $rotated_path = $path . ".1";
-    sys::rename($path, $rotated_path);
+    core::rename($path, $rotated_path);
 }
 
 # Check and rotate all log files if needed
@@ -3490,7 +3490,7 @@ func Cannoli_Log_set_json_format(int $enabled) void {
 
 # Log access in JSON format
 func Cannoli_Log_access_json(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) str {
-    my str $timestamp = "" . sys::time();
+    my str $timestamp = "" . core::time();
 
     my str $json = "{";
     $json = $json . "\"timestamp\":" . $timestamp;
@@ -3516,7 +3516,7 @@ func Cannoli_Log_access_json(str $remote_ip, str $method, str $path, str $protoc
 
 # Log error in JSON format
 func Cannoli_Log_error_json(str $level, str $message) str {
-    my str $timestamp = "" . sys::time();
+    my str $timestamp = "" . core::time();
 
     my str $json = "{";
     $json = $json . "\"timestamp\":" . $timestamp;
@@ -3569,10 +3569,10 @@ func Cannoli_Log_write_error_enhanced(str $level, str $message) void {
 
     if (length($g_error_log_file) > 0) {
         ::check_rotation();  # Check rotation before writing
-        my scalar $fh = sys::open($g_error_log_file, "a");
+        my scalar $fh = core::open($g_error_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 
@@ -3606,10 +3606,10 @@ func Cannoli_Log_access_enhanced(str $remote_ip, str $method, str $path, str $pr
             $line = $line . "\"" . $referer . "\" \"" . $user_agent . "\" " . $time_ms . "ms\n";
         }
 
-        my scalar $fh = sys::open($g_access_log_file, "a");
+        my scalar $fh = core::open($g_access_log_file, "a");
         if (defined($fh)) {
-            sys::fwrite($fh, $line);
-            sys::close($fh);
+            core::fwrite($fh, $line);
+            core::close($fh);
         }
     }
 
@@ -3750,7 +3750,7 @@ func Cannoli_Response_send_to(hash %res, int $fd) int {
     }
 
     my str $data = ::build(%res);
-    my int $written = sys::write_fd($fd, $data);
+    my int $written = core::write_fd($fd, $data);
     $res{"sent"} = 1;
 
     return $written;
@@ -4051,7 +4051,7 @@ func Cannoli_Response_chunked_start(hash %res, int $fd) hash {
 
     # Send headers immediately
     my str $headers = ::build_headers(%res);
-    sys::write_fd($fd, $headers);
+    core::write_fd($fd, $headers);
 
     $res{"sent"} = 1;  # Mark as sent (headers sent)
 
@@ -4075,7 +4075,7 @@ func Cannoli_Response_send_chunk(hash %res, str $data) int {
     my str $hex_len = ::to_hex(length($data));
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
 
-    return sys::write_fd($fd, $chunk);
+    return core::write_fd($fd, $chunk);
 }
 
 # Send the final (terminating) chunk
@@ -4088,7 +4088,7 @@ func Cannoli_Response_end_chunked(hash %res) int {
     }
 
     # Terminating chunk: 0 length followed by empty trailer
-    return sys::write_fd($fd, "0\r\n\r\n");
+    return core::write_fd($fd, "0\r\n\r\n");
 }
 
 # Create an empty response to signal "already handled"
@@ -4328,8 +4328,8 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
     }
 
     my str $buffer = $ws->{"_buffer"};
-    my int $b1 = sys::get_byte($buffer, 0);
-    my int $b2 = sys::get_byte($buffer, 1);
+    my int $b1 = core::get_byte($buffer, 0);
+    my int $b2 = core::get_byte($buffer, 1);
 
     my int $fin = $b1 / 128;
     my int $opcode = $b1 % 16;
@@ -4342,8 +4342,8 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
             return undef;
         }
         $buffer = $ws->{"_buffer"};
-        my int $b3 = sys::get_byte($buffer, $offset);
-        my int $b4 = sys::get_byte($buffer, $offset + 1);
+        my int $b3 = core::get_byte($buffer, $offset);
+        my int $b4 = core::get_byte($buffer, $offset + 1);
         $payload_len = ($b3 * 256) + $b4;
         $offset = $offset + 2;
     } elsif ($payload_len == 127) {
@@ -4354,7 +4354,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
         my num $len = 0;
         my int $i = 0;
         while ($i < 8) {
-            my int $b = sys::get_byte($buffer, $offset + $i);
+            my int $b = core::get_byte($buffer, $offset + $i);
             $len = ($len * 256) + $b;
             $i = $i + 1;
         }
@@ -4371,10 +4371,10 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
             return undef;
         }
         $buffer = $ws->{"_buffer"};
-        $mask0 = sys::get_byte($buffer, $offset);
-        $mask1 = sys::get_byte($buffer, $offset + 1);
-        $mask2 = sys::get_byte($buffer, $offset + 2);
-        $mask3 = sys::get_byte($buffer, $offset + 3);
+        $mask0 = core::get_byte($buffer, $offset);
+        $mask1 = core::get_byte($buffer, $offset + 1);
+        $mask2 = core::get_byte($buffer, $offset + 2);
+        $mask3 = core::get_byte($buffer, $offset + 3);
         $offset = $offset + 4;
     }
 
@@ -4385,13 +4385,13 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
 
     my str $payload = "";
     if ($payload_len > 0) {
-        $payload = sys::byte_substr($buffer, $offset, $payload_len);
+        $payload = core::byte_substr($buffer, $offset, $payload_len);
     }
 
     my int $remaining_start = $offset + $payload_len;
-    my int $remaining_len = sys::byte_length($buffer) - $remaining_start;
+    my int $remaining_len = core::byte_length($buffer) - $remaining_start;
     if ($remaining_len > 0) {
-        $ws->{"_buffer"} = sys::byte_substr($buffer, $remaining_start, $remaining_len);
+        $ws->{"_buffer"} = core::byte_substr($buffer, $remaining_start, $remaining_len);
     } else {
         $ws->{"_buffer"} = "";
     }
@@ -4400,7 +4400,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
         my str $decoded = "";
         my int $i = 0;
         while ($i < $payload_len) {
-            my int $byte = sys::get_byte($payload, $i);
+            my int $byte = core::get_byte($payload, $i);
             my int $mask = 0;
             my int $m = $i % 4;
             if ($m == 0) { $mask = $mask0; }
@@ -4426,7 +4426,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
 # ============================================================
 
 func Cannoli_WebSocket_send_frame(scalar $ws, int $opcode, str $payload) int {
-    my int $len = sys::byte_length($payload);
+    my int $len = core::byte_length($payload);
     my int $byte1 = 128 + ($opcode % 16);
     my str $header = chr($byte1);
 
@@ -4442,33 +4442,33 @@ func Cannoli_WebSocket_send_frame(scalar $ws, int $opcode, str $payload) int {
 }
 
 func Cannoli_WebSocket_pack_u16(int $value) str {
-    return sys::pack("n", $value);
+    return core::pack("n", $value);
 }
 
 func Cannoli_WebSocket_pack_u64(num $value) str {
     my num $len = $value;
     my int $high = math::floor($len / 4294967296);
     my int $low = $len - ($high * 4294967296);
-    return sys::pack("N2", $high, $low);
+    return core::pack("N2", $high, $low);
 }
 
 func Cannoli_WebSocket_write_ws(scalar $ws, str $data) int {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
         my scalar $ssl_write_fn = $ws->{"_ssl_write_fn"};
-        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
     }
     my int $fd = $ws->{"_fd"};
-    return sys::write_fd($fd, $data);
+    return core::write_fd($fd, $data);
 }
 
 func Cannoli_WebSocket_close_socket(scalar $ws) void {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
         my scalar $ssl_close_fn = $ws->{"_ssl_close_fn"};
-        sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
+        core::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
     } else {
-        sys::socket_close($ws->{"_client"});
+        core::socket_close($ws->{"_client"});
     }
 }
 
@@ -4476,26 +4476,26 @@ func Cannoli_WebSocket_write_response(hash %req, str $data) int {
     if (exists(%req, "_ssl") && $req{"_ssl"} == 1) {
         my scalar $ssl_conn = $req{"_ssl_conn"};
         my scalar $ssl_write_fn = $req{"_ssl_write_fn"};
-        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
     }
     my int $fd = $req{"_fd"};
-    return sys::write_fd($fd, $data);
+    return core::write_fd($fd, $data);
 }
 
 func Cannoli_WebSocket_read_ws(scalar $ws, int $len) str {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
         my scalar $ssl_read_fn = $ws->{"_ssl_read_fn"};
-        return sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, $len]);
+        return core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, $len]);
     }
-    return sys::socket_recv($ws->{"_client"}, $len);
+    return core::socket_recv($ws->{"_client"}, $len);
 }
 
 func Cannoli_WebSocket_ensure_bytes(scalar $ws, int $needed) int {
     my str $buffer = $ws->{"_buffer"};
-    while (sys::byte_length($buffer) < $needed) {
+    while (core::byte_length($buffer) < $needed) {
         my str $chunk = ::read_ws($ws, 4096);
-        if (sys::byte_length($chunk) == 0) {
+        if (core::byte_length($chunk) == 0) {
             $ws->{"_buffer"} = $buffer;
             return 0;
         }
@@ -4507,7 +4507,7 @@ func Cannoli_WebSocket_ensure_bytes(scalar $ws, int $needed) int {
 
 func Cannoli_WebSocket_make_accept(str $key) str {
     my str $digest = ::sha1_bin($key . ::guid());
-    return sys::base64_encode($digest);
+    return core::base64_encode($digest);
 }
 
 # ============================================================
@@ -4515,12 +4515,12 @@ func Cannoli_WebSocket_make_accept(str $key) str {
 # ============================================================
 
 func Cannoli_WebSocket_sha1_bin(str $data) str {
-    my int $len = sys::byte_length($data);
+    my int $len = core::byte_length($data);
     my array @bytes = ();
 
     my int $i = 0;
     while ($i < $len) {
-        push(@bytes, sys::get_byte($data, $i));
+        push(@bytes, core::get_byte($data, $i));
         $i = $i + 1;
     }
 
@@ -4620,11 +4620,11 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
     }
 
     my str $out = "";
-    $out = $out . sys::pack("N", ::u32($h0));
-    $out = $out . sys::pack("N", ::u32($h1));
-    $out = $out . sys::pack("N", ::u32($h2));
-    $out = $out . sys::pack("N", ::u32($h3));
-    $out = $out . sys::pack("N", ::u32($h4));
+    $out = $out . core::pack("N", ::u32($h0));
+    $out = $out . core::pack("N", ::u32($h1));
+    $out = $out . core::pack("N", ::u32($h2));
+    $out = $out . core::pack("N", ::u32($h3));
+    $out = $out . core::pack("N", ::u32($h4));
     return $out;
 }
 
@@ -5356,12 +5356,12 @@ func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max
 
 # Send file content
 func Cannoli_sendfile(scalar $self, str $filepath) scalar {
-    if (!sys::is_file($filepath)) {
+    if (!core::is_file($filepath)) {
         $self->log_error(0, "File not found: " . $filepath);
         return $self;
     }
 
-    my str $content = sys::slurp($filepath);
+    my str $content = core::slurp($filepath);
 
     # Auto-detect content type
     my str $ct = "application/octet-stream";
@@ -5427,7 +5427,7 @@ func Cannoli_start_chunked(scalar $self) scalar {
         Cannoli::Response::header(%res, "Transfer-Encoding", "chunked");
         Cannoli::Response::remove_header(%res, "Content-Length");
         my str $headers = Cannoli::Response::build_headers(%res);
-        sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $headers]);
+        core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $headers]);
 
         $self->{"_chunked"} = 1;
         $self->{"_chunked_ssl"} = 1;
@@ -5457,11 +5457,11 @@ func Cannoli_write_chunk(scalar $self, str $data) int {
         # SSL write
         my scalar $ssl_conn = $self->{"_ssl_conn"};
         my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
-        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $chunk]);
+        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $chunk]);
     } else {
         # Regular socket write
         my int $fd = $self->{"_fd"};
-        return sys::write_fd($fd, $chunk);
+        return core::write_fd($fd, $chunk);
     }
 }
 
@@ -5473,11 +5473,11 @@ func Cannoli_end_chunked(scalar $self) scalar {
         # SSL write
         my scalar $ssl_conn = $self->{"_ssl_conn"};
         my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
-        sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $terminator]);
+        core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $terminator]);
     } else {
         # Regular socket write
         my int $fd = $self->{"_fd"};
-        sys::write_fd($fd, $terminator);
+        core::write_fd($fd, $terminator);
     }
 
     return $self;
@@ -6962,7 +6962,7 @@ func Cannoli_Router_group(scalar $router, str $prefix, scalar $setup_func) void 
 
 # Guess content type from file extension
 func Cannoli_Router_guess_content_type(str $filename) str {
-    my str $ext = sys::file_ext($filename);
+    my str $ext = core::file_ext($filename);
 
     if ($ext eq "html" || $ext eq "htm") { return "text/html; charset=utf-8"; }
     if ($ext eq "css") { return "text/css"; }
@@ -7060,7 +7060,7 @@ func Cannoli_Router_rate_limit(int $requests, int $window, str $key) scalar {
     return func (scalar $c, scalar $next_fn) {
         my str $ip = $c->remote_addr();
         my str $limit_key = $ip . ":" . $key;
-        my int $now = sys::time();
+        my int $now = core::time();
 
         # Get or create rate limit entry
         my scalar $entry = undef;
@@ -7292,7 +7292,7 @@ func Cannoli_Static_find_index(scalar $srv, str $dir) str {
     while ($i < scalar(@idx)) {
         my str $name = trim($idx[$i]);
         my str $path = $dir . "/" . $name;
-        if (sys::is_file($path)) { return $path; }
+        if (core::is_file($path)) { return $path; }
         $i = $i + 1;
     }
     return "";
@@ -7338,12 +7338,12 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
     }
 
     # Read directory entries
-    my array @entries = sys::readdir_full($dir);
+    my array @entries = core::readdir_full($dir);
     my int $i = 0;
     while ($i < scalar(@entries)) {
         my str $full_entry = $entries[$i];
         # Extract just the filename from the full path
-        my str $name = sys::basename($full_entry);
+        my str $name = core::basename($full_entry);
 
         # Skip hidden files and . / ..
         my str $first = substr($name, 0, 1);
@@ -7352,11 +7352,11 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
             my str $icon = "&#128196;";  # File icon
             my str $size_str = "-";
 
-            if (sys::is_dir($full_entry)) {
+            if (core::is_dir($full_entry)) {
                 $icon = "&#128193;";  # Folder icon
                 $href = $name . "/";
             } else {
-                my int $size = sys::file_size($full_entry);
+                my int $size = core::file_size($full_entry);
                 $size_str = ::format_size($size);
             }
 
@@ -7380,7 +7380,7 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
 
     my str $fs = ::resolve_path($srv, $url);
 
-    if (sys::is_dir($fs)) {
+    if (core::is_dir($fs)) {
         my str $idx = ::find_index($srv, $fs);
         my int $idx_len = length($idx);
         if ($idx_len > 0) {
@@ -7399,7 +7399,7 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
         }
     }
 
-    if (!sys::is_file($fs)) { return Cannoli::Response::not_found(); }
+    if (!core::is_file($fs)) { return Cannoli::Response::not_found(); }
 
     my str $content = slurp($fs);
     my str $mime = Cannoli::Mime::type($fs);
@@ -7493,20 +7493,20 @@ func Cannoli_Server_new(hash %config) scalar {
     if ($server{"ssl_enabled"} == 1) {
         # Try installed path first, then development path
         my str $ssl_lib_path = "/usr/local/lib/strada/lib/ssl/libstrada_ssl.so";
-        my scalar $ssl_lib = sys::dl_open($ssl_lib_path);
+        my scalar $ssl_lib = core::dl_open($ssl_lib_path);
         if (!defined($ssl_lib)) {
             $ssl_lib_path = "../lib/ssl/libstrada_ssl.so";
-            $ssl_lib = sys::dl_open($ssl_lib_path);
+            $ssl_lib = core::dl_open($ssl_lib_path);
         }
         say("Loading SSL library: " . $ssl_lib_path);
         if (defined($ssl_lib)) {
             $server{"ssl_lib"} = $ssl_lib;
-            $server{"ssl_server_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_server_sv");
-            $server{"ssl_accept_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_accept_sv");
-            $server{"ssl_read_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_read_sv");
-            $server{"ssl_write_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_write_sv");
-            $server{"ssl_close_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_close_sv");
-            $server{"ssl_fd_fn"} = sys::dl_sym($ssl_lib, "strada_ssl_fd_sv");
+            $server{"ssl_server_fn"} = core::dl_sym($ssl_lib, "strada_ssl_server_sv");
+            $server{"ssl_accept_fn"} = core::dl_sym($ssl_lib, "strada_ssl_accept_sv");
+            $server{"ssl_read_fn"} = core::dl_sym($ssl_lib, "strada_ssl_read_sv");
+            $server{"ssl_write_fn"} = core::dl_sym($ssl_lib, "strada_ssl_write_sv");
+            $server{"ssl_close_fn"} = core::dl_sym($ssl_lib, "strada_ssl_close_sv");
+            $server{"ssl_fd_fn"} = core::dl_sym($ssl_lib, "strada_ssl_fd_sv");
             say("  SSL library loaded");
             if (defined($server{"ssl_server_fn"})) {
                 say("  Found strada_ssl_server_sv");
@@ -7552,12 +7552,12 @@ func Cannoli_Server_new(hash %config) scalar {
                     say("  Config: " . $lib_config);
                 }
 
-                my scalar $lib = sys::dl_open($lib_path);
+                my scalar $lib = core::dl_open($lib_path);
                 if (defined($lib)) {
                     # Call cannoli_init if it exists (for libraries that need configuration)
-                    my scalar $init_sym = sys::dl_sym($lib, "cannoli_init");
+                    my scalar $init_sym = core::dl_sym($lib, "cannoli_init");
                     if (defined($init_sym)) {
-                        my int $init_result = sys::dl_call_int_sv($init_sym, [$lib_config]);
+                        my int $init_result = core::dl_call_int_sv($init_sym, [$lib_config]);
                         if ($init_result == 0) {
                             say("  Error: cannoli_init failed");
                             $i = $i + 1;
@@ -7566,13 +7566,13 @@ func Cannoli_Server_new(hash %config) scalar {
                         say("  Initialized: cannoli_init");
                     }
 
-                    my scalar $sym = sys::dl_sym($lib, "cannoli_dispatch");
+                    my scalar $sym = core::dl_sym($lib, "cannoli_dispatch");
                     if (defined($sym)) {
                         push(@{$server{"lib_handles"}}, $lib);
                         push(@{$server{"dispatch_funcs"}}, $sym);
                         say("  Loaded: cannoli_dispatch");
 
-                        my scalar $after_sym = sys::dl_sym($lib, "cannoli_after_request");
+                        my scalar $after_sym = core::dl_sym($lib, "cannoli_after_request");
                         push(@{$server{"after_funcs"}}, $after_sym);
                         if (defined($after_sym)) {
                             say("  Loaded: cannoli_after_request");
@@ -7623,12 +7623,12 @@ func Cannoli_Server_new(hash %config) scalar {
                 say("    Config: " . $lib_config);
             }
 
-            my scalar $lib = sys::dl_open($lib_path);
+            my scalar $lib = core::dl_open($lib_path);
             if (defined($lib)) {
                 # Call cannoli_init if it exists
-                my scalar $init_sym = sys::dl_sym($lib, "cannoli_init");
+                my scalar $init_sym = core::dl_sym($lib, "cannoli_init");
                 if (defined($init_sym)) {
-                    my int $init_result = sys::dl_call_int_sv($init_sym, [$lib_config]);
+                    my int $init_result = core::dl_call_int_sv($init_sym, [$lib_config]);
                     if ($init_result == 0) {
                         say("    Error: cannoli_init failed");
                         $j = $j + 1;
@@ -7637,13 +7637,13 @@ func Cannoli_Server_new(hash %config) scalar {
                     say("    Initialized: cannoli_init");
                 }
 
-                my scalar $sym = sys::dl_sym($lib, "cannoli_dispatch");
+                my scalar $sym = core::dl_sym($lib, "cannoli_dispatch");
                 if (defined($sym)) {
                     push(@{$server{"lib_handles"}}, $lib);
                     my hash %lib_route = ();
                     $lib_route{"prefix"} = $prefix;
                     $lib_route{"dispatch"} = $sym;
-                    $lib_route{"after"} = sys::dl_sym($lib, "cannoli_after_request");
+                    $lib_route{"after"} = core::dl_sym($lib, "cannoli_after_request");
                     push(@{$server{"library_routes"}}, \%lib_route);
                     say("    Loaded: cannoli_dispatch");
                     if (defined($lib_route{"after"})) {
@@ -7687,7 +7687,7 @@ func Cannoli_Server_create_ssl_socket(scalar $server_ref) scalar {
     }
 
     # Call strada_ssl_server(port, cert, key)
-    my scalar $ssl_server = sys::dl_call_sv($ssl_server_fn, [$ssl_port, $cert, $key]);
+    my scalar $ssl_server = core::dl_call_sv($ssl_server_fn, [$ssl_port, $cert, $key]);
 
     if (!defined($ssl_server)) {
         say("Error: Could not create SSL server on port " . $ssl_port);
@@ -7706,7 +7706,7 @@ func Cannoli_Server_create_socket(scalar $server_ref) scalar {
     my int $port = $server_ref->{"port"};
     my int $backlog = $server_ref->{"backlog"};
 
-    my scalar $server_sock = sys::socket_server_backlog($port, $backlog);
+    my scalar $server_sock = core::socket_server_backlog($port, $backlog);
 
     if (!defined($server_sock)) {
         say("Error: Could not create server socket on port " . $port);
@@ -7716,7 +7716,7 @@ func Cannoli_Server_create_socket(scalar $server_ref) scalar {
     # Set non-blocking to prevent thundering herd problem with multiple workers
     # When select() wakes all workers, only one will get the connection;
     # others will get EAGAIN from accept() instead of blocking
-    sys::socket_set_nonblocking($server_sock, 1);
+    core::socket_set_nonblocking($server_sock, 1);
 
     $server_ref->{"server_sock"} = $server_sock;
     say("Listening on " . $host . ":" . $port . " (backlog=" . $backlog . ")");
@@ -7879,19 +7879,19 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
     my int $timeout_ms = $server_ref->{"timeout"} * 1000;
 
     if (length($buffer) == 0) {
-        my int $client_fd = sys::socket_fd($client);
+        my int $client_fd = core::socket_fd($client);
 
         # During keep-alive wait, also monitor the server socket so this
         # worker can break out and accept new connections if needed
         my scalar $server_sock = $server_ref->{"server_sock"};
-        my int $server_fd = defined($server_sock) ? sys::socket_fd($server_sock) : -1;
+        my int $server_fd = defined($server_sock) ? core::socket_fd($server_sock) : -1;
 
         my array @fds = ($client_fd);
         if ($server_fd >= 0) {
             push(@fds, $server_fd);
         }
 
-        my array @ready = sys::select_fds(\@fds, $timeout_ms);
+        my array @ready = core::select_fds(\@fds, $timeout_ms);
         if (scalar(@ready) == 0) {
             return undef;
         }
@@ -7916,7 +7916,7 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
         if (length($buffer) > $max_header) {
             return ::read_error("header_too_large", $max_header);
         }
-        my str $chunk = sys::socket_recv($client, 65536);
+        my str $chunk = core::socket_recv($client, 65536);
         if (length($chunk) == 0) {
             return undef;
         }
@@ -7936,7 +7936,7 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
 
     my int $total_needed = $header_end + 4 + $content_len;
     while (length($buffer) < $total_needed) {
-        my str $chunk = sys::socket_recv($client, 65536);
+        my str $chunk = core::socket_recv($client, 65536);
         if (length($chunk) == 0) {
             return undef;
         }
@@ -7966,14 +7966,14 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
     if (length($buffer) == 0 && $ssl_fd > 0) {
         # During keep-alive wait, also monitor the server socket
         my scalar $server_sock = $server_ref->{"server_sock"};
-        my int $server_fd = defined($server_sock) ? sys::socket_fd($server_sock) : -1;
+        my int $server_fd = defined($server_sock) ? core::socket_fd($server_sock) : -1;
 
         my array @fds = ($ssl_fd);
         if ($server_fd >= 0) {
             push(@fds, $server_fd);
         }
 
-        my array @ready = sys::select_fds(\@fds, $timeout_ms);
+        my array @ready = core::select_fds(\@fds, $timeout_ms);
         if (scalar(@ready) == 0) {
             return undef;
         }
@@ -7997,7 +7997,7 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
         if (length($buffer) > $max_header) {
             return ::read_error("header_too_large", $max_header);
         }
-        my str $chunk = sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        my str $chunk = core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
         if (length($chunk) == 0) {
             return undef;
         }
@@ -8017,7 +8017,7 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
 
     my int $total_needed = $header_end + 4 + $content_len;
     while (length($buffer) < $total_needed) {
-        my str $chunk = sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        my str $chunk = core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
         if (length($chunk) == 0) {
             return undef;
         }
@@ -8060,7 +8060,7 @@ func Cannoli_Server_is_admin_allowed(str $remote_ip, str $allowed_ips) int {
 func Cannoli_Server_handle_admin(scalar $server_ref, str $remote_ip, str $action) hash {
     # Handle kill action
     if ($action eq "kill") {
-        my int $pid = sys::getpid();
+        my int $pid = core::getpid();
         my str $json = "{\n";
         $json = $json . "  \"status\": \"ok\",\n";
         $json = $json . "  \"action\": \"kill\",\n";
@@ -8074,7 +8074,7 @@ func Cannoli_Server_handle_admin(scalar $server_ref, str $remote_ip, str $action
     }
 
     # Calculate worker uptime
-    my hash %now = sys::gettimeofday();
+    my hash %now = core::gettimeofday();
     my int $uptime_sec = $now{"sec"} - $_g_worker_start_sec;
 
     # Calculate average response time
@@ -8087,7 +8087,7 @@ func Cannoli_Server_handle_admin(scalar $server_ref, str $remote_ip, str $action
     my str $json = "{\n";
     $json = $json . "  \"status\": \"ok\",\n";
     $json = $json . "  \"worker\": {\n";
-    $json = $json . "    \"pid\": " . sys::getpid() . ",\n";
+    $json = $json . "    \"pid\": " . core::getpid() . ",\n";
     $json = $json . "    \"uptime_sec\": " . $uptime_sec . ",\n";
     $json = $json . "    \"requests\": " . $_g_worker_requests . ",\n";
     $json = $json . "    \"avg_response_ms\": " . $avg_time_ms . "\n";
@@ -8114,7 +8114,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
     my scalar $dispatch_funcs = $server_ref->{"dispatch_funcs"};
     my scalar $after_funcs = $server_ref->{"after_funcs"};
     my scalar $library_routes = $server_ref->{"library_routes"};
-    my int $client_fd = sys::socket_fd($client);
+    my int $client_fd = core::socket_fd($client);
     my str $buffer = "";
 
     while (1) {
@@ -8135,7 +8135,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                 %err_res = Cannoli::Response::error_page(400, "Bad Request");
             }
             my str $err_data = Cannoli::Response::build(%err_res);
-            sys::socket_send($client, $err_data);
+            core::socket_send($client, $err_data);
             last;
         }
 
@@ -8143,13 +8143,13 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         my hash %req = %{$read_result->{"req"}};
 
         # Set remote address from socket
-        my scalar $peer = sys::getpeername(sys::socket_fd($client));
+        my scalar $peer = core::getpeername(core::socket_fd($client));
         if (defined($peer)) {
             $req{"remote_addr"} = $peer->{"addr"};
         }
 
         # Start timing
-        my hash %start_time = sys::gettimeofday();
+        my hash %start_time = core::gettimeofday();
         my int $start_sec = $start_time{"sec"};
         my int $start_usec = $start_time{"usec"};
 
@@ -8166,7 +8166,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         if ($content_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            sys::socket_send($client, $err_data);
+            core::socket_send($client, $err_data);
             last;
         }
 
@@ -8174,7 +8174,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         if ($body_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            sys::socket_send($client, $err_data);
+            core::socket_send($client, $err_data);
             last;
         }
 
@@ -8262,7 +8262,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                     $req{"path_info"} = $path_info;
                     $c = Cannoli::new(%req);
 
-                    my scalar $result = sys::dl_call_sv($dispatch, [$c]);
+                    my scalar $result = core::dl_call_sv($dispatch, [$c]);
                     my str $response_body = defined($result) ? ("" . $result) : "";
 
                     if (length($response_body) > 0) {
@@ -8287,7 +8287,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                 my scalar $dispatch = $dispatch_funcs->[$i];
 
                 # Call: cannoli_dispatch($c) - pass Cannoli object
-                my scalar $result = sys::dl_call_sv($dispatch, [$c]);
+                my scalar $result = core::dl_call_sv($dispatch, [$c]);
                 my str $response_body = defined($result) ? ("" . $result) : "";
 
                 if (length($response_body) > 0) {
@@ -8321,11 +8321,11 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                 Cannoli::Response::header(%res, "Connection", "close");
             }
             my str $response = Cannoli::Response::build(%res);
-            sys::socket_send($client, $response);
+            core::socket_send($client, $response);
         }
 
         # Calculate elapsed time in milliseconds
-        my hash %end_time = sys::gettimeofday();
+        my hash %end_time = core::gettimeofday();
         my int $end_sec = $end_time{"sec"};
         my int $end_usec = $end_time{"usec"};
         my int $elapsed_ms = ($end_sec - $start_sec) * 1000 + ($end_usec - $start_usec) / 1000;
@@ -8338,7 +8338,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
 
         # Call after-request hook if defined
         if (defined($after_func) && defined($c)) {
-            sys::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
+            core::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
         }
 
         if ($res{"sent"} == 1) {
@@ -8347,7 +8347,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
 
         # Check if admin requested worker termination
         if ($res{"_exit_after"} == 1) {
-            sys::socket_close($client);
+            core::socket_close($client);
             exit(0);
         }
 
@@ -8357,7 +8357,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
     }
 
     # Close connection
-    sys::socket_close($client);
+    core::socket_close($client);
 }
 
 # Handle a single SSL client connection
@@ -8372,7 +8372,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
     my scalar $ssl_fd_fn = $server_ref->{"ssl_fd_fn"};
     my int $ssl_fd = -1;
     if (defined($ssl_fd_fn)) {
-        $ssl_fd = sys::dl_call_int_sv($ssl_fd_fn, [$ssl_conn]);
+        $ssl_fd = core::dl_call_int_sv($ssl_fd_fn, [$ssl_conn]);
     }
     my str $buffer = "";
 
@@ -8394,7 +8394,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                 %err_res = Cannoli::Response::error_page(400, "Bad Request");
             }
             my str $err_data = Cannoli::Response::build(%err_res);
-            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
             last;
         }
 
@@ -8403,14 +8403,14 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
         # Set remote address from SSL socket
         if ($ssl_fd >= 0) {
-            my scalar $peer = sys::getpeername($ssl_fd);
+            my scalar $peer = core::getpeername($ssl_fd);
             if (defined($peer)) {
                 $req{"remote_addr"} = $peer->{"addr"};
             }
         }
 
         # Start timing
-        my hash %start_time = sys::gettimeofday();
+        my hash %start_time = core::gettimeofday();
         my int $start_sec = $start_time{"sec"};
         my int $start_usec = $start_time{"usec"};
 
@@ -8427,7 +8427,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         if ($content_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
             last;
         }
 
@@ -8435,7 +8435,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         if ($body_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
             last;
         }
 
@@ -8522,7 +8522,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                     $req{"path_info"} = $path_info;
                     $c = Cannoli::new(%req);
 
-                    my scalar $result = sys::dl_call_sv($dispatch, [$c]);
+                    my scalar $result = core::dl_call_sv($dispatch, [$c]);
                     my str $response_body = defined($result) ? ("" . $result) : "";
 
                     if (length($response_body) > 0) {
@@ -8547,7 +8547,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                 my scalar $dispatch = $dispatch_funcs->[$i];
 
                 # Call: cannoli_dispatch($c) - pass Cannoli object
-                my scalar $result = sys::dl_call_sv($dispatch, [$c]);
+                my scalar $result = core::dl_call_sv($dispatch, [$c]);
                 my str $response_body = defined($result) ? ("" . $result) : "";
 
                 if (length($response_body) > 0) {
@@ -8580,11 +8580,11 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                 Cannoli::Response::header(%res, "Connection", "close");
             }
             my str $response = Cannoli::Response::build(%res);
-            sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $response]);
+            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $response]);
         }
 
         # Calculate elapsed time in milliseconds
-        my hash %end_time = sys::gettimeofday();
+        my hash %end_time = core::gettimeofday();
         my int $end_sec = $end_time{"sec"};
         my int $end_usec = $end_time{"usec"};
         my int $elapsed_ms = ($end_sec - $start_sec) * 1000 + ($end_usec - $start_usec) / 1000;
@@ -8597,7 +8597,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
         # Call after-request hook if defined
         if (defined($after_func) && defined($c)) {
-            sys::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
+            core::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
         }
 
         if ($res{"sent"} == 1) {
@@ -8606,7 +8606,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
         # Check if admin requested worker termination
         if ($res{"_exit_after"} == 1) {
-            sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
+            core::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
             exit(0);
         }
 
@@ -8616,7 +8616,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
     }
 
     # Close SSL connection
-    sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
+    core::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
 }
 
 # Worker process main loop
@@ -8627,21 +8627,21 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
     my int $requests_handled = 0;
 
     # Save parent PID to detect if master dies
-    my int $parent_pid = sys::getppid();
+    my int $parent_pid = core::getppid();
 
     my int $http_fd = -1;
     if (defined($server_sock)) {
-        $http_fd = sys::socket_fd($server_sock);
+        $http_fd = core::socket_fd($server_sock);
     }
     my int $ssl_fd = -1;
     if (defined($ssl_server)) {
         my scalar $ssl_fd_fn = $server_ref->{"ssl_fd_fn"};
-        $ssl_fd = sys::dl_call_int_sv($ssl_fd_fn, [$ssl_server]);
+        $ssl_fd = core::dl_call_int_sv($ssl_fd_fn, [$ssl_server]);
     }
 
     while ($requests_handled < $max_requests) {
         # Check if master process died (orphaned worker)
-        my int $current_ppid = sys::getppid();
+        my int $current_ppid = core::getppid();
         if ($current_ppid != $parent_pid) {
             # Master died, exit cleanly
             exit(0);
@@ -8657,7 +8657,7 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
         }
 
         # Wait for connections on either socket
-        my array @ready = sys::select_fds(\@fds, 1000);
+        my array @ready = core::select_fds(\@fds, 1000);
         my int $num_ready = scalar(@ready);
 
         if ($num_ready == 0) {
@@ -8670,7 +8670,7 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
 
             if ($ready_fd == $http_fd) {
                 # HTTP connection
-                my scalar $client = sys::socket_accept($server_sock);
+                my scalar $client = core::socket_accept($server_sock);
                 if (defined($client)) {
                     ::handle_client($server_ref, $client);
                     $requests_handled = $requests_handled + 1;
@@ -8678,7 +8678,7 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
             } elsif ($ready_fd == $ssl_fd) {
                 # HTTPS connection
                 my scalar $ssl_accept_fn = $server_ref->{"ssl_accept_fn"};
-                my scalar $ssl_conn = sys::dl_call_sv($ssl_accept_fn, [$ssl_server]);
+                my scalar $ssl_conn = core::dl_call_sv($ssl_accept_fn, [$ssl_server]);
                 if (defined($ssl_conn)) {
                     ::handle_ssl_client($server_ref, $ssl_conn);
                     $requests_handled = $requests_handled + 1;
@@ -8699,14 +8699,14 @@ func Cannoli_Server_spawn_workers(scalar $server_ref) void {
 
     my int $i = 0;
     while ($i < $num_workers) {
-        my int $pid = sys::fork();
+        my int $pid = core::fork();
 
         if ($pid == 0) {
             # Child process - set worker title and run worker loop
-            sys::setproctitle("cannoli [worker]");
+            core::setproctitle("cannoli [worker]");
             # Install worker signal handlers
-            sys::signal("TERM", \&Cannoli_Server_worker_handle_term);
-            sys::signal("INT", "IGNORE");  # Let master handle Ctrl+C
+            core::signal("TERM", \&Cannoli_Server_worker_handle_term);
+            core::signal("INT", "IGNORE");  # Let master handle Ctrl+C
             # Initialize per-worker stats
             ::init_worker_stats();
             ::worker_loop($server_ref);
@@ -8736,7 +8736,7 @@ my int $_g_worker_total_time_ms = 0;  # Total response time for averaging
 func Cannoli_Server_init_worker_stats() void {
     $_g_worker_requests = 0;
     $_g_worker_total_time_ms = 0;
-    my hash %now = sys::gettimeofday();
+    my hash %now = core::gettimeofday();
     $_g_worker_start_sec = $now{"sec"};
     $_g_worker_start_usec = $now{"usec"};
 }
@@ -8772,9 +8772,9 @@ func Cannoli_Server_handle_sigterm(int $sig) void {
 # Install signal handlers for graceful shutdown
 func Cannoli_Server_install_signal_handlers(scalar $server_ref) void {
     $_g_server_ref = $server_ref;
-    sys::signal("INT", \&Cannoli_Server_handle_sigint);
-    sys::signal("TERM", \&Cannoli_Server_handle_sigterm);
-    sys::signal("PIPE", "IGNORE");  # Ignore broken pipe
+    core::signal("INT", \&Cannoli_Server_handle_sigint);
+    core::signal("TERM", \&Cannoli_Server_handle_sigterm);
+    core::signal("PIPE", "IGNORE");  # Ignore broken pipe
 }
 
 # Graceful shutdown - close sockets, wait for workers, cleanup
@@ -8791,7 +8791,7 @@ func Cannoli_Server_graceful_shutdown(scalar $server_ref) void {
     my scalar $server_sock = $server_ref->{"server_sock"};
     if (defined($server_sock)) {
         say("Closing HTTP listening socket...");
-        sys::socket_close($server_sock);
+        core::socket_close($server_sock);
         $server_ref->{"server_sock"} = undef;
     }
 
@@ -8802,7 +8802,7 @@ func Cannoli_Server_graceful_shutdown(scalar $server_ref) void {
             say("Closing HTTPS listening socket...");
             my scalar $ssl_close_fn = $server_ref->{"ssl_close_fn"};
             if (defined($ssl_close_fn)) {
-                sys::dl_call_void_sv($ssl_close_fn, [$ssl_server]);
+                core::dl_call_void_sv($ssl_close_fn, [$ssl_server]);
             }
             $server_ref->{"ssl_server"} = undef;
         }
@@ -8817,20 +8817,20 @@ func Cannoli_Server_graceful_shutdown(scalar $server_ref) void {
         say("Sending SIGTERM to " . $num . " workers...");
         while ($i < $num) {
             my int $pid = $pids->[$i];
-            sys::kill($pid, 15);  # SIGTERM
+            core::kill($pid, 15);  # SIGTERM
             $i = $i + 1;
         }
 
         # Wait for workers with timeout
         my int $timeout = 30;  # seconds
-        my int $start = sys::time();
+        my int $start = core::time();
         my int $remaining = $num;
 
         say("Waiting for workers to exit (timeout: " . $timeout . "s)...");
 
         while ($remaining > 0) {
             my int $status = 0;
-            my int $pid = sys::waitpid(-1, $status);
+            my int $pid = core::waitpid(-1, $status);
 
             if ($pid > 0) {
                 $remaining = $remaining - 1;
@@ -8838,19 +8838,19 @@ func Cannoli_Server_graceful_shutdown(scalar $server_ref) void {
             }
 
             # Check timeout
-            my int $elapsed = sys::time() - $start;
+            my int $elapsed = core::time() - $start;
             if ($elapsed > $timeout) {
                 say("Timeout reached, force-killing remaining workers...");
                 $i = 0;
                 while ($i < scalar(@{$pids})) {
                     my int $kill_pid = $pids->[$i];
-                    sys::kill($kill_pid, 9);  # SIGKILL
+                    core::kill($kill_pid, 9);  # SIGKILL
                     $i = $i + 1;
                 }
                 last;
             }
 
-            sys::usleep(100000);  # 100ms
+            core::usleep(100000);  # 100ms
         }
     }
 
@@ -8875,7 +8875,7 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
     while ($server_ref->{"running"} == 1) {
         # Wait for any child to exit
         my int $status = 0;
-        my int $pid = sys::waitpid(-1, $status);
+        my int $pid = core::waitpid(-1, $status);
 
         if ($pid > 0 && $server_ref->{"running"} == 1) {
             # A worker exited, respawn it
@@ -8898,13 +8898,13 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
             $server_ref->{"worker_pids"} = \@new_pids;
 
             # Fork new worker
-            my int $new_pid = sys::fork();
+            my int $new_pid = core::fork();
 
             if ($new_pid == 0) {
                 # Child - set worker title and signal handlers
-                sys::setproctitle("cannoli [worker]");
-                sys::signal("TERM", \&Cannoli_Server_worker_handle_term);
-                sys::signal("INT", "IGNORE");
+                core::setproctitle("cannoli [worker]");
+                core::signal("TERM", \&Cannoli_Server_worker_handle_term);
+                core::signal("INT", "IGNORE");
                 ::worker_loop($server_ref);
                 exit(0);
             } elsif ($new_pid > 0) {
@@ -8914,7 +8914,7 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
             }
         }
 
-        sys::usleep(100000);
+        core::usleep(100000);
     }
 }
 
@@ -8940,7 +8940,7 @@ func Cannoli_Server_run(scalar $server_ref) int {
     ::install_signal_handlers($server_ref);
 
     # Set master process title
-    sys::setproctitle("cannoli [master]");
+    core::setproctitle("cannoli [master]");
 
     say("Starting " . $server_ref->{"num_workers"} . " worker processes...");
 
@@ -8963,7 +8963,7 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
         if (!defined($server_sock)) {
             return 1;
         }
-        $http_fd = sys::socket_fd($server_sock);
+        $http_fd = core::socket_fd($server_sock);
     }
 
     # Create SSL listening socket if SSL is enabled
@@ -8973,7 +8973,7 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
         $ssl_server = ::create_ssl_socket($server_ref);
         if (defined($ssl_server)) {
             my scalar $ssl_fd_fn = $server_ref->{"ssl_fd_fn"};
-            $ssl_fd = sys::dl_call_int_sv($ssl_fd_fn, [$ssl_server]);
+            $ssl_fd = core::dl_call_int_sv($ssl_fd_fn, [$ssl_server]);
         }
     } elsif ($server_ref->{"ssl_only"} == 1) {
         say("Error: --ssl-only requires SSL to be enabled");
@@ -8999,7 +8999,7 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
         }
 
         # Wait for connections on either socket
-        my array @ready = sys::select_fds(\@fds, 1000);
+        my array @ready = core::select_fds(\@fds, 1000);
         my int $num_ready = scalar(@ready);
         my int $i = 0;
 
@@ -9008,14 +9008,14 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
 
             if ($ready_fd == $http_fd) {
                 # HTTP connection
-                my scalar $client = sys::socket_accept($server_sock);
+                my scalar $client = core::socket_accept($server_sock);
                 if (defined($client)) {
                     ::handle_client($server_ref, $client);
                 }
             } elsif ($ready_fd == $ssl_fd) {
                 # HTTPS connection
                 my scalar $ssl_accept_fn = $server_ref->{"ssl_accept_fn"};
-                my scalar $ssl_conn = sys::dl_call_sv($ssl_accept_fn, [$ssl_server]);
+                my scalar $ssl_conn = core::dl_call_sv($ssl_accept_fn, [$ssl_server]);
                 if (defined($ssl_conn)) {
                     ::handle_ssl_client($server_ref, $ssl_conn);
                 }
@@ -9025,10 +9025,10 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
         }
     }
 
-    sys::socket_close($server_sock);
+    core::socket_close($server_sock);
     if (defined($ssl_server)) {
         my scalar $ssl_close_fn = $server_ref->{"ssl_close_fn"};
-        sys::dl_call_void_sv($ssl_close_fn, [$ssl_server]);
+        core::dl_call_void_sv($ssl_close_fn, [$ssl_server]);
     }
     return 0;
 }
@@ -9340,7 +9340,7 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
 
     while ($done == 0) {
         # Read header
-        my str $header_data = sys::read_fd($fd, 8);
+        my str $header_data = core::read_fd($fd, 8);
         if (length($header_data) < 8) {
             last;
         }
@@ -9357,12 +9357,12 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
         # Read content
         my str $content = "";
         if ($content_len > 0) {
-            $content = sys::read_fd($fd, $content_len);
+            $content = core::read_fd($fd, $content_len);
         }
 
         # Skip padding bytes
         if ($padding_len > 0) {
-            sys::read_fd($fd, $padding_len);
+            core::read_fd($fd, $padding_len);
         }
 
         # Handle record type
@@ -9407,9 +9407,9 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
 
     # Send response
     my str $response = ::build_response(%res, $request_id);
-    sys::write_fd($fd, $response);
+    core::write_fd($fd, $response);
 
-    sys::close_fd($fd);
+    core::close_fd($fd);
 }
 
 # FastCGI worker loop
@@ -9417,10 +9417,10 @@ func Cannoli_FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_reques
     my int $requests_handled = 0;
 
     while ($requests_handled < $max_requests) {
-        my int $fd = sys::socket_accept($listen_fd);
+        my int $fd = core::socket_accept($listen_fd);
 
         if ($fd < 0) {
-            sys::usleep(10000);
+            core::usleep(10000);
             next;
         }
 
@@ -9437,7 +9437,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
     length($socket_path);
     my int $port = 9000;
 
-    my int $fd = sys::socket_server($port, 128);
+    my int $fd = core::socket_server($port, 128);
 
     if ($fd < 0) {
         say("Error: Could not create FastCGI socket on port " . $port);
@@ -9451,7 +9451,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
     # Fork workers
     my int $i = 0;
     while ($i < $num_workers) {
-        my int $pid = sys::fork();
+        my int $pid = core::fork();
 
         if ($pid == 0) {
             # Child
@@ -9467,12 +9467,12 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
     # Master waits for children
     while (1) {
         my int $status = 0;
-        my int $pid = sys::waitpid(-1, $status);
+        my int $pid = core::waitpid(-1, $status);
 
         if ($pid > 0) {
             say("FastCGI worker " . $pid . " exited, respawning...");
 
-            my int $new_pid = sys::fork();
+            my int $new_pid = core::fork();
             if ($new_pid == 0) {
                 ::worker_loop($fd, $router, 1000);
                 exit(0);
@@ -9481,7 +9481,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
             }
         }
 
-        sys::usleep(100000);
+        core::usleep(100000);
     }
 
     return 0;
@@ -9520,7 +9520,7 @@ func Cannoli_App_new() scalar {
 
 # Configure the application
 func Cannoli_App_configure(scalar $app, str $config_file) void {
-    if (length($config_file) > 0 && sys::is_file($config_file)) {
+    if (length($config_file) > 0 && core::is_file($config_file)) {
         $app->{"config"} = Cannoli::Config::parse_file($config_file);
     }
 }

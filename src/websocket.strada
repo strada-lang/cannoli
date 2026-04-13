@@ -147,8 +147,8 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
     }
 
     my str $buffer = $ws->{"_buffer"};
-    my int $b1 = sys::get_byte($buffer, 0);
-    my int $b2 = sys::get_byte($buffer, 1);
+    my int $b1 = core::get_byte($buffer, 0);
+    my int $b2 = core::get_byte($buffer, 1);
 
     my int $fin = $b1 / 128;
     my int $opcode = $b1 % 16;
@@ -161,8 +161,8 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
             return undef;
         }
         $buffer = $ws->{"_buffer"};
-        my int $b3 = sys::get_byte($buffer, $offset);
-        my int $b4 = sys::get_byte($buffer, $offset + 1);
+        my int $b3 = core::get_byte($buffer, $offset);
+        my int $b4 = core::get_byte($buffer, $offset + 1);
         $payload_len = ($b3 * 256) + $b4;
         $offset = $offset + 2;
     } elsif ($payload_len == 127) {
@@ -173,7 +173,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
         my num $len = 0;
         my int $i = 0;
         while ($i < 8) {
-            my int $b = sys::get_byte($buffer, $offset + $i);
+            my int $b = core::get_byte($buffer, $offset + $i);
             $len = ($len * 256) + $b;
             $i = $i + 1;
         }
@@ -190,10 +190,10 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
             return undef;
         }
         $buffer = $ws->{"_buffer"};
-        $mask0 = sys::get_byte($buffer, $offset);
-        $mask1 = sys::get_byte($buffer, $offset + 1);
-        $mask2 = sys::get_byte($buffer, $offset + 2);
-        $mask3 = sys::get_byte($buffer, $offset + 3);
+        $mask0 = core::get_byte($buffer, $offset);
+        $mask1 = core::get_byte($buffer, $offset + 1);
+        $mask2 = core::get_byte($buffer, $offset + 2);
+        $mask3 = core::get_byte($buffer, $offset + 3);
         $offset = $offset + 4;
     }
 
@@ -204,13 +204,13 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
 
     my str $payload = "";
     if ($payload_len > 0) {
-        $payload = sys::byte_substr($buffer, $offset, $payload_len);
+        $payload = core::byte_substr($buffer, $offset, $payload_len);
     }
 
     my int $remaining_start = $offset + $payload_len;
-    my int $remaining_len = sys::byte_length($buffer) - $remaining_start;
+    my int $remaining_len = core::byte_length($buffer) - $remaining_start;
     if ($remaining_len > 0) {
-        $ws->{"_buffer"} = sys::byte_substr($buffer, $remaining_start, $remaining_len);
+        $ws->{"_buffer"} = core::byte_substr($buffer, $remaining_start, $remaining_len);
     } else {
         $ws->{"_buffer"} = "";
     }
@@ -219,7 +219,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
         my str $decoded = "";
         my int $i = 0;
         while ($i < $payload_len) {
-            my int $byte = sys::get_byte($payload, $i);
+            my int $byte = core::get_byte($payload, $i);
             my int $mask = 0;
             my int $m = $i % 4;
             if ($m == 0) { $mask = $mask0; }
@@ -245,7 +245,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
 # ============================================================
 
 func Cannoli_WebSocket_send_frame(scalar $ws, int $opcode, str $payload) int {
-    my int $len = sys::byte_length($payload);
+    my int $len = core::byte_length($payload);
     my int $byte1 = 128 + ($opcode % 16);
     my str $header = chr($byte1);
 
@@ -261,33 +261,33 @@ func Cannoli_WebSocket_send_frame(scalar $ws, int $opcode, str $payload) int {
 }
 
 func Cannoli_WebSocket_pack_u16(int $value) str {
-    return sys::pack("n", $value);
+    return core::pack("n", $value);
 }
 
 func Cannoli_WebSocket_pack_u64(num $value) str {
     my num $len = $value;
     my int $high = math::floor($len / 4294967296);
     my int $low = $len - ($high * 4294967296);
-    return sys::pack("N2", $high, $low);
+    return core::pack("N2", $high, $low);
 }
 
 func Cannoli_WebSocket_write_ws(scalar $ws, str $data) int {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
         my scalar $ssl_write_fn = $ws->{"_ssl_write_fn"};
-        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
     }
     my int $fd = $ws->{"_fd"};
-    return sys::write_fd($fd, $data);
+    return core::write_fd($fd, $data);
 }
 
 func Cannoli_WebSocket_close_socket(scalar $ws) void {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
         my scalar $ssl_close_fn = $ws->{"_ssl_close_fn"};
-        sys::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
+        core::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
     } else {
-        sys::socket_close($ws->{"_client"});
+        core::socket_close($ws->{"_client"});
     }
 }
 
@@ -295,26 +295,26 @@ func Cannoli_WebSocket_write_response(hash %req, str $data) int {
     if (exists(%req, "_ssl") && $req{"_ssl"} == 1) {
         my scalar $ssl_conn = $req{"_ssl_conn"};
         my scalar $ssl_write_fn = $req{"_ssl_write_fn"};
-        return sys::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
     }
     my int $fd = $req{"_fd"};
-    return sys::write_fd($fd, $data);
+    return core::write_fd($fd, $data);
 }
 
 func Cannoli_WebSocket_read_ws(scalar $ws, int $len) str {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
         my scalar $ssl_read_fn = $ws->{"_ssl_read_fn"};
-        return sys::dl_call_str_sv($ssl_read_fn, [$ssl_conn, $len]);
+        return core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, $len]);
     }
-    return sys::socket_recv($ws->{"_client"}, $len);
+    return core::socket_recv($ws->{"_client"}, $len);
 }
 
 func Cannoli_WebSocket_ensure_bytes(scalar $ws, int $needed) int {
     my str $buffer = $ws->{"_buffer"};
-    while (sys::byte_length($buffer) < $needed) {
+    while (core::byte_length($buffer) < $needed) {
         my str $chunk = ::read_ws($ws, 4096);
-        if (sys::byte_length($chunk) == 0) {
+        if (core::byte_length($chunk) == 0) {
             $ws->{"_buffer"} = $buffer;
             return 0;
         }
@@ -326,7 +326,7 @@ func Cannoli_WebSocket_ensure_bytes(scalar $ws, int $needed) int {
 
 func Cannoli_WebSocket_make_accept(str $key) str {
     my str $digest = ::sha1_bin($key . ::guid());
-    return sys::base64_encode($digest);
+    return core::base64_encode($digest);
 }
 
 # ============================================================
@@ -334,12 +334,12 @@ func Cannoli_WebSocket_make_accept(str $key) str {
 # ============================================================
 
 func Cannoli_WebSocket_sha1_bin(str $data) str {
-    my int $len = sys::byte_length($data);
+    my int $len = core::byte_length($data);
     my array @bytes = ();
 
     my int $i = 0;
     while ($i < $len) {
-        push(@bytes, sys::get_byte($data, $i));
+        push(@bytes, core::get_byte($data, $i));
         $i = $i + 1;
     }
 
@@ -439,11 +439,11 @@ func Cannoli_WebSocket_sha1_bin(str $data) str {
     }
 
     my str $out = "";
-    $out = $out . sys::pack("N", ::u32($h0));
-    $out = $out . sys::pack("N", ::u32($h1));
-    $out = $out . sys::pack("N", ::u32($h2));
-    $out = $out . sys::pack("N", ::u32($h3));
-    $out = $out . sys::pack("N", ::u32($h4));
+    $out = $out . core::pack("N", ::u32($h0));
+    $out = $out . core::pack("N", ::u32($h1));
+    $out = $out . core::pack("N", ::u32($h2));
+    $out = $out . core::pack("N", ::u32($h3));
+    $out = $out . core::pack("N", ::u32($h4));
     return $out;
 }
 

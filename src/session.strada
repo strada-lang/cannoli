@@ -37,8 +37,8 @@ my int $g_session_ttl = 3600;  # 1 hour default TTL
 
 # Initialize session system (creates directory if needed)
 func Cannoli_Session_init() void {
-    if (sys::is_dir($g_session_dir) == 0) {
-        sys::mkdir($g_session_dir);
+    if (core::is_dir($g_session_dir) == 0) {
+        core::mkdir($g_session_dir);
     }
 }
 
@@ -87,8 +87,8 @@ func Cannoli_Session_new() scalar {
 
     my hash %session = ();
     $session{"id"} = ::generate_id();
-    $session{"created"} = sys::time();
-    $session{"modified"} = sys::time();
+    $session{"created"} = core::time();
+    $session{"modified"} = core::time();
     $session{"data"} = {};
 
     return \%session;
@@ -103,7 +103,7 @@ func Cannoli_Session_load(str $id) scalar {
 
     my str $path = ::file_path($id);
 
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return undef;
     }
 
@@ -151,7 +151,7 @@ func Cannoli_Session_load(str $id) scalar {
     }
 
     # Check TTL
-    my int $now = sys::time();
+    my int $now = core::time();
     my int $modified = $session{"modified"} + 0;
     if ($now - $modified > $g_session_ttl) {
         # Session expired
@@ -170,7 +170,7 @@ func Cannoli_Session_save(scalar $session) int {
     my str $path = ::file_path($id);
 
     # Update modified time
-    $session->{"modified"} = sys::time();
+    $session->{"modified"} = core::time();
 
     # Build file content
     my str $content = "";
@@ -197,8 +197,8 @@ func Cannoli_Session_save(scalar $session) int {
 # Destroy a session
 func Cannoli_Session_destroy(str $id) void {
     my str $path = ::file_path($id);
-    if (sys::is_file($path) == 1) {
-        sys::unlink($path);
+    if (core::is_file($path) == 1) {
+        core::unlink($path);
     }
 }
 
@@ -317,14 +317,14 @@ func Cannoli_Session_decode_value(str $s) str {
 
 # Clean up expired sessions (call periodically)
 func Cannoli_Session_cleanup() int {
-    if (sys::is_dir($g_session_dir) == 0) {
+    if (core::is_dir($g_session_dir) == 0) {
         return 0;
     }
 
-    my int $now = sys::time();
+    my int $now = core::time();
     my int $cleaned = 0;
 
-    my array @files = sys::readdir($g_session_dir);
+    my array @files = core::readdir($g_session_dir);
     my int $i = 0;
 
     while ($i < scalar(@files)) {
@@ -351,7 +351,7 @@ func Cannoli_Session_cleanup() int {
 
             # Remove if expired
             if ($modified > 0 && $now - $modified > $g_session_ttl) {
-                sys::unlink($path);
+                core::unlink($path);
                 $cleaned = $cleaned + 1;
             }
         }

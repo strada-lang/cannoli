@@ -32,7 +32,7 @@ func Cannoli_App_new() scalar {
 
 # Configure the application
 func Cannoli_App_configure(scalar $app, str $config_file) void {
-    if (length($config_file) > 0 && sys::is_file($config_file)) {
+    if (length($config_file) > 0 && core::is_file($config_file)) {
         $app->{"config"} = Cannoli::Config::parse_file($config_file);
     }
 }

@@ -306,7 +306,7 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
 
     while ($done == 0) {
         # Read header
-        my str $header_data = sys::read_fd($fd, 8);
+        my str $header_data = core::read_fd($fd, 8);
         if (length($header_data) < 8) {
             last;
         }
@@ -323,12 +323,12 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
         # Read content
         my str $content = "";
         if ($content_len > 0) {
-            $content = sys::read_fd($fd, $content_len);
+            $content = core::read_fd($fd, $content_len);
         }
 
         # Skip padding bytes
         if ($padding_len > 0) {
-            sys::read_fd($fd, $padding_len);
+            core::read_fd($fd, $padding_len);
         }
 
         # Handle record type
@@ -373,9 +373,9 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
 
     # Send response
     my str $response = ::build_response(%res, $request_id);
-    sys::write_fd($fd, $response);
+    core::write_fd($fd, $response);
 
-    sys::close_fd($fd);
+    core::close_fd($fd);
 }
 
 # FastCGI worker loop
@@ -383,10 +383,10 @@ func Cannoli_FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_reques
     my int $requests_handled = 0;
 
     while ($requests_handled < $max_requests) {
-        my int $fd = sys::socket_accept($listen_fd);
+        my int $fd = core::socket_accept($listen_fd);
 
         if ($fd < 0) {
-            sys::usleep(10000);
+            core::usleep(10000);
             next;
         }
 
@@ -403,7 +403,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
     length($socket_path);
     my int $port = 9000;
 
-    my int $fd = sys::socket_server($port, 128);
+    my int $fd = core::socket_server($port, 128);
 
     if ($fd < 0) {
         say("Error: Could not create FastCGI socket on port " . $port);
@@ -417,7 +417,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
     # Fork workers
     my int $i = 0;
     while ($i < $num_workers) {
-        my int $pid = sys::fork();
+        my int $pid = core::fork();
 
         if ($pid == 0) {
             # Child
@@ -433,12 +433,12 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
     # Master waits for children
     while (1) {
         my int $status = 0;
-        my int $pid = sys::waitpid(-1, $status);
+        my int $pid = core::waitpid(-1, $status);
 
         if ($pid > 0) {
             say("FastCGI worker " . $pid . " exited, respawning...");
 
-            my int $new_pid = sys::fork();
+            my int $new_pid = core::fork();
             if ($new_pid == 0) {
                 ::worker_loop($fd, $router, 1000);
                 exit(0);
@@ -447,7 +447,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
             }
         }
 
-        sys::usleep(100000);
+        core::usleep(100000);
     }
 
     return 0;

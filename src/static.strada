@@ -76,7 +76,7 @@ func Cannoli_Static_find_index(scalar $srv, str $dir) str {
     while ($i < scalar(@idx)) {
         my str $name = trim($idx[$i]);
         my str $path = $dir . "/" . $name;
-        if (sys::is_file($path)) { return $path; }
+        if (core::is_file($path)) { return $path; }
         $i = $i + 1;
     }
     return "";
@@ -122,12 +122,12 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
     }
 
     # Read directory entries
-    my array @entries = sys::readdir_full($dir);
+    my array @entries = core::readdir_full($dir);
     my int $i = 0;
     while ($i < scalar(@entries)) {
         my str $full_entry = $entries[$i];
         # Extract just the filename from the full path
-        my str $name = sys::basename($full_entry);
+        my str $name = core::basename($full_entry);
 
         # Skip hidden files and . / ..
         my str $first = substr($name, 0, 1);
@@ -136,11 +136,11 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
             my str $icon = "&#128196;";  # File icon
             my str $size_str = "-";
 
-            if (sys::is_dir($full_entry)) {
+            if (core::is_dir($full_entry)) {
                 $icon = "&#128193;";  # Folder icon
                 $href = $name . "/";
             } else {
-                my int $size = sys::file_size($full_entry);
+                my int $size = core::file_size($full_entry);
                 $size_str = ::format_size($size);
             }
 
@@ -164,7 +164,7 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
 
     my str $fs = ::resolve_path($srv, $url);
 
-    if (sys::is_dir($fs)) {
+    if (core::is_dir($fs)) {
         my str $idx = ::find_index($srv, $fs);
         my int $idx_len = length($idx);
         if ($idx_len > 0) {
@@ -183,7 +183,7 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
         }
     }
 
-    if (!sys::is_file($fs)) { return Cannoli::Response::not_found(); }
+    if (!core::is_file($fs)) { return Cannoli::Response::not_found(); }
 
     my str $content = slurp($fs);
     my str $mime = Cannoli::Mime::type($fs);

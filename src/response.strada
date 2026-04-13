@@ -124,7 +124,7 @@ func Cannoli_Response_send_to(hash %res, int $fd) int {
     }
 
     my str $data = ::build(%res);
-    my int $written = sys::write_fd($fd, $data);
+    my int $written = core::write_fd($fd, $data);
     $res{"sent"} = 1;
 
     return $written;
@@ -425,7 +425,7 @@ func Cannoli_Response_chunked_start(hash %res, int $fd) hash {
 
     # Send headers immediately
     my str $headers = ::build_headers(%res);
-    sys::write_fd($fd, $headers);
+    core::write_fd($fd, $headers);
 
     $res{"sent"} = 1;  # Mark as sent (headers sent)
 
@@ -449,7 +449,7 @@ func Cannoli_Response_send_chunk(hash %res, str $data) int {
     my str $hex_len = ::to_hex(length($data));
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
 
-    return sys::write_fd($fd, $chunk);
+    return core::write_fd($fd, $chunk);
 }
 
 # Send the final (terminating) chunk
@@ -462,7 +462,7 @@ func Cannoli_Response_end_chunked(hash %res) int {
     }
 
     # Terminating chunk: 0 length followed by empty trailer
-    return sys::write_fd($fd, "0\r\n\r\n");
+    return core::write_fd($fd, "0\r\n\r\n");
 }
 
 # Create an empty response to signal "already handled"

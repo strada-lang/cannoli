@@ -68,7 +68,7 @@ func Cannoli_Config_defaults() hash {
 func Cannoli_Config_parse_file(str $filename) hash {
     my hash %config = ::defaults();
 
-    if (!sys::is_file($filename)) {
+    if (!core::is_file($filename)) {
         return %config;
     }
 

@@ -100,7 +100,7 @@ func Cannoli_Template_load(str $name) str {
     my str $path = $g_template_dir . "/" . $name;
 
     # Check if file exists
-    if (sys::is_file($path) == 0) {
+    if (core::is_file($path) == 0) {
         return "";
     }
 

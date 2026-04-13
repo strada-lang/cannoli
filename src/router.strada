@@ -614,7 +614,7 @@ func Cannoli_Router_group(scalar $router, str $prefix, scalar $setup_func) void 
 
 # Guess content type from file extension
 func Cannoli_Router_guess_content_type(str $filename) str {
-    my str $ext = sys::file_ext($filename);
+    my str $ext = core::file_ext($filename);
 
     if ($ext eq "html" || $ext eq "htm") { return "text/html; charset=utf-8"; }
     if ($ext eq "css") { return "text/css"; }
@@ -712,7 +712,7 @@ func Cannoli_Router_rate_limit(int $requests, int $window, str $key) scalar {
     return func (scalar $c, scalar $next_fn) {
         my str $ip = $c->remote_addr();
         my str $limit_key = $ip . ":" . $key;
-        my int $now = sys::time();
+        my int $now = core::time();
 
         # Get or create rate limit entry
         my scalar $entry = undef;
