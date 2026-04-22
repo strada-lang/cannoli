@@ -27,6 +27,7 @@ cat "$CANNOLI_DIR/src/config.strada" \
     "$CANNOLI_DIR/src/request.strada" \
     "$CANNOLI_DIR/src/log.strada" \
     "$CANNOLI_DIR/src/response.strada" \
+    "$CANNOLI_DIR/src/websocket.strada" \
     "$CANNOLI_DIR/src/cannoli_obj.strada" \
     "$CANNOLI_DIR/src/router.strada" \
     "$CANNOLI_DIR/src/static.strada" \

@@ -31,6 +31,11 @@ func test_defaults() int {
         return 1;
     }
 
+    if ($config{"server.keep_alive"} ne "1") {
+        say("  FAIL: default keep_alive should be enabled");
+        return 1;
+    }
+
     say("  PASS");
     return 0;
 }

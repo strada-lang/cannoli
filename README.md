@@ -415,6 +415,7 @@ port = 8080
 workers = 5
 max_requests = 1000
 timeout = 30
+keep_alive = true
 
 [ssl]
 enabled = true
@@ -438,6 +439,7 @@ level = info
 ```
 
 `server.timeout` also controls the keep-alive idle timeout (seconds).
+Set `server.keep_alive = false` or pass `--no-keep-alive` to always close each response.
 
 ## Dynamic Library Interface
 

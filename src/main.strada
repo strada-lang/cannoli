@@ -29,6 +29,7 @@ package Cannoli::Main;
 #   -p, --port PORT     Listen on port (default: 8080)
 #   -h, --host HOST     Bind to host (default: 0.0.0.0)
 #   -w, --workers N     Number of worker processes (default: 5)
+#   --no-keep-alive     Disable HTTP keep-alive and close every response
 #   --fastcgi           Run in FastCGI mode
 #   --socket PATH       FastCGI socket path
 #   --dev               Run in single-process development mode
@@ -46,6 +47,7 @@ func Cannoli_Main_print_help() void {
     say("  -h, --host HOST      Bind to host (default: 0.0.0.0)");
     say("  -w, --workers N      Number of worker processes (default: 5)");
     say("  --max-requests N     Requests per worker before respawn (default: 1000)");
+    say("  --no-keep-alive      Disable HTTP keep-alive and close every response");
     say("  -l, --library PATH   Load handlers from shared library (.so)");
     say("                       Comma-separated for multiple libraries");
     say("                       Config: path.so:key=val;key2=val2");
@@ -319,6 +321,8 @@ func Cannoli_Main_main(int $argc, array @argv) int {
                 $i = $i + 1;
                 $config{"server.workers"} = $argv[$i];
             }
+        } elsif ($arg eq "--no-keep-alive") {
+            $config{"server.keep_alive"} = "0";
         } elsif ($arg eq "--max-requests") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;

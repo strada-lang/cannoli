@@ -37,6 +37,7 @@ func Cannoli_Config_defaults() hash {
     $config{"server.workers"} = "5";
     $config{"server.max_requests"} = "1000";
     $config{"server.timeout"} = "30";
+    $config{"server.keep_alive"} = "1";
     $config{"server.backlog"} = "128";
     $config{"server.max_body_size"} = "10485760";    # 10MB default
     $config{"server.max_header_size"} = "8192";      # 8KB default
@@ -223,6 +224,8 @@ func Cannoli_Config_merge_args(hash %config, int $argc, array @argv) hash {
                 $i = $i + 1;
                 $config{"server.workers"} = $argv[$i];
             }
+        } elsif ($arg eq "--no-keep-alive") {
+            $config{"server.keep_alive"} = "0";
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
         } elsif ($arg eq "--socket") {

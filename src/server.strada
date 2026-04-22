@@ -42,9 +42,11 @@ func Cannoli_Server_new(hash %config) scalar {
     $server{"num_workers"} = Cannoli::Config::get_int(%config, "server.workers", 5);
     $server{"max_requests"} = Cannoli::Config::get_int(%config, "server.max_requests", 1000);
     $server{"timeout"} = Cannoli::Config::get_int(%config, "server.timeout", 30);
+    $server{"keep_alive_enabled"} = Cannoli::Config::get_bool(%config, "server.keep_alive", 1);
     $server{"backlog"} = Cannoli::Config::get_int(%config, "server.backlog", 128);
     $server{"max_body_size"} = Cannoli::Config::get_int(%config, "server.max_body_size", 10485760);
     $server{"max_header_size"} = Cannoli::Config::get_int(%config, "server.max_header_size", 8192);
+    $server{"single_process"} = 0;
     $server{"router"} = undef;
     $server{"server_sock"} = undef;
     $server{"running"} = 0;
@@ -441,7 +443,17 @@ func Cannoli_Server_parse_content_length(str $header_section) int {
 }
 
 # Decide if the connection should be kept alive
-func Cannoli_Server_should_keep_alive(hash %req) int {
+func Cannoli_Server_should_keep_alive(scalar $server_ref, hash %req) int {
+    if ($server_ref->{"keep_alive_enabled"} != 1) {
+        return 0;
+    }
+
+    # In single-process dev mode, one idle keep-alive socket can block all new
+    # accepts. Force close so each request yields back to the accept loop.
+    if ($server_ref->{"single_process"} == 1) {
+        return 0;
+    }
+
     my str $version = $req{"http_version"};
     my str $conn = lc(Cannoli::Request::get_header(%req, "Connection"));
 
@@ -900,7 +912,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
             %res = Cannoli::Response::not_found();
         }
 
-        my int $keep_alive = ::should_keep_alive(%req);
+        my int $keep_alive = ::should_keep_alive($server_ref, %req);
 
         # Build and send response (skip if already sent, e.g., chunked)
         if ($res{"sent"} != 1) {
@@ -1161,7 +1173,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         }
 
         # Build and send response via SSL (skip if already sent, e.g., chunked)
-        my int $keep_alive = ::should_keep_alive(%req);
+        my int $keep_alive = ::should_keep_alive($server_ref, %req);
         if ($res{"sent"} != 1) {
             if ($keep_alive == 1) {
                 Cannoli::Response::header(%res, "Connection", "keep-alive");
@@ -1510,6 +1522,8 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
 
 # Run the server in preforking mode
 func Cannoli_Server_run(scalar $server_ref) int {
+    $server_ref->{"single_process"} = 0;
+
     # Create HTTP listening socket (unless ssl_only mode)
     if ($server_ref->{"ssl_only"} != 1) {
         my scalar $server_sock = ::create_socket($server_ref);
@@ -1545,6 +1559,8 @@ func Cannoli_Server_run(scalar $server_ref) int {
 
 # Run the server in single-process mode (for development)
 func Cannoli_Server_run_single(scalar $server_ref) int {
+    $server_ref->{"single_process"} = 1;
+
     # Create HTTP listening socket (unless ssl_only mode)
     my scalar $server_sock = undef;
     my int $http_fd = -1;
