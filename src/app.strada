@@ -1,0 +1,242 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+package Cannoli::App;
+
+
+# cannoli/src/app.strada - Application helpers and base
+#
+# Provides convenience functions for building web applications
+# Note: Due to Strada closure limitations, handlers are function references
+
+# Create a new application with router
+func Cannoli_App_new() scalar {
+    my hash %app = ();
+    $app{"router"} = Cannoli::Router::new();
+    $app{"config"} = Cannoli::Config::defaults();
+    return \%app;
+}
+
+# Configure the application
+func Cannoli_App_configure(scalar $app, str $config_file) void {
+    if (length($config_file) > 0 && core::is_file($config_file)) {
+        $app->{"config"} = Cannoli::Config::parse_file($config_file);
+    }
+}
+
+# Add a GET route - handler is a function reference
+func Cannoli_App_get(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::get($app->{"router"}, $pattern, $handler);
+}
+
+# Add a POST route
+func Cannoli_App_post(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::post($app->{"router"}, $pattern, $handler);
+}
+
+# Add a PUT route
+func Cannoli_App_put(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::put($app->{"router"}, $pattern, $handler);
+}
+
+# Add a DELETE route
+func Cannoli_App_delete_route(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::delete_route($app->{"router"}, $pattern, $handler);
+}
+
+# Add a route for any method
+func Cannoli_App_any(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::any($app->{"router"}, $pattern, $handler);
+}
+
+#
+# Cannoli-style routes (handlers receive Cannoli object)
+#
+
+# Add a GET route with Cannoli handler
+func Cannoli_App_get_c(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::get_c($app->{"router"}, $pattern, $handler);
+}
+
+# Add a POST route with Cannoli handler
+func Cannoli_App_post_c(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::post_c($app->{"router"}, $pattern, $handler);
+}
+
+# Add a PUT route with Cannoli handler
+func Cannoli_App_put_c(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::put_c($app->{"router"}, $pattern, $handler);
+}
+
+# Add a DELETE route with Cannoli handler
+func Cannoli_App_delete_c(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::delete_c($app->{"router"}, $pattern, $handler);
+}
+
+# Add a PATCH route with Cannoli handler
+func Cannoli_App_patch_c(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::patch_c($app->{"router"}, $pattern, $handler);
+}
+
+# Add a route for any method with Cannoli handler
+func Cannoli_App_any_c(scalar $app, str $pattern, scalar $handler) void {
+    Cannoli::Router::any_c($app->{"router"}, $pattern, $handler);
+}
+
+# Set custom 404 handler
+func Cannoli_App_not_found(scalar $app, scalar $handler) void {
+    Cannoli::Router::set_not_found($app->{"router"}, $handler);
+}
+
+# Set custom error handler (generic catch-all)
+func Cannoli_App_error_handler(scalar $app, scalar $handler) void {
+    Cannoli::Router::set_error_handler($app->{"router"}, $handler);
+}
+
+# Register handler for specific error code (404, 500, etc.)
+func Cannoli_App_error(scalar $app, int $code, scalar $handler) void {
+    Cannoli::Router::set_error_code_handler($app->{"router"}, $code, $handler);
+}
+
+# Run the application
+func Cannoli_App_run(scalar $app) int {
+    my scalar $config_ref = $app->{"config"};
+    my hash %config = %{$config_ref};
+
+    # Initialize logging
+    Cannoli::Log::init(%config);
+
+    my scalar $server_ref = Cannoli::Server::new(%config);
+
+    Cannoli::Server::set_router($server_ref, $app->{"router"});
+
+    # Check for FastCGI mode
+    my int $fastcgi = Cannoli::Config::get_bool(%config, "fastcgi.enabled", 0);
+
+    if ($fastcgi == 1) {
+        my str $socket = Cannoli::Config::get_str(%config, "fastcgi.socket", "/tmp/cannoli.sock");
+        my int $workers = Cannoli::Config::get_int(%config, "server.workers", 5);
+        return Cannoli::FastCGI::run($socket, $app->{"router"}, $workers);
+    }
+
+    return Cannoli::Server::run($server_ref);
+}
+
+# Run in single-process mode (for development)
+func Cannoli_App_run_dev(scalar $app) int {
+    my scalar $config_ref = $app->{"config"};
+    my hash %config = %{$config_ref};
+
+    # Initialize logging
+    Cannoli::Log::init(%config);
+
+    my scalar $server_ref = Cannoli::Server::new(%config);
+
+    Cannoli::Server::set_router($server_ref, $app->{"router"});
+
+    return Cannoli::Server::run_single($server_ref);
+}
+
+# Print all registered routes
+func Cannoli_App_dump_routes(scalar $app) void {
+    Cannoli::Router::dump_routes($app->{"router"});
+}
+
+# ===== Template helpers =====
+
+# Simple template rendering (replace {{variable}} with values)
+func Cannoli_App_render_template(str $template, scalar $vars_ref) str {
+    my str $result = $template;
+    my hash %vars = %{$vars_ref};
+    my array @k = keys(%vars);
+    my int $i = 0;
+
+    while ($i < scalar(@k)) {
+        my str $key = $k[$i];
+        my str $value = $vars{$key};
+        my str $placeholder = "{{" . $key . "}}";
+
+        # Replace all occurrences
+        my int $pos = index($result, $placeholder);
+        while ($pos >= 0) {
+            my str $before = substr($result, 0, $pos);
+            my str $after = substr($result, $pos + length($placeholder), length($result) - $pos - length($placeholder));
+            $result = $before . $value . $after;
+            $pos = index($result, $placeholder);
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# ===== JSON helpers =====
+
+func Cannoli_App_json_escape(str $s) str {
+    my str $result = "";
+    my int $i = 0;
+    my int $len = length($s);
+
+    while ($i < $len) {
+        my str $ch = substr($s, $i, 1);
+
+        if ($ch eq "\"") {
+            $result = $result . "\\\"";
+        } elsif ($ch eq "\\") {
+            $result = $result . "\\\\";
+        } elsif ($ch eq "\n") {
+            $result = $result . "\\n";
+        } elsif ($ch eq "\r") {
+            $result = $result . "\\r";
+        } elsif ($ch eq "\t") {
+            $result = $result . "\\t";
+        } else {
+            $result = $result . $ch;
+        }
+
+        $i = $i + 1;
+    }
+
+    return $result;
+}
+
+# Build a simple JSON object from hash
+func Cannoli_App_json_object(scalar $data_ref) str {
+    my hash %data = %{$data_ref};
+    my str $result = "{";
+    my array @k = keys(%data);
+    my int $i = 0;
+    my int $first = 1;
+
+    while ($i < scalar(@k)) {
+        my str $key = $k[$i];
+        my str $value = $data{$key};
+
+        if ($first == 0) {
+            $result = $result . ",";
+        }
+        $first = 0;
+
+        $result = $result . "\"" . ::json_escape($key) . "\":";
+        $result = $result . "\"" . ::json_escape($value) . "\"";
+
+        $i = $i + 1;
+    }
+
+    $result = $result . "}";
+    return $result;
+}

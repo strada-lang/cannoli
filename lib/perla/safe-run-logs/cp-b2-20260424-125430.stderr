@@ -1,0 +1,4 @@
+/home/mflickin/p/strada/runtime/strada_runtime.c: In function ‘strada_regex_match_with_capture’:
+/home/mflickin/p/strada/runtime/strada_runtime.c:6294:9: warning: unused variable ‘cflags’ [-Wunused-variable]
+ 6294 |     int cflags = regex_get_cflags(flags);
+      |         ^~~~~~

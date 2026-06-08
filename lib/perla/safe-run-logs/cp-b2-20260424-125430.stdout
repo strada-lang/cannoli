@@ -1,0 +1,2 @@
+/home/mflickin/p/strada/stradac cannoli_perla.strada cannoli_perla.c
+gcc -Wall -fPIC -O0 -I/home/mflickin/p/strada/runtime -o cannoli_perla.so cannoli_perla.c /home/mflickin/p/strada/runtime/strada_runtime.c -shared -ldl -lm -rdynamic

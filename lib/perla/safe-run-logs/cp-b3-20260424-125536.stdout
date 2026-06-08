@@ -1,0 +1,4 @@
+/home/mflickin/p/strada/stradac cannoli_perla.strada cannoli_perla.c
+gcc -Wall -fPIC -O0 -I/home/mflickin/p/strada/runtime -I/home/mflickin/p/strada/perla/runtime -DHAVE_PCRE2 -DPCRE2_STATIC -I/home/mflickin/p/strada/vendor/pcre2/src -o cannoli_perla.so cannoli_perla.c \
+  /home/mflickin/p/strada/runtime/strada_runtime.c /home/mflickin/p/strada/perla/runtime/perla_runtime.a /home/mflickin/p/strada/vendor/pcre2/libpcre2-8.a \
+  -shared -ldl -lm -rdynamic -lpthread -Wl,--allow-multiple-definition

@@ -1,0 +1,7 @@
+=== Registered Routes ===
+
+Loading library: ./cannoli_perla.so
+  Config: so=/home/mflickin/p/cannoli/lib/perla/Demo.pm.so;init=perla_mod_init_Demo;handler=perla_sub_Demo_hello
+  Initialized: cannoli_init
+  Loaded: cannoli_dispatch
+Error: Could not create server socket on port 8080

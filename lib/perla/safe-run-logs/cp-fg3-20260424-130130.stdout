@@ -1,0 +1,13 @@
+=== Registered Routes ===
+
+Loading library: ./cannoli_perla.so
+  Config: so=/home/mflickin/p/cannoli/lib/perla/Demo.pm.so;init=perla_mod_init_Demo;handler=perla_sub_Demo_hello
+  Initialized: cannoli_init
+  Loaded: cannoli_dispatch
+Listening on 0.0.0.0:9001 (backlog=128)
+Running in single-process development mode
+Press Ctrl+C to stop
+
+Graceful shutdown initiated...
+Closing HTTP listening socket...
+Shutdown complete

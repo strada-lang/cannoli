@@ -1,0 +1,4 @@
+/usr/bin/ld: /home/mflickin/p/strada/perla/runtime/perla_runtime.a(strada_runtime.o): relocation R_X86_64_TPOFF32 against `strada_default_output' can not be used when making a shared object; recompile with -fPIC
+/usr/bin/ld: failed to set dynamic section sizes: bad value
+collect2: error: ld returned 1 exit status
+make: *** [Makefile:39: cannoli_perla.so] Error 1

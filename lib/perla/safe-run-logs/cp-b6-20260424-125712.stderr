@@ -1,0 +1,117 @@
+/home/mflickin/p/strada/perla/runtime/perla_stash.c: In function ‘perla_init’:
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:184:22: warning: unused variable ‘_name_name_fn’ [-Wunused-variable]
+  184 |         StradaValue *_name_name_fn = strada_cpointer_new((void*)perla_mop_package_name); /* reads 'package_name' key */
+      |                      ^~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:400:9: warning: implicit declaration of function ‘perla_isa_assign’; did you mean ‘perla_glob_assign’? [-Wimplicit-function-declaration]
+  400 |         perla_isa_assign("Storable::ISA", isa);
+      |         ^~~~~~~~~~~~~~~~
+      |         perla_glob_assign
+/home/mflickin/p/strada/perla/runtime/perla_stash.c: At top level:
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:1354:6: warning: conflicting types for ‘perla_isa_assign’; have ‘void(const char *, StradaValue *)’
+ 1354 | void perla_isa_assign(const char *pkg_isa, StradaValue *parents) {
+      |      ^~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:400:9: note: previous implicit declaration of ‘perla_isa_assign’ with type ‘void(const char *, StradaValue *)’
+  400 |         perla_isa_assign("Storable::ISA", isa);
+      |         ^~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c: In function ‘perla_moose_native_has’:
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3253:22: warning: unused variable ‘reader_ref’ [-Wunused-variable]
+ 3253 |         StradaValue *reader_ref = perla_bless(strada_ref_create(reader_hash), "Moose::Meta::Method::Accessor");
+      |                      ^~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c: In function ‘perla_mop_process_accessors’:
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3596:18: warning: unused variable ‘type_sv’ [-Wunused-variable]
+ 3596 |     StradaValue *type_sv = strada_array_get(av, 1);
+      |                  ^~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c: At top level:
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3008:21: warning: ‘perla_moose_augment_wrapper’ defined but not used [-Wunused-function]
+ 3008 | static StradaValue *perla_moose_augment_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "augment"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3007:21: warning: ‘perla_moose_override_wrapper’ defined but not used [-Wunused-function]
+ 3007 | static StradaValue *perla_moose_override_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "override"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3006:21: warning: ‘perla_moose_around_wrapper’ defined but not used [-Wunused-function]
+ 3006 | static StradaValue *perla_moose_around_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "around"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3005:21: warning: ‘perla_moose_after_wrapper’ defined but not used [-Wunused-function]
+ 3005 | static StradaValue *perla_moose_after_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "after"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3004:21: warning: ‘perla_moose_before_wrapper’ defined but not used [-Wunused-function]
+ 3004 | static StradaValue *perla_moose_before_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "before"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3003:21: warning: ‘perla_moose_with_wrapper’ defined but not used [-Wunused-function]
+ 3003 | static StradaValue *perla_moose_with_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "with"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3002:21: warning: ‘perla_moose_extends_wrapper’ defined but not used [-Wunused-function]
+ 3002 | static StradaValue *perla_moose_extends_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "extends"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:3001:21: warning: ‘perla_moose_has_wrapper’ defined but not used [-Wunused-function]
+ 3001 | static StradaValue *perla_moose_has_wrapper(StradaValue *args) { return perla_moose_with_meta_wrapper(args, "has"); }
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2877:25: warning: ‘perla_mop_authority’ defined but not used [-Wunused-function]
+ 2877 |     static StradaValue *perla_mop_##cname(StradaValue *args) { return perla_mop_hash_accessor(args, key); }
+      |                         ^~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2909:1: note: in expansion of macro ‘MOP_ACCESSOR’
+ 2909 | MOP_ACCESSOR(authority, "authority")
+      | ^~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2877:25: warning: ‘perla_mop_version’ defined but not used [-Wunused-function]
+ 2877 |     static StradaValue *perla_mop_##cname(StradaValue *args) { return perla_mop_hash_accessor(args, key); }
+      |                         ^~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2908:1: note: in expansion of macro ‘MOP_ACCESSOR’
+ 2908 | MOP_ACCESSOR(version, "version")
+      | ^~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2877:25: warning: ‘perla_mop_namespace’ defined but not used [-Wunused-function]
+ 2877 |     static StradaValue *perla_mop_##cname(StradaValue *args) { return perla_mop_hash_accessor(args, key); }
+      |                         ^~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2907:1: note: in expansion of macro ‘MOP_ACCESSOR’
+ 2907 | MOP_ACCESSOR(namespace, "namespace")
+      | ^~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2877:25: warning: ‘perla_mop_superclasses’ defined but not used [-Wunused-function]
+ 2877 |     static StradaValue *perla_mop_##cname(StradaValue *args) { return perla_mop_hash_accessor(args, key); }
+      |                         ^~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2905:1: note: in expansion of macro ‘MOP_ACCESSOR’
+ 2905 | MOP_ACCESSOR(superclasses, "superclasses")
+      | ^~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2877:25: warning: ‘perla_mop_is_inline’ defined but not used [-Wunused-function]
+ 2877 |     static StradaValue *perla_mop_##cname(StradaValue *args) { return perla_mop_hash_accessor(args, key); }
+      |                         ^~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2904:1: note: in expansion of macro ‘MOP_ACCESSOR’
+ 2904 | MOP_ACCESSOR(is_inline, "is_inline")
+      | ^~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2877:25: warning: ‘perla_mop_associated_attribute’ defined but not used [-Wunused-function]
+ 2877 |     static StradaValue *perla_mop_##cname(StradaValue *args) { return perla_mop_hash_accessor(args, key); }
+      |                         ^~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2892:1: note: in expansion of macro ‘MOP_ACCESSOR’
+ 2892 | MOP_ACCESSOR(associated_attribute, "associated_attribute")
+      | ^~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:2089:65: warning: ‘special_vars’ defined but not used [-Wunused-variable]
+ 2089 | static struct { const char *perl_name; const char *glob_name; } special_vars[] = {
+      |                                                                 ^~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c: In function ‘perla_require_module’:
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4130:55: warning: ‘%s’ directive output may be truncated writing up to 2047 bytes into a region of size 2042 [-Wformat-truncation=]
+ 4130 |             snprintf(xs_try, sizeof(xs_try), "%s/auto/%s/%s.so", g_require_paths[i], base_no_pm, basename);
+      |                                                       ^~                             ~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4130:13: note: ‘snprintf’ output 11 or more bytes (assuming 4105) into a destination of size 2048
+ 4130 |             snprintf(xs_try, sizeof(xs_try), "%s/auto/%s/%s.so", g_require_paths[i], base_no_pm, basename);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4159:43: warning: ‘.so’ directive output may be truncated writing 3 bytes into a region of size between 1 and 2048 [-Wformat-truncation=]
+ 4159 |     snprintf(so_path, sizeof(so_path), "%s.so", pm_path);
+      |                                           ^~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4159:5: note: ‘snprintf’ output between 4 and 2051 bytes into a destination of size 2048
+ 4159 |     snprintf(so_path, sizeof(so_path), "%s.so", pm_path);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4176:102: warning: ‘%s’ directive output may be truncated writing up to 2047 bytes into a region of size between 1995 and 4041 [-Wformat-truncation=]
+ 4176 |             snprintf(cmd, sizeof(cmd), "STRADA_DIR=%s PERLA_MODULE_NAME=%s PERLA_BUILD_PM_SO=1 %s -M %s 2>&1",
+      |                                                                                                      ^~
+ 4177 |                      g_strada_dir, module, g_perla_path, pm_path);
+      |                                                          ~~~~~~~                                      
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4176:13: note: ‘snprintf’ output 61 or more bytes (assuming 4154) into a destination of size 4096
+ 4176 |             snprintf(cmd, sizeof(cmd), "STRADA_DIR=%s PERLA_MODULE_NAME=%s PERLA_BUILD_PM_SO=1 %s -M %s 2>&1",
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 4177 |                      g_strada_dir, module, g_perla_path, pm_path);
+      |                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c: In function ‘perla_dumper’:
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4396:51: warning: ‘ = ’ directive output may be truncated writing 3 bytes into a region of size between 2 and 11 [-Wformat-truncation=]
+ 4396 |         snprintf(varname, sizeof(varname), "$VAR%d = ", i + 1);
+      |                                                   ^~~
+/home/mflickin/p/strada/perla/runtime/perla_stash.c:4396:9: note: ‘snprintf’ output between 9 and 18 bytes into a destination of size 16
+ 4396 |         snprintf(varname, sizeof(varname), "$VAR%d = ", i + 1);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

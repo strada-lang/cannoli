@@ -1,0 +1,30 @@
+	Command being timed: "systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0 -p TasksMax=200 timeout 8 bash -c /home/mflickin/p/cannoli/cannoli --library './cannoli_perla.so:so=/home/mflickin/p/cannoli/lib/perla/Demo.pm.so;init=perla_mod_init_Demo;handler=perla_sub_Demo_hello' --dev -p 9003 &
+sleep 2
+echo '=== curl response body ==='
+curl -sS --max-time 2 http://127.0.0.1:9003/
+echo
+echo '=== end ==='
+kill %1 2>/dev/null
+wait 2>/dev/null"
+	User time (seconds): 0.01
+	System time (seconds): 0.01
+	Percent of CPU this job got: 1%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:02.02
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 30684
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 7818
+	Voluntary context switches: 28
+	Involuntary context switches: 14
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 16
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

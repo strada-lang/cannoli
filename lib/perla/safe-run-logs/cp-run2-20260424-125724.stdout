@@ -1,0 +1,19 @@
+=== Registered Routes ===
+
+Loading library: ./cannoli_perla.so
+  Config: so=/home/mflickin/p/cannoli/lib/perla/Demo.pm.so;init=perla_mod_init_Demo;handler=perla_sub_Demo_hello
+  Error: Could not load library
+Listening on 0.0.0.0:9001 (backlog=128)
+Running in single-process development mode
+Press Ctrl+C to stop
+DEBUG parse: data=[GET / HTTP/1.1
+Host: 127.0.0.1:9001
+User-Agent: curl/8.5.0
+Accept: */*
+
+]
+GET / 404 380 0.723ms
+
+Graceful shutdown initiated...
+Closing HTTP listening socket...
+Shutdown complete

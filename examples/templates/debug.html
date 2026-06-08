@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{title}}</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; }
+        h1 { color: #2c3e50; }
+        h2 { color: #34495e; margin-top: 30px; border-bottom: 2px solid #3498db; padding-bottom: 5px; }
+        .example { background: #f8f9fa; padding: 15px; border-radius: 4px; margin: 15px 0; }
+        .code { background: #2c3e50; color: #ecf0f1; padding: 10px; border-radius: 4px; font-family: monospace; margin: 10px 0; }
+        .output { background: #e8f6e8; padding: 10px; border-radius: 4px; border-left: 4px solid #27ae60; }
+        pre.template-dump { background: #fff3cd; padding: 15px; border-radius: 4px; overflow-x: auto; margin: 10px 0; }
+        a { color: #3498db; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .back { margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <p class="back"><a href="/">Back to Home</a></p>
+
+    <h1>{{title}}</h1>
+
+    <h2>1. Variable Assignment: {{#set}}</h2>
+    <div class="example">
+        <div class="code">{{#set greeting = "Hello"}}
+{{#set userName = user.name}}
+{{greeting}}, {{userName}}!</div>
+        {{#set greeting = "Hello"}}
+        {{#set userName = user.name}}
+        <div class="output">{{greeting}}, {{userName}}!</div>
+    </div>
+
+    <h2>2. Scope Change: {{#with}}</h2>
+    <div class="example">
+        <div class="code">{{#with user.profile}}
+Bio: {{bio}}
+Location: {{location}}
+{{/with}}</div>
+        <div class="output">
+            {{#with user.profile}}
+            Bio: {{bio}}<br>
+            Location: {{location}}
+            {{/with}}
+        </div>
+    </div>
+
+    <h2>3. Debug Dump: {{dump}}</h2>
+    <div class="example">
+        <div class="code">{{dump user}}</div>
+        {{dump user}}
+    </div>
+
+    <div class="example">
+        <div class="code">{{dump items}}</div>
+        {{dump items}}
+    </div>
+
+    <h2>4. Combined Example</h2>
+    <div class="example">
+        <div class="code">{{#set prefix = "Item"}}
+{{#each item in items}}
+  {{prefix}} {{@index}}: {{item}}
+{{/each}}</div>
+        <div class="output">
+            {{#set prefix = "Item"}}
+            {{#each item in items}}
+            {{prefix}} {{@index}}: {{item}}<br>
+            {{/each}}
+        </div>
+    </div>
+
+    <h2>5. Numeric Assignment</h2>
+    <div class="example">
+        <div class="code">{{#set count = 42}}
+{{#set price = 19.99}}
+Count: {{count}}, Price: ${{price}}</div>
+        {{#set count = 42}}
+        {{#set price = 19.99}}
+        <div class="output">Count: {{count}}, Price: ${{price}}</div>
+    </div>
+</body>
+</html>

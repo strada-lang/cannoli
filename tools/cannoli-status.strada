@@ -1,0 +1,285 @@
+/*
+ * cannoli-status - Query Cannoli admin endpoint
+ *
+ * Usage: cannoli-status [command] [host[:port]] [path]
+ *
+ * Commands:
+ *   status (default)  Show worker status
+ *   kill              Kill the worker that handles the request
+ *
+ * Examples:
+ *   cannoli-status                     # localhost:8080/__admin
+ *   cannoli-status myserver.com        # myserver.com:8080/__admin
+ *   cannoli-status myserver.com:3000   # myserver.com:3000/__admin
+ *   cannoli-status kill localhost      # Kill a worker on localhost:8080
+ *   cannoli-status status localhost /_status  # custom admin path
+ */
+
+package main;
+
+func parse_json_value(str $json, str $key) str {
+    # Simple JSON value extractor - finds "key": value or "key": "value"
+    my str $search = "\"" . $key . "\":";
+    my int $pos = index($json, $search);
+    if ($pos < 0) {
+        return "";
+    }
+
+    $pos = $pos + length($search);
+
+    # Skip whitespace
+    while ($pos < length($json) && (substr($json, $pos, 1) eq " " || substr($json, $pos, 1) eq "\n")) {
+        $pos = $pos + 1;
+    }
+
+    if ($pos >= length($json)) {
+        return "";
+    }
+
+    my str $ch = substr($json, $pos, 1);
+
+    if ($ch eq "\"") {
+        # String value
+        $pos = $pos + 1;
+        my int $end = index(substr($json, $pos, length($json) - $pos), "\"");
+        if ($end < 0) {
+            return "";
+        }
+        return substr($json, $pos, $end);
+    } else {
+        # Number or boolean
+        my str $value = "";
+        while ($pos < length($json)) {
+            $ch = substr($json, $pos, 1);
+            if ($ch eq "," || $ch eq "}" || $ch eq "\n" || $ch eq " ") {
+                last;
+            }
+            $value = $value . $ch;
+            $pos = $pos + 1;
+        }
+        return $value;
+    }
+}
+
+func format_uptime(int $seconds) str {
+    if ($seconds < 60) {
+        return $seconds . "s";
+    } elsif ($seconds < 3600) {
+        my int $mins = $seconds / 60;
+        my int $secs = $seconds % 60;
+        return $mins . "m " . $secs . "s";
+    } elsif ($seconds < 86400) {
+        my int $hours = $seconds / 3600;
+        my int $mins = ($seconds % 3600) / 60;
+        return $hours . "h " . $mins . "m";
+    } else {
+        my int $days = $seconds / 86400;
+        my int $hours = ($seconds % 86400) / 3600;
+        return $days . "d " . $hours . "h";
+    }
+}
+
+func http_get(str $host, int $port, str $path) str {
+    # Connect and send HTTP request
+    my scalar $sock = sys::socket_client($host, $port);
+    if (!defined($sock)) {
+        return "";
+    }
+
+    # Send HTTP request
+    my str $request = "GET " . $path . " HTTP/1.0\r\n";
+    $request = $request . "Host: " . $host . "\r\n";
+    $request = $request . "Connection: close\r\n";
+    $request = $request . "\r\n";
+
+    sys::socket_send($sock, $request);
+
+    # Read response
+    my str $response = "";
+    while (1) {
+        my str $chunk = sys::socket_recv($sock, 4096);
+        if (length($chunk) == 0) {
+            last;
+        }
+        $response = $response . $chunk;
+    }
+    sys::socket_close($sock);
+
+    return $response;
+}
+
+func show_status(str $host, int $port, str $path) int {
+    my str $response = http_get($host, $port, $path);
+
+    if (length($response) < 12) {
+        say("Error: Empty response from server");
+        return 1;
+    }
+
+    # Parse status line
+    my int $space1 = index($response, " ");
+    if ($space1 < 0) {
+        say("Error: Invalid HTTP response");
+        return 1;
+    }
+
+    my int $space2 = index(substr($response, $space1 + 1, length($response) - $space1 - 1), " ");
+    my str $status_code = substr($response, $space1 + 1, $space2);
+
+    if ($status_code ne "200") {
+        say("Error: Server returned HTTP " . $status_code);
+        return 1;
+    }
+
+    # Find body (after \r\n\r\n)
+    my int $body_start = index($response, "\r\n\r\n");
+    if ($body_start < 0) {
+        say("Error: No response body");
+        return 1;
+    }
+    my str $body = substr($response, $body_start + 4, length($response) - $body_start - 4);
+
+    # Parse JSON values
+    my str $pid = parse_json_value($body, "pid");
+    my str $uptime = parse_json_value($body, "uptime_sec");
+    my str $requests = parse_json_value($body, "requests");
+    my str $avg_ms = parse_json_value($body, "avg_response_ms");
+    my str $server_host = parse_json_value($body, "host");
+    my str $server_port = parse_json_value($body, "port");
+    my str $num_workers = parse_json_value($body, "num_workers");
+    my str $max_requests = parse_json_value($body, "max_requests");
+    my str $ssl_enabled = parse_json_value($body, "ssl_enabled");
+    my str $remote_ip = parse_json_value($body, "remote_ip");
+
+    # Display formatted output
+    say("Cannoli Status: " . $host . ":" . $port);
+    say("=====================================");
+    say("");
+    say("Server:");
+    say("  Listen:       " . $server_host . ":" . $server_port);
+    say("  Workers:      " . $num_workers);
+    say("  Max requests: " . $max_requests . " per worker");
+    say("  SSL:          " . ($ssl_enabled eq "true" ? "enabled" : "disabled"));
+    say("");
+    say("Worker (PID " . $pid . "):");
+    say("  Uptime:       " . format_uptime($uptime + 0));
+    say("  Requests:     " . $requests);
+    say("  Avg response: " . $avg_ms . " ms");
+    say("");
+    say("Client IP: " . $remote_ip);
+
+    return 0;
+}
+
+func kill_worker(str $host, int $port, str $path) int {
+    my str $kill_path = $path . "/kill";
+    my str $response = http_get($host, $port, $kill_path);
+
+    if (length($response) < 12) {
+        say("Error: Could not connect to " . $host . ":" . $port);
+        return 1;
+    }
+
+    # Parse status line
+    my int $space1 = index($response, " ");
+    if ($space1 < 0) {
+        say("Error: Invalid HTTP response");
+        return 1;
+    }
+
+    my int $space2 = index(substr($response, $space1 + 1, length($response) - $space1 - 1), " ");
+    my str $status_code = substr($response, $space1 + 1, $space2);
+
+    if ($status_code ne "200") {
+        say("Error: Server returned HTTP " . $status_code);
+        return 1;
+    }
+
+    # Find body
+    my int $body_start = index($response, "\r\n\r\n");
+    if ($body_start < 0) {
+        say("Error: No response body");
+        return 1;
+    }
+    my str $body = substr($response, $body_start + 4, length($response) - $body_start - 4);
+
+    my str $pid = parse_json_value($body, "pid");
+    my str $message = parse_json_value($body, "message");
+
+    say("Kill request sent to " . $host . ":" . $port);
+    say("  PID:     " . $pid);
+    say("  Message: " . $message);
+
+    return 0;
+}
+
+func show_help() void {
+    say("cannoli-status - Query Cannoli admin endpoint");
+    say("");
+    say("Usage: cannoli-status [command] [host[:port]] [path]");
+    say("");
+    say("Commands:");
+    say("  status    Show worker status (default)");
+    say("  kill      Kill the worker that handles the request");
+    say("  help      Show this help message");
+    say("");
+    say("Examples:");
+    say("  cannoli-status                      # status on localhost:8080");
+    say("  cannoli-status myserver.com         # status on myserver.com:8080");
+    say("  cannoli-status myserver.com:3000    # status on myserver.com:3000");
+    say("  cannoli-status kill localhost       # kill worker on localhost:8080");
+    say("  cannoli-status status localhost /_status  # custom admin path");
+}
+
+func main() int {
+    my array @args = sys::argv();
+    my int $argc = scalar(@args);
+
+    # Parse arguments
+    my str $command = "status";
+    my str $host = "localhost";
+    my int $port = 8080;
+    my str $path = "/__admin";
+    my int $arg_idx = 1;
+
+    # Check for command
+    if ($argc > 1) {
+        my str $first = $args[1];
+        if ($first eq "status" || $first eq "kill" || $first eq "help") {
+            $command = $first;
+            $arg_idx = 2;
+        }
+    }
+
+    if ($command eq "help") {
+        show_help();
+        return 0;
+    }
+
+    # Parse host[:port]
+    if ($argc > $arg_idx) {
+        my str $hostarg = $args[$arg_idx];
+
+        # Check for host:port format
+        my int $colon = index($hostarg, ":");
+        if ($colon > 0) {
+            $host = substr($hostarg, 0, $colon);
+            $port = substr($hostarg, $colon + 1, length($hostarg) - $colon - 1) + 0;
+        } else {
+            $host = $hostarg;
+        }
+        $arg_idx = $arg_idx + 1;
+    }
+
+    # Parse custom path
+    if ($argc > $arg_idx) {
+        $path = $args[$arg_idx];
+    }
+
+    # Execute command
+    if ($command eq "kill") {
+        return kill_worker($host, $port, $path);
+    } else {
+        return show_status($host, $port, $path);
+    }
+}

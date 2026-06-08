@@ -1,0 +1,3 @@
+[cannoli_perla] loaded /home/mflickin/p/cannoli/lib/perla/Demo.pm.so
+[cannoli_perla] init perla_mod_init_Demo
+[cannoli_perla] handler perla_sub_Demo_hello

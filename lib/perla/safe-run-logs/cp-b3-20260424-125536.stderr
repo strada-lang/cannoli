@@ -1,0 +1,5 @@
+/usr/bin/ld: /home/mflickin/p/strada/vendor/pcre2/libpcre2-8.a(pcre2_compile.o): warning: relocation against `_pcre2_vspace_list_8' in read-only section `.text'
+/usr/bin/ld: /home/mflickin/p/strada/vendor/pcre2/libpcre2-8.a(pcre2_pattern_info.o): relocation R_X86_64_PC32 against symbol `_pcre2_OP_lengths_8' can not be used when making a shared object; recompile with -fPIC
+/usr/bin/ld: final link failed: bad value
+collect2: error: ld returned 1 exit status
+make: *** [Makefile:37: cannoli_perla.so] Error 1

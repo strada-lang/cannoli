@@ -1,0 +1,3 @@
+PERLA_BUILD_PM_SO=1 /home/mflickin/p/strada/perla/perla -M Demo.pm
+Compiled Demo.pm.o (module: Demo, init: perla_mod_init_Demo)
+Compiled Demo.pm.so (module: Demo, init: perla_mod_init_Demo)

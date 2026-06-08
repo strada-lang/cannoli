@@ -1,0 +1,147 @@
+# cannoli_perla.strada — bridge .so letting Cannoli dispatch requests
+# to a Perla-compiled handler.
+#
+# Config (passed after the colon on --library):
+#   so=/path/to/Handler.pm.so    Required. dlopen'd at init.
+#   init=perla_mod_init_X        Optional. Called once at init.
+#   handler=perla_sub_X_Y        Required. Called per request. Signature:
+#                                StradaValue* fn(StradaValue *perla_args)
+#                                Must return a StradaValue that stringifies
+#                                to the HTTP response body.
+#
+# Example:
+#   cannoli --library ./cannoli_perla.so:\
+#     so=/path/Demo.pm.so;init=perla_mod_init_Demo;handler=perla_sub_Demo_hello \
+#     --dev -p 8080
+#
+# This is MVP 1: the handler doesn't receive the Cannoli request object
+# yet — it just gets called with no args and returns a string. Request
+# marshalling ($c -> perla-compiled-handler) is the next milestone.
+
+# Global state, seeded by cannoli_init.
+my int $g_handler_fn = 0;
+
+# Parse a `key=value;key2=value2` config string and return the value
+# for $key, or "" if missing.
+func cp_get(str $config, str $key) str {
+    my int $kl = length($key);
+    my int $cl = length($config);
+    my int $i = 0;
+    while ($i < $cl) {
+        # skip leading semicolons / whitespace
+        while ($i < $cl) {
+            my str $ch = substr($config, $i, 1);
+            if ($ch ne ";" && $ch ne " " && $ch ne "\t") { last; }
+            $i = $i + 1;
+        }
+        if ($i >= $cl) { last; }
+        # try to match "key="
+        if ($i + $kl < $cl) {
+            my str $head = substr($config, $i, $kl);
+            my str $eq = substr($config, $i + $kl, 1);
+            if ($head eq $key && $eq eq "=") {
+                my int $vs = $i + $kl + 1;
+                my int $ve = $vs;
+                while ($ve < $cl) {
+                    if (substr($config, $ve, 1) eq ";") { last; }
+                    $ve = $ve + 1;
+                }
+                return substr($config, $vs, $ve - $vs);
+            }
+        }
+        # advance past this token
+        while ($i < $cl) {
+            if (substr($config, $i, 1) eq ";") { last; }
+            $i = $i + 1;
+        }
+    }
+    return "";
+}
+
+# Called once at server startup. Returns 1 on success, 0 on failure.
+func cannoli_init(str $config) int {
+    # Cannoli opens us via dlopen(RTLD_LAZY) without RTLD_GLOBAL, so our
+    # embedded Strada+Perla runtime symbols (perla_call_stack,
+    # perla_eval_error, strada_new_str, etc.) aren't visible when we
+    # later dlopen a handler .so. Re-open ourselves with NOLOAD+GLOBAL
+    # to promote our symbol-binding scope before loading anything else.
+    __C__ {
+        #include <dlfcn.h>
+        Dl_info __di;
+        if (dladdr((void*)cannoli_init, &__di) && __di.dli_fname) {
+            void *__self = dlopen(__di.dli_fname, RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD);
+            if (!__self) {
+                fprintf(stderr, "cannoli_perla: self-promote failed: %s\n", dlerror());
+            }
+        }
+    }
+    my str $so = cp_get($config, "so");
+    my str $init_name = cp_get($config, "init");
+    my str $handler_name = cp_get($config, "handler");
+
+    if (length($so) == 0) {
+        say(STDERR, "cannoli_perla: missing required `so=` option");
+        return 0;
+    }
+    if (length($handler_name) == 0) {
+        say(STDERR, "cannoli_perla: missing required `handler=` option");
+        return 0;
+    }
+
+    # core::dl_open uses RTLD_LAZY (no GLOBAL) — we want RTLD_NOW|GLOBAL
+    # so the handler .so's symbols can resolve cross-module and any
+    # secondary .so's loaded later see this one's symbols too. Call
+    # dlopen directly via __C__.
+    my int $lib = 0;
+    __C__ {
+        #include <dlfcn.h>
+        char __so_path[2048];
+        const char *__sp = strada_to_str_buf(so, __so_path, sizeof(__so_path));
+        void *__h = dlopen(__sp, RTLD_NOW | RTLD_GLOBAL);
+        if (!__h) {
+            fprintf(stderr, "cannoli_perla: dlopen %s failed: %s\n", __sp, dlerror());
+            return strada_new_int(0);
+        }
+        strada_decref(lib);
+        lib = strada_new_int((int64_t)(intptr_t)__h);
+    }
+    if ($lib == 0) {
+        return 0;
+    }
+    say(STDERR, "[cannoli_perla] loaded " . $so);
+
+    # Run the module init once if the caller gave us one. Perla-compiled
+    # modules need their perla_mod_init_X() to set up package stash,
+    # register subs, etc.
+    if (length($init_name) > 0) {
+        my int $init_fn = core::dl_sym($lib, $init_name);
+        if ($init_fn == 0) {
+            say(STDERR, "cannoli_perla: init symbol not found: " . $init_name);
+            return 0;
+        }
+        core::dl_call_int($init_fn, "");
+        say(STDERR, "[cannoli_perla] init " . $init_name);
+    }
+
+    $g_handler_fn = core::dl_sym($lib, $handler_name);
+    if ($g_handler_fn == 0) {
+        say(STDERR, "cannoli_perla: handler symbol not found: " . $handler_name);
+        return 0;
+    }
+    say(STDERR, "[cannoli_perla] handler " . $handler_name);
+
+    return 1;
+}
+
+# Called per request. $c is the Cannoli request/response object.
+# For MVP we ignore it — just call the Perla handler with no args and
+# return whatever string it produces.
+func cannoli_dispatch(scalar $c) str {
+    if ($g_handler_fn == 0) { return ""; }
+    # Perla subs take a StradaValue* perla_args (hash/array of @_). Pass
+    # an empty array so the handler sees an empty @_.
+    my scalar $empty_args = [];
+    my scalar $result = core::dl_call_sv($g_handler_fn, [$empty_args]);
+    if (!defined($result)) { return ""; }
+    return "" . $result;
+}
