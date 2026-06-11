@@ -48,6 +48,9 @@ func Cannoli_Main_print_help() void {
     say("  -w, --workers N      Number of worker processes (default: 5)");
     say("  --max-requests N     Requests per worker before respawn (default: 1000)");
     say("  --no-keep-alive      Disable HTTP keep-alive and close every response");
+    say("  --loop-workers       Event-loop workers: each worker multiplexes many");
+    say("                       connections with green tasks (default: one conn/worker)");
+    say("  --loop-acceptors N   Acceptor tasks per loop worker (default: 2)");
     say("  -l, --library PATH   Load handlers from shared library (.so)");
     say("                       Comma-separated for multiple libraries");
     say("                       Config: path.so:key=val;key2=val2");
@@ -323,6 +326,13 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             }
         } elsif ($arg eq "--no-keep-alive") {
             $config{"server.keep_alive"} = "0";
+        } elsif ($arg eq "--loop-workers") {
+            $config{"server.loop_workers"} = "1";
+        } elsif ($arg eq "--loop-acceptors") {
+            if ($i + 1 < $argc) {
+                $i = $i + 1;
+                $config{"server.loop_acceptors"} = $argv[$i];
+            }
         } elsif ($arg eq "--max-requests") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;

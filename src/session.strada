@@ -118,7 +118,7 @@ func Cannoli_Session_load(str $id) scalar {
     $session{"id"} = $id;
     $session{"data"} = {};
 
-    my array @lines = split($content, "\n");
+    my array @lines = split("\n", $content);
     my int $i = 0;
     my int $in_data = 0;
 

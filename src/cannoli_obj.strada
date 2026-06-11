@@ -1065,7 +1065,7 @@ func Cannoli_session(scalar $self) scalar {
     if (exists(%{$hdrs}, "cookie")) {
         my str $cookie_header = $hdrs->{"cookie"};
         # Parse cookies (format: name=value; name2=value2)
-        my array @cookies = split($cookie_header, "; ");
+        my array @cookies = split("; ", $cookie_header);
         my int $i = 0;
         while ($i < scalar(@cookies)) {
             my str $cookie = $cookies[$i];

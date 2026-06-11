@@ -34,6 +34,9 @@ package Cannoli::Server;
 
 # Create a new server from configuration
 # Returns a reference to the server hash
+use Async::Loop;
+use Async::Task;
+
 func Cannoli_Server_new(hash %config) scalar {
     my hash %server = ();
 
@@ -43,6 +46,8 @@ func Cannoli_Server_new(hash %config) scalar {
     $server{"max_requests"} = Cannoli::Config::get_int(%config, "server.max_requests", 1000);
     $server{"timeout"} = Cannoli::Config::get_int(%config, "server.timeout", 30);
     $server{"keep_alive_enabled"} = Cannoli::Config::get_bool(%config, "server.keep_alive", 1);
+    $server{"loop_mode"} = Cannoli::Config::get_bool(%config, "server.loop_workers", 0);
+    $server{"loop_acceptors"} = Cannoli::Config::get_int(%config, "server.loop_acceptors", 2);
     $server{"backlog"} = Cannoli::Config::get_int(%config, "server.backlog", 128);
     $server{"max_body_size"} = Cannoli::Config::get_int(%config, "server.max_body_size", 10485760);
     $server{"max_header_size"} = Cannoli::Config::get_int(%config, "server.max_header_size", 8192);
@@ -502,11 +507,13 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
     my int $max_body = $server_ref->{"max_body_size"};
     my int $timeout_ms = $server_ref->{"timeout"} * 1000;
 
-    if (length($buffer) == 0) {
+    if (length($buffer) == 0 && $server_ref->{"loop_mode"} != 1) {
         my int $client_fd = core::socket_fd($client);
 
         # During keep-alive wait, also monitor the server socket so this
-        # worker can break out and accept new connections if needed
+        # worker can break out and accept new connections if needed.
+        # (Loop workers skip this: accept-tasks handle new connections, and
+        # Async::Task::recv below parks this task with the same timeout.)
         my scalar $server_sock = $server_ref->{"server_sock"};
         my int $server_fd = defined($server_sock) ? core::socket_fd($server_sock) : -1;
 
@@ -540,7 +547,9 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
         if (length($buffer) > $max_header) {
             return ::read_error("header_too_large", $max_header);
         }
-        my str $chunk = core::socket_recv($client, 65536);
+        # Task-aware read: parks the green task in loop-worker mode (with
+        # the configured timeout), plain blocking recv in prefork mode.
+        my str $chunk = Async::Task::recv($client, 65536, $timeout_ms);
         if (length($chunk) == 0) {
             return undef;
         }
@@ -560,7 +569,7 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
 
     my int $total_needed = $header_end + 4 + $content_len;
     while (length($buffer) < $total_needed) {
-        my str $chunk = core::socket_recv($client, 65536);
+        my str $chunk = Async::Task::recv($client, 65536, $timeout_ms);
         if (length($chunk) == 0) {
             return undef;
         }
@@ -759,7 +768,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                 %err_res = Cannoli::Response::error_page(400, "Bad Request");
             }
             my str $err_data = Cannoli::Response::build(%err_res);
-            core::socket_send($client, $err_data);
+            Async::Task::send($client, $err_data);
             last;
         }
 
@@ -790,7 +799,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         if ($content_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            core::socket_send($client, $err_data);
+            Async::Task::send($client, $err_data);
             last;
         }
 
@@ -798,7 +807,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         if ($body_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            core::socket_send($client, $err_data);
+            Async::Task::send($client, $err_data);
             last;
         }
 
@@ -945,7 +954,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
                 Cannoli::Response::header(%res, "Connection", "close");
             }
             my str $response = Cannoli::Response::build(%res);
-            core::socket_send($client, $response);
+            Async::Task::send($client, $response);
         }
 
         # Calculate elapsed time in milliseconds
@@ -1245,6 +1254,10 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 
 # Worker process main loop
 func Cannoli_Server_worker_loop(scalar $server_ref) void {
+    if ($server_ref->{"loop_mode"} == 1) {
+        ::loop_worker_loop($server_ref);
+        return;
+    }
     my scalar $server_sock = $server_ref->{"server_sock"};
     my scalar $ssl_server = $server_ref->{"ssl_server"};
     my int $max_requests = $server_ref->{"max_requests"};
@@ -1313,6 +1326,75 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
         }
     }
 
+    # Worker exits after max requests (will be respawned by master)
+}
+
+
+# Event-loop worker (server.loop_workers = 1): instead of one connection at
+# a time, this worker runs an Async::Loop where every connection is a green
+# task. Keep-alive and slow clients park a coroutine instead of pinning the
+# whole worker; N acceptor tasks pull from the shared listener (the kernel
+# load-balances accepts across the preforked workers as before).
+#
+# v1 notes:
+#  - HTTP only: with ssl.enabled the TLS port is still served by classic
+#    workers semantics (loop workers ignore it and a warning is logged).
+#  - Anything blocking inside a handler (DBI, file I/O) stalls this worker's
+#    loop for its duration; other preforked workers keep serving.
+func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
+    my scalar $server_sock = $server_ref->{"server_sock"};
+    if (!defined($server_sock)) {
+        Cannoli::Log::error("loop_workers: no HTTP socket; falling back to classic worker");
+        return;
+    }
+    if (defined($server_ref->{"ssl_server"})) {
+        Cannoli::Log::warn("loop_workers=1: SSL port is not served by loop workers in this mode");
+    }
+
+    my int $max_requests = $server_ref->{"max_requests"};
+    my int $acceptors = $server_ref->{"loop_acceptors"};
+    if ($acceptors < 1) { $acceptors = 1; }
+    my int $parent_pid = core::getppid();
+
+    Cannoli::Log::info("worker " . core::getpid() . ": event-loop mode, " . $acceptors . " acceptors");
+    my scalar $loop = Async::Loop::new();
+    my scalar $state = { "served" => 0, "draining" => 0 };
+
+    # Watchdog task: exit if the master dies; begin draining after
+    # max_requests connections have been handled.
+    $loop->spawn(fn () {
+        while (1) {
+            Async::Task::sleep(1000);
+            if (core::getppid() != $parent_pid) {
+                exit(0);
+            }
+            if ($state->{"draining"} == 1) {
+                last;
+            }
+        }
+    });
+
+    my int $a = 0;
+    while ($a < $acceptors) {
+        $loop->spawn(fn () {
+            while ($state->{"draining"} == 0) {
+                my scalar $client = Async::Task::accept($server_sock, 1000);
+                if (!defined($client)) {
+                    next;   # timeout tick: re-check draining
+                }
+                $loop->spawn(fn () {
+                    ::handle_client($server_ref, $client);   # closes $client itself
+                    $state->{"served"} = $state->{"served"} + 1;
+                    if ($state->{"served"} >= $max_requests) {
+                        $state->{"draining"} = 1;
+                    }
+                });
+            }
+        });
+        $a = $a + 1;
+    }
+
+    $loop->run();
     # Worker exits after max requests (will be respawned by master)
 }
 

@@ -37,7 +37,8 @@ cat "$CANNOLI_DIR/src/config.strada" \
     "$TEST_FILE" \
     "$CANNOLI_DIR/lib/compress.strada" > "$COMBINED"
 
-# Compile using installed strada
-strada "$COMBINED" -o "/tmp/$TEST_NAME" -l z
+# Compile using $STRADA (defaults to the installed strada)
+STRADA="${STRADA:-strada}"
+"$STRADA" "$COMBINED" -o "/tmp/$TEST_NAME" -l z
 
 echo "Built /tmp/$TEST_NAME"
