@@ -8888,7 +8888,16 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                     next;   # timeout tick: re-check draining
                 }
                 $loop->spawn(fn () {
-                    ::handle_client($server_ref, $client);   # closes $client itself
+                    # On an uncaught handler exception the normal close in
+                    # handle_client is skipped -- close here or the client
+                    # hangs until its own timeout (observed with a failed
+                    # db_connect in sysync-web).
+                    try {
+                        ::handle_client($server_ref, $client);   # closes $client itself
+                    } catch ($handler_err) {
+                        Cannoli::Log::error("handler died: " . $handler_err);
+                        core::socket_close($client);
+                    }
                     $state->{"served"} = $state->{"served"} + 1;
                     if ($state->{"served"} >= $max_requests) {
                         $state->{"draining"} = 1;
@@ -8931,7 +8940,12 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                             core::coro_yield_io($cfd, $st == 2 ? "w" : "r", $hs_left);
                         }
                         if ($hs_ok == 1) {
-                            ::handle_ssl_client($server_ref, $ssl_conn);   # closes the conn
+                            try {
+                                ::handle_ssl_client($server_ref, $ssl_conn);   # closes the conn
+                            } catch ($ssl_handler_err) {
+                                Cannoli::Log::error("ssl handler died: " . $ssl_handler_err);
+                                core::dl_call_void_sv($server_ref->{"ssl_close_fn"}, [$ssl_conn]);
+                            }
                         } else {
                             core::dl_call_void_sv($server_ref->{"ssl_close_fn"}, [$ssl_conn]);
                         }
