@@ -115,6 +115,14 @@ func Cannoli_Server_new(hash %config) scalar {
             $server{"ssl_write_fn"} = core::dl_sym($ssl_lib, "strada_ssl_write_sv");
             $server{"ssl_close_fn"} = core::dl_sym($ssl_lib, "strada_ssl_close_sv");
             $server{"ssl_fd_fn"} = core::dl_sym($ssl_lib, "strada_ssl_fd_sv");
+            # Non-blocking variants for loop workers (undef on older SSL
+            # libraries -- loop mode then leaves the TLS port unserved with
+            # a warning, same as before).
+            $server{"ssl_try_accept_fn"} = core::dl_sym($ssl_lib, "strada_ssl_try_accept_sv");
+            $server{"ssl_handshake_step_fn"} = core::dl_sym($ssl_lib, "strada_ssl_handshake_step_sv");
+            $server{"ssl_try_read_fn"} = core::dl_sym($ssl_lib, "strada_ssl_try_read_sv");
+            $server{"ssl_try_write_fn"} = core::dl_sym($ssl_lib, "strada_ssl_try_write_sv");
+            $server{"ssl_want_fn"} = core::dl_sym($ssl_lib, "strada_ssl_want_sv");
             say("  SSL library loaded");
             if (defined($server{"ssl_server_fn"})) {
                 say("  Found strada_ssl_server_sv");
@@ -591,13 +599,62 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
 }
 
 # Read and parse a full HTTP request from an SSL connection
+# Task-aware SSL receive for loop workers: try_read without blocking; on
+# WANT, park this green task on the connection fd in the direction OpenSSL
+# asked for, then retry. Returns data, "" on close/fatal/timeout.
+func Cannoli_Server_loop_ssl_recv(scalar $server_ref, scalar $ssl_conn, int $ssl_fd, int $timeout_ms) str {
+    my scalar $try_read_fn = $server_ref->{"ssl_try_read_fn"};
+    my scalar $want_fn = $server_ref->{"ssl_want_fn"};
+    my int $deadline = $timeout_ms > 0 ? core::mono_ms() + $timeout_ms : 0;
+    while (1) {
+        my scalar $chunk = core::dl_call_sv($try_read_fn, [$ssl_conn, 65536]);
+        if (defined($chunk)) {
+            return $chunk;
+        }
+        my int $left = 0;
+        if ($deadline > 0) {
+            $left = $deadline - core::mono_ms();
+            if ($left <= 0) { return ""; }
+        }
+        my int $want = core::dl_call_int_sv($want_fn, [$ssl_conn]);
+        core::coro_yield_io($ssl_fd, $want == 2 ? "w" : "r", $left);
+    }
+    return "";
+}
+
+# Task-aware SSL send for loop workers. Returns bytes written or -1.
+func Cannoli_Server_loop_ssl_send(scalar $server_ref, scalar $ssl_conn, int $ssl_fd, str $data) int {
+    my scalar $try_write_fn = $server_ref->{"ssl_try_write_fn"};
+    my scalar $want_fn = $server_ref->{"ssl_want_fn"};
+    while (1) {
+        my int $n = core::dl_call_int_sv($try_write_fn, [$ssl_conn, $data]);
+        if ($n > 0) { return $n; }
+        if ($n < 0) { return -1; }
+        my int $want = core::dl_call_int_sv($want_fn, [$ssl_conn]);
+        core::coro_yield_io($ssl_fd, $want == 2 ? "w" : "r", 0);
+    }
+    return -1;
+}
+
+# Mode-dispatching SSL write: parks in loop mode, blocking wrapper in
+# classic mode (which is itself WANT-safe on non-blocking fds).
+func Cannoli_Server_ssl_send(scalar $server_ref, scalar $ssl_conn, int $ssl_fd, str $data) int {
+    if ($server_ref->{"loop_mode"} == 1 && defined($server_ref->{"ssl_try_write_fn"})) {
+        return ::loop_ssl_send($server_ref, $ssl_conn, $ssl_fd, $data);
+    }
+    my scalar $ssl_write_fn = $server_ref->{"ssl_write_fn"};
+    return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+}
+
 func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scalar $ssl_read_fn, int $ssl_fd, str $buffer) scalar {
     my int $max_header = $server_ref->{"max_header_size"};
     my int $max_body = $server_ref->{"max_body_size"};
     my int $timeout_ms = $server_ref->{"timeout"} * 1000;
 
-    if (length($buffer) == 0 && $ssl_fd > 0) {
-        # During keep-alive wait, also monitor the server socket
+    if (length($buffer) == 0 && $ssl_fd > 0 && $server_ref->{"loop_mode"} != 1) {
+        # During keep-alive wait, also monitor the server socket.
+        # (Loop workers skip this: accept-tasks own new connections, and
+        # the task-aware reads below park with the same timeout.)
         my scalar $server_sock = $server_ref->{"server_sock"};
         my int $server_fd = defined($server_sock) ? core::socket_fd($server_sock) : -1;
 
@@ -630,7 +687,12 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
         if (length($buffer) > $max_header) {
             return ::read_error("header_too_large", $max_header);
         }
-        my str $chunk = core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        my str $chunk = "";
+        if ($server_ref->{"loop_mode"} == 1 && defined($server_ref->{"ssl_try_read_fn"})) {
+            $chunk = ::loop_ssl_recv($server_ref, $ssl_conn, $ssl_fd, $timeout_ms);
+        } else {
+            $chunk = core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        }
         if (length($chunk) == 0) {
             return undef;
         }
@@ -650,7 +712,12 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
 
     my int $total_needed = $header_end + 4 + $content_len;
     while (length($buffer) < $total_needed) {
-        my str $chunk = core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        my str $chunk = "";
+        if ($server_ref->{"loop_mode"} == 1 && defined($server_ref->{"ssl_try_read_fn"})) {
+            $chunk = ::loop_ssl_recv($server_ref, $ssl_conn, $ssl_fd, $timeout_ms);
+        } else {
+            $chunk = core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, 65536]);
+        }
         if (length($chunk) == 0) {
             return undef;
         }
@@ -1027,7 +1094,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                 %err_res = Cannoli::Response::error_page(400, "Bad Request");
             }
             my str $err_data = Cannoli::Response::build(%err_res);
-            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            ::ssl_send($server_ref, $ssl_conn, $ssl_fd, $err_data);
             last;
         }
 
@@ -1060,7 +1127,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         if ($content_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            ::ssl_send($server_ref, $ssl_conn, $ssl_fd, $err_data);
             last;
         }
 
@@ -1068,7 +1135,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         if ($body_len > $max_body) {
             my hash %err_res = Cannoli::Response::payload_too_large($max_body);
             my str $err_data = Cannoli::Response::build(%err_res);
-            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $err_data]);
+            ::ssl_send($server_ref, $ssl_conn, $ssl_fd, $err_data);
             last;
         }
 
@@ -1213,7 +1280,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
                 Cannoli::Response::header(%res, "Connection", "close");
             }
             my str $response = Cannoli::Response::build(%res);
-            core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $response]);
+            ::ssl_send($server_ref, $ssl_conn, $ssl_fd, $response);
         }
 
         # Calculate elapsed time in milliseconds
@@ -1347,8 +1414,17 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
         Cannoli::Log::error("loop_workers: no HTTP socket; falling back to classic worker");
         return;
     }
-    if (defined($server_ref->{"ssl_server"})) {
-        Cannoli::Log::warn("loop_workers=1: SSL port is not served by loop workers in this mode");
+    my scalar $loop_ssl_server = $server_ref->{"ssl_server"};
+    my int $loop_ssl_ok = 0;
+    if (defined($loop_ssl_server)) {
+        if (defined($server_ref->{"ssl_try_accept_fn"})
+            && defined($server_ref->{"ssl_handshake_step_fn"})
+            && defined($server_ref->{"ssl_try_read_fn"})
+            && defined($server_ref->{"ssl_try_write_fn"})) {
+            $loop_ssl_ok = 1;
+        } else {
+            Cannoli::Log::warn("loop_workers=1: SSL library lacks non-blocking entry points (rebuild libstrada_ssl.so); TLS port not served by loop workers");
+        }
     }
 
     my int $max_requests = $server_ref->{"max_requests"};
@@ -1392,6 +1468,53 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
             }
         });
         $a = $a + 1;
+    }
+
+    # TLS acceptor tasks: park on the TLS listener, try-accept without
+    # blocking, then drive the handshake step-by-step (parking on whichever
+    # readiness OpenSSL asks for) before handing the connection to the
+    # regular SSL request handler. One slow handshake never stalls the loop.
+    if ($loop_ssl_ok == 1) {
+        my int $ssl_srv_fd = core::dl_call_int_sv($server_ref->{"ssl_fd_fn"}, [$loop_ssl_server]);
+        my int $sa = 0;
+        while ($sa < $acceptors) {
+            $loop->spawn(fn () {
+                while ($state->{"draining"} == 0) {
+                    my scalar $ssl_conn = core::dl_call_sv($server_ref->{"ssl_try_accept_fn"}, [$loop_ssl_server]);
+                    if (!defined($ssl_conn)) {
+                        # Nothing pending: park until the listener is
+                        # readable (1s tick to re-check draining).
+                        core::coro_yield_io($ssl_srv_fd, "r", 1000);
+                        next;
+                    }
+                    $loop->spawn(fn () {
+                        my int $cfd = core::dl_call_int_sv($server_ref->{"ssl_fd_fn"}, [$ssl_conn]);
+                        # Handshake with a 10s overall deadline so dead
+                        # clients can't park a task forever.
+                        my int $hs_deadline = core::mono_ms() + 10000;
+                        my int $hs_ok = 0;
+                        while (1) {
+                            my int $st = core::dl_call_int_sv($server_ref->{"ssl_handshake_step_fn"}, [$ssl_conn]);
+                            if ($st == 0) { $hs_ok = 1; last; }
+                            if ($st < 0) { last; }
+                            my int $hs_left = $hs_deadline - core::mono_ms();
+                            if ($hs_left <= 0) { last; }
+                            core::coro_yield_io($cfd, $st == 2 ? "w" : "r", $hs_left);
+                        }
+                        if ($hs_ok == 1) {
+                            ::handle_ssl_client($server_ref, $ssl_conn);   # closes the conn
+                        } else {
+                            core::dl_call_void_sv($server_ref->{"ssl_close_fn"}, [$ssl_conn]);
+                        }
+                        $state->{"served"} = $state->{"served"} + 1;
+                        if ($state->{"served"} >= $max_requests) {
+                            $state->{"draining"} = 1;
+                        }
+                    });
+                }
+            });
+            $sa = $sa + 1;
+        }
     }
 
     $loop->run();
