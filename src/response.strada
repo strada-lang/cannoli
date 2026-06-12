@@ -67,6 +67,11 @@ func Cannoli_Response_status(hash %res, int $code) void {
 
 # Set a header
 func Cannoli_Response_header(hash %res, str $name, str $value) void {
+    # Classic handlers may return bare {status, body} hashes with no
+    # headers hash — create it instead of storing into undef.
+    if (!defined($res{"headers"})) {
+        $res{"headers"} = {};
+    }
     my scalar $headers = $res{"headers"};
     $headers->{$name} = $value;
 }
@@ -91,7 +96,16 @@ func Cannoli_Response_build(hash %res) str {
     my int $status_code = $res{"status"};
     my str $status_msg = ::status_message($status_code);
     my str $body_content = $res{"body"};
+    if (!defined($res{"headers"})) {
+        $res{"headers"} = {};
+    }
     my scalar $headers = $res{"headers"};
+
+    # Bare responses carry the MIME type as a content_type key
+    # (e.g. the static file server) rather than a header.
+    if (defined($res{"content_type"}) && !defined($headers->{"Content-Type"})) {
+        $headers->{"Content-Type"} = $res{"content_type"};
+    }
 
     # Set content length
     $headers->{"Content-Length"} = "" . length($body_content);

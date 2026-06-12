@@ -6,7 +6,8 @@
 #
 # Requires Strada to be installed (run 'make install' in strada directory)
 
-STRADA := /home/mflickin/p/strada/strada
+# Overridable: make STRADA=/path/to/strada (or set in the environment)
+STRADA ?= strada
 
 SRC_DIR := src
 LIB_DIR := lib
@@ -64,7 +65,7 @@ $(COMBINED): $(SOURCES) | $(BUILD_DIR)
 # Build the binary using strada wrapper
 $(TARGET): $(COMBINED)
 	@echo "Compiling..."
-	@$(STRADA) -l z $(COMBINED) -o $(TARGET)
+	@$(STRADA)  -lffi -lz $(COMBINED) -o $(TARGET)
 
 # Run tests
 test: $(TARGET)

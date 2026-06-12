@@ -6,6 +6,9 @@ set -e
 
 CANNOLI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Tests honor $STRADA (forwarded to build_test.sh); default: installed strada
+export STRADA="${STRADA:-strada}"
+
 # Build cannoli first
 echo "Building Cannoli..."
 cd "$CANNOLI_DIR"
