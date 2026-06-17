@@ -46,6 +46,11 @@ func Cannoli_Server_new(hash %config) scalar {
     $server{"max_requests"} = Cannoli::Config::get_int(%config, "server.max_requests", 1000);
     $server{"timeout"} = Cannoli::Config::get_int(%config, "server.timeout", 30);
     $server{"keep_alive_enabled"} = Cannoli::Config::get_bool(%config, "server.keep_alive", 1);
+    # Idle timeout for a kept-alive connection between requests (seconds). Kept
+    # short so a prefork worker parked on an idle keep-alive connection returns to
+    # accept() promptly instead of starving new connections; the value is also
+    # advertised in the Keep-Alive header so clients recycle on the same schedule.
+    $server{"keep_alive_timeout"} = Cannoli::Config::get_int(%config, "server.keep_alive_timeout", 2);
     $server{"loop_mode"} = Cannoli::Config::get_bool(%config, "server.loop_workers", 0);
     $server{"loop_acceptors"} = Cannoli::Config::get_int(%config, "server.loop_acceptors", 2);
     $server{"backlog"} = Cannoli::Config::get_int(%config, "server.backlog", 128);
@@ -518,35 +523,24 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
     if (length($buffer) == 0 && $server_ref->{"loop_mode"} != 1) {
         my int $client_fd = core::socket_fd($client);
 
-        # During keep-alive wait, also monitor the server socket so this
-        # worker can break out and accept new connections if needed.
-        # (Loop workers skip this: accept-tasks handle new connections, and
-        # Async::Task::recv below parks this task with the same timeout.)
-        my scalar $server_sock = $server_ref->{"server_sock"};
-        my int $server_fd = defined($server_sock) ? core::socket_fd($server_sock) : -1;
-
+        # Wait for the client's (next) request, bounded by the idle timeout.
+        #
+        # We wait ONLY on the client socket. A previous version also selected on
+        # the shared listening socket so a worker parked on an idle keep-alive
+        # connection could "break out" to accept a new one — but every parked
+        # worker watched the same listening socket, so a single new connection
+        # woke them ALL (thundering herd) and each then CLOSED its own live
+        # keep-alive connection to race for the accept. Under any concurrency that
+        # tore down clients' reused connections, surfacing as intermittent
+        # connection resets and truncated/garbled responses. New connections are
+        # served by workers actually sitting in accept(); idle keep-alive
+        # connections here are bounded by the keep-alive idle timeout (short, so
+        # the worker frees up for accept() quickly).
+        my int $idle_ms = $server_ref->{"keep_alive_timeout"} * 1000;
         my array @fds = ($client_fd);
-        if ($server_fd >= 0) {
-            push(@fds, $server_fd);
-        }
-
-        my array @ready = core::select_fds(\@fds, $timeout_ms);
+        my array @ready = core::select_fds(\@fds, $idle_ms);
         if (scalar(@ready) == 0) {
-            return undef;
-        }
-
-        # If server socket is ready but client is not, a new connection is
-        # waiting and this worker should drop keep-alive to go accept it
-        my int $client_ready = 0;
-        my int $j = 0;
-        while ($j < scalar(@ready)) {
-            if ($ready[$j] == $client_fd) {
-                $client_ready = 1;
-            }
-            $j++;
-        }
-        if ($client_ready == 0) {
-            return undef;
+            return undef;   # idle timeout — close this keep-alive connection
         }
     }
 
@@ -652,33 +646,16 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
     my int $timeout_ms = $server_ref->{"timeout"} * 1000;
 
     if (length($buffer) == 0 && $ssl_fd > 0 && $server_ref->{"loop_mode"} != 1) {
-        # During keep-alive wait, also monitor the server socket.
-        # (Loop workers skip this: accept-tasks own new connections, and
-        # the task-aware reads below park with the same timeout.)
-        my scalar $server_sock = $server_ref->{"server_sock"};
-        my int $server_fd = defined($server_sock) ? core::socket_fd($server_sock) : -1;
-
+        # Wait ONLY on the client socket for its next request (bounded by the idle
+        # timeout). See read_request: also watching the shared listening socket
+        # here made one new connection wake every parked keep-alive worker, each
+        # of which would then close its own live connection to race for the
+        # accept — dropping clients' reused connections under concurrency.
+        my int $idle_ms = $server_ref->{"keep_alive_timeout"} * 1000;
         my array @fds = ($ssl_fd);
-        if ($server_fd >= 0) {
-            push(@fds, $server_fd);
-        }
-
-        my array @ready = core::select_fds(\@fds, $timeout_ms);
+        my array @ready = core::select_fds(\@fds, $idle_ms);
         if (scalar(@ready) == 0) {
-            return undef;
-        }
-
-        # If server socket is ready but client is not, drop keep-alive
-        my int $client_ready = 0;
-        my int $j = 0;
-        while ($j < scalar(@ready)) {
-            if ($ready[$j] == $ssl_fd) {
-                $client_ready = 1;
-            }
-            $j++;
-        }
-        if ($client_ready == 0) {
-            return undef;
+            return undef;   # idle timeout — close this keep-alive connection
         }
     }
 
@@ -1016,7 +993,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         if ($res{"sent"} != 1) {
             if ($keep_alive == 1) {
                 Cannoli::Response::header(%res, "Connection", "keep-alive");
-                Cannoli::Response::header(%res, "Keep-Alive", "timeout=" . $server_ref->{"timeout"});
+                Cannoli::Response::header(%res, "Keep-Alive", "timeout=" . $server_ref->{"keep_alive_timeout"});
             } else {
                 Cannoli::Response::header(%res, "Connection", "close");
             }
@@ -1275,7 +1252,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         if ($res{"sent"} != 1) {
             if ($keep_alive == 1) {
                 Cannoli::Response::header(%res, "Connection", "keep-alive");
-                Cannoli::Response::header(%res, "Keep-Alive", "timeout=" . $server_ref->{"timeout"});
+                Cannoli::Response::header(%res, "Keep-Alive", "timeout=" . $server_ref->{"keep_alive_timeout"});
             } else {
                 Cannoli::Response::header(%res, "Connection", "close");
             }
