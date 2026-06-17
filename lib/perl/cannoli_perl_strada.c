@@ -33,14 +33,14 @@ StradaValue* cannoli_init(StradaValue* config);
 StradaValue* cannoli_dispatch(StradaValue* c);
 
 StradaValue* config_get(StradaValue* config, StradaValue* key) {
-strada_stack_push("config_get", "cannoli_perl.strada");
+strada_stack_push_il("config_get", "cannoli_perl.strada");
 strada_incref(config);
 strada_cleanup_push(config);
 strada_incref(key);
 strada_cleanup_push(key);
-StradaValue *key_len = ({ StradaValue *__len_tmp = key; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); });
+StradaValue *key_len = ({ StradaValue *__icv = ({ StradaValue *__len_tmp = key; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); strada_decref(__icv); __icr; });
 strada_cleanup_push(key_len);
-StradaValue *config_len = ({ StradaValue *__len_tmp = config; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); });
+StradaValue *config_len = ({ StradaValue *__icv = ({ StradaValue *__len_tmp = config; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); strada_decref(__icv); __icr; });
 strada_cleanup_push(config_len);
 StradaValue *i = strada_new_int(0);
 strada_cleanup_push(i);
@@ -48,13 +48,13 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     __redo_0: __attribute__((unused));
     while ((strada_to_int(i) < strada_to_int(config_len))) {
         __redo_1: __attribute__((unused));
-        StradaValue *ch = strada_substr(config, strada_to_int(i), 1);
+        StradaValue *ch = strada_substr(config, strada_to_int(i), (int64_t)1);
         strada_cleanup_push(ch);
         if (((({ StradaValue *__cond_tmp = strada_new_int(strada_str_ne_lit(ch, ";")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }) && ({ StradaValue *__cond_tmp = strada_new_int(strada_str_ne_lit(ch, " ")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) && ({ StradaValue *__cond_tmp = strada_new_int(strada_str_ne_lit(ch, "\t")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }))) {
             strada_cleanup_pop(); strada_decref(ch);
             break;
         }
-        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + 1); strada_decref(__old); i; });
+        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + (int64_t)1); strada_decref(__old); i; });
         strada_break_self_cycle(ch);
         strada_cleanup_pop(); strada_decref(ch);
     }
@@ -64,22 +64,22 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     if (((strada_to_int(i) + strada_to_int(key_len)) < strada_to_int(config_len))) {
         StradaValue *maybe_key = strada_substr(config, strada_to_int(i), strada_to_int(key_len));
         strada_cleanup_push(maybe_key);
-        StradaValue *after_key = strada_substr(config, (strada_to_int(i) + strada_to_int(key_len)), 1);
+        StradaValue *after_key = strada_substr(config, (strada_to_int(i) + strada_to_int(key_len)), (int64_t)1);
         strada_cleanup_push(after_key);
         if ((({ StradaValue *__cond_tmp = ({ char *__cmp_ls = strada_to_str_ss(maybe_key); char *__cmp_rs = strada_to_str_ss(key); int __cmp_res = strcmp(__cmp_ls, __cmp_rs) == 0; strada_cstr_free(__cmp_ls); strada_cstr_free(__cmp_rs); strada_new_int(__cmp_res); }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }) && ({ StradaValue *__cond_tmp = strada_new_int(strada_str_eq_lit(after_key, "=")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }))) {
-            StradaValue *value_start = STRADA_MAKE_TAGGED_INT((strada_to_int(i) + strada_to_int(key_len)) + 1);
+            StradaValue *value_start = STRADA_MAKE_TAGGED_INT((strada_to_int(i) + strada_to_int(key_len)) + (int64_t)1);
             strada_cleanup_push(value_start);
             StradaValue *value_end = value_start; strada_incref(value_end);
             strada_cleanup_push(value_end);
             while ((strada_to_int(value_end) < strada_to_int(config_len))) {
                 __redo_2: __attribute__((unused));
-                StradaValue *ch = strada_substr(config, strada_to_int(value_end), 1);
+                StradaValue *ch = strada_substr(config, strada_to_int(value_end), (int64_t)1);
                 strada_cleanup_push(ch);
                 if (({ StradaValue *__cond_tmp = strada_new_int(strada_str_eq_lit(ch, ";")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
                     strada_cleanup_pop(); strada_decref(ch);
                     break;
                 }
-                ({ StradaValue *__old = value_end; value_end = STRADA_MAKE_TAGGED_INT(strada_to_int(value_end) + 1); strada_decref(__old); value_end; });
+                ({ StradaValue *__old = value_end; value_end = STRADA_MAKE_TAGGED_INT(strada_to_int(value_end) + (int64_t)1); strada_decref(__old); value_end; });
                 strada_break_self_cycle(ch);
                 strada_cleanup_pop(); strada_decref(ch);
             }
@@ -95,7 +95,7 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
                 strada_decref(config);
                 strada_cleanup_pop();
                 strada_decref(key);
-                strada_stack_pop();
+                strada_stack_pop_il();
                 return __retval; }
             strada_break_self_cycle(value_start);
             strada_break_self_cycle(value_end);
@@ -109,13 +109,13 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     }
     while ((strada_to_int(i) < strada_to_int(config_len))) {
         __redo_3: __attribute__((unused));
-        StradaValue *ch = strada_substr(config, strada_to_int(i), 1);
+        StradaValue *ch = strada_substr(config, strada_to_int(i), (int64_t)1);
         strada_cleanup_push(ch);
         if (({ StradaValue *__cond_tmp = strada_new_int(strada_str_eq_lit(ch, ";")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
             strada_cleanup_pop(); strada_decref(ch);
             break;
         }
-        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + 1); strada_decref(__old); i; });
+        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + (int64_t)1); strada_decref(__old); i; });
         strada_break_self_cycle(ch);
         strada_cleanup_pop(); strada_decref(ch);
     }
@@ -128,7 +128,7 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     strada_decref(config);
     strada_cleanup_pop();
     strada_decref(key);
-    strada_stack_pop();
+    strada_stack_pop_il();
     return __retval; }
 strada_break_self_cycle(key_len);
 strada_break_self_cycle(config_len);
@@ -140,22 +140,22 @@ strada_cleanup_pop();
 strada_decref(config);
 strada_cleanup_pop();
 strada_decref(key);
-strada_stack_pop();
+strada_stack_pop_il();
 return strada_new_undef();
 }
 
 
 StradaValue* config_get_all(StradaValue* config, StradaValue* key) {
-strada_stack_push("config_get_all", "cannoli_perl.strada");
+strada_stack_push_il("config_get_all", "cannoli_perl.strada");
 strada_incref(config);
 strada_cleanup_push(config);
 strada_incref(key);
 strada_cleanup_push(key);
 StradaValue *values = strada_new_array();
 strada_cleanup_push(values);
-StradaValue *key_len = ({ StradaValue *__len_tmp = key; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); });
+StradaValue *key_len = ({ StradaValue *__icv = ({ StradaValue *__len_tmp = key; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); strada_decref(__icv); __icr; });
 strada_cleanup_push(key_len);
-StradaValue *config_len = ({ StradaValue *__len_tmp = config; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); });
+StradaValue *config_len = ({ StradaValue *__icv = ({ StradaValue *__len_tmp = config; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); strada_decref(__icv); __icr; });
 strada_cleanup_push(config_len);
 StradaValue *i = strada_new_int(0);
 strada_cleanup_push(i);
@@ -163,13 +163,13 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     __redo_4: __attribute__((unused));
     while ((strada_to_int(i) < strada_to_int(config_len))) {
         __redo_5: __attribute__((unused));
-        StradaValue *ch = strada_substr(config, strada_to_int(i), 1);
+        StradaValue *ch = strada_substr(config, strada_to_int(i), (int64_t)1);
         strada_cleanup_push(ch);
         if (((({ StradaValue *__cond_tmp = strada_new_int(strada_str_ne_lit(ch, ";")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }) && ({ StradaValue *__cond_tmp = strada_new_int(strada_str_ne_lit(ch, " ")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) && ({ StradaValue *__cond_tmp = strada_new_int(strada_str_ne_lit(ch, "\t")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }))) {
             strada_cleanup_pop(); strada_decref(ch);
             break;
         }
-        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + 1); strada_decref(__old); i; });
+        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + (int64_t)1); strada_decref(__old); i; });
         strada_break_self_cycle(ch);
         strada_cleanup_pop(); strada_decref(ch);
     }
@@ -179,28 +179,28 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     if (((strada_to_int(i) + strada_to_int(key_len)) < strada_to_int(config_len))) {
         StradaValue *maybe_key = strada_substr(config, strada_to_int(i), strada_to_int(key_len));
         strada_cleanup_push(maybe_key);
-        StradaValue *after_key = strada_substr(config, (strada_to_int(i) + strada_to_int(key_len)), 1);
+        StradaValue *after_key = strada_substr(config, (strada_to_int(i) + strada_to_int(key_len)), (int64_t)1);
         strada_cleanup_push(after_key);
         if ((({ StradaValue *__cond_tmp = ({ char *__cmp_ls = strada_to_str_ss(maybe_key); char *__cmp_rs = strada_to_str_ss(key); int __cmp_res = strcmp(__cmp_ls, __cmp_rs) == 0; strada_cstr_free(__cmp_ls); strada_cstr_free(__cmp_rs); strada_new_int(__cmp_res); }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }) && ({ StradaValue *__cond_tmp = strada_new_int(strada_str_eq_lit(after_key, "=")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; }))) {
-            StradaValue *value_start = STRADA_MAKE_TAGGED_INT((strada_to_int(i) + strada_to_int(key_len)) + 1);
+            StradaValue *value_start = STRADA_MAKE_TAGGED_INT((strada_to_int(i) + strada_to_int(key_len)) + (int64_t)1);
             strada_cleanup_push(value_start);
             StradaValue *value_end = value_start; strada_incref(value_end);
             strada_cleanup_push(value_end);
             while ((strada_to_int(value_end) < strada_to_int(config_len))) {
                 __redo_6: __attribute__((unused));
-                StradaValue *ch = strada_substr(config, strada_to_int(value_end), 1);
+                StradaValue *ch = strada_substr(config, strada_to_int(value_end), (int64_t)1);
                 strada_cleanup_push(ch);
                 if (({ StradaValue *__cond_tmp = strada_new_int(strada_str_eq_lit(ch, ";")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
                     strada_cleanup_pop(); strada_decref(ch);
                     break;
                 }
-                ({ StradaValue *__old = value_end; value_end = STRADA_MAKE_TAGGED_INT(strada_to_int(value_end) + 1); strada_decref(__old); value_end; });
+                ({ StradaValue *__old = value_end; value_end = STRADA_MAKE_TAGGED_INT(strada_to_int(value_end) + (int64_t)1); strada_decref(__old); value_end; });
                 strada_break_self_cycle(ch);
                 strada_cleanup_pop(); strada_decref(ch);
             }
             StradaValue *value = strada_substr(config, strada_to_int(value_start), (strada_to_int(value_end) - strada_to_int(value_start)));
             strada_cleanup_push(value);
-            ({ StradaValue *__expr_tmp = ({ StradaValue *__push_a = strada_new_ref(values, '@'); StradaArray *__push_av = strada_deref_array(__push_a); strada_array_push(__push_av, value); strada_decref(__push_a); strada_undef_static(); }); strada_decref(__expr_tmp); });
+            strada_decref(({ StradaValue *__push_a = strada_new_ref(values, '@'); StradaArray *__push_av = strada_deref_array(__push_a); strada_array_push(__push_av, value); strada_decref(__push_a); strada_undef_static(); }));
             strada_break_self_cycle(value_start);
             strada_break_self_cycle(value_end);
             strada_break_self_cycle(value);
@@ -215,13 +215,13 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     }
     while ((strada_to_int(i) < strada_to_int(config_len))) {
         __redo_7: __attribute__((unused));
-        StradaValue *ch = strada_substr(config, strada_to_int(i), 1);
+        StradaValue *ch = strada_substr(config, strada_to_int(i), (int64_t)1);
         strada_cleanup_push(ch);
         if (({ StradaValue *__cond_tmp = strada_new_int(strada_str_eq_lit(ch, ";")); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
             strada_cleanup_pop(); strada_decref(ch);
             break;
         }
-        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + 1); strada_decref(__old); i; });
+        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + (int64_t)1); strada_decref(__old); i; });
         strada_break_self_cycle(ch);
         strada_cleanup_pop(); strada_decref(ch);
     }
@@ -236,7 +236,7 @@ while ((strada_to_int(i) < strada_to_int(config_len))) {
     strada_decref(config);
     strada_cleanup_pop();
     strada_decref(key);
-    strada_stack_pop();
+    strada_stack_pop_il();
     return __retval; }
 strada_break_self_cycle(values);
 strada_break_self_cycle(key_len);
@@ -250,76 +250,76 @@ strada_cleanup_pop();
 strada_decref(config);
 strada_cleanup_pop();
 strada_decref(key);
-strada_stack_pop();
+strada_stack_pop_il();
 return strada_new_undef();
 }
 
 
 StradaValue* find_bridge_path(void) {
-strada_stack_push("find_bridge_path", "cannoli_perl.strada");
+strada_stack_push_il("find_bridge_path", "cannoli_perl.strada");
 if (({ StradaValue *__cond_tmp = ({ StradaValue *__call_arg0 = STRADA_NEW_STR_LIT("./lib/perl/libperl_bridge.so"); StradaValue *__call_result = strada_is_file(__call_arg0); strada_decref(__call_arg0); __call_result; }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
     { StradaValue *__retval = STRADA_NEW_STR_LIT("./lib/perl/libperl_bridge.so");
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
 if (({ StradaValue *__cond_tmp = ({ StradaValue *__call_arg0 = STRADA_NEW_STR_LIT("./cannoli/lib/perl/libperl_bridge.so"); StradaValue *__call_result = strada_is_file(__call_arg0); strada_decref(__call_arg0); __call_result; }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
     { StradaValue *__retval = STRADA_NEW_STR_LIT("./cannoli/lib/perl/libperl_bridge.so");
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
 if (({ StradaValue *__cond_tmp = ({ StradaValue *__call_arg0 = STRADA_NEW_STR_LIT("/usr/local/lib/cannoli/libperl_bridge.so"); StradaValue *__call_result = strada_is_file(__call_arg0); strada_decref(__call_arg0); __call_result; }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
     { StradaValue *__retval = STRADA_NEW_STR_LIT("/usr/local/lib/cannoli/libperl_bridge.so");
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
 { StradaValue *__retval = STRADA_NEW_STR_LIT("libperl_bridge.so");
-    strada_stack_pop();
+    strada_stack_pop_il();
     return __retval; }
-strada_stack_pop();
+strada_stack_pop_il();
 return strada_new_undef();
 }
 
 
 StradaValue* find_cannoli_pm_path(void) {
-strada_stack_push("find_cannoli_pm_path", "cannoli_perl.strada");
+strada_stack_push_il("find_cannoli_pm_path", "cannoli_perl.strada");
 if (({ StradaValue *__cond_tmp = ({ StradaValue *__call_arg0 = STRADA_NEW_STR_LIT("./lib/perl/Cannoli.pm"); StradaValue *__call_result = strada_is_file(__call_arg0); strada_decref(__call_arg0); __call_result; }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
     { StradaValue *__retval = STRADA_NEW_STR_LIT("./lib/perl/Cannoli.pm");
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
 if (({ StradaValue *__cond_tmp = ({ StradaValue *__call_arg0 = STRADA_NEW_STR_LIT("./cannoli/lib/perl/Cannoli.pm"); StradaValue *__call_result = strada_is_file(__call_arg0); strada_decref(__call_arg0); __call_result; }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
     { StradaValue *__retval = STRADA_NEW_STR_LIT("./cannoli/lib/perl/Cannoli.pm");
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
 if (({ StradaValue *__cond_tmp = ({ StradaValue *__call_arg0 = STRADA_NEW_STR_LIT("/usr/local/lib/cannoli/Cannoli.pm"); StradaValue *__call_result = strada_is_file(__call_arg0); strada_decref(__call_arg0); __call_result; }); int __cond_res = strada_to_bool(__cond_tmp); strada_decref(__cond_tmp); __cond_res; })) {
     { StradaValue *__retval = STRADA_NEW_STR_LIT("/usr/local/lib/cannoli/Cannoli.pm");
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
 { StradaValue *__retval = STRADA_NEW_STR_LIT("");
-    strada_stack_pop();
+    strada_stack_pop_il();
     return __retval; }
-strada_stack_pop();
+strada_stack_pop_il();
 return strada_new_undef();
 }
 
 
 StradaValue* cannoli_init(StradaValue* config) {
-strada_stack_push("cannoli_init", "cannoli_perl.strada");
+strada_stack_push_il("cannoli_init", "cannoli_perl.strada");
 strada_incref(config);
 strada_cleanup_push(config);
-({ StradaValue *__old = g_handler_sub; g_handler_sub = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("handler"); strada_stack_set_line(188); StradaValue *__call_result = config_get(config, __arg1); strada_decref(__arg1); __call_result; }); strada_decref(__old); g_handler_sub; });
+({ StradaValue *__old = g_handler_sub; g_handler_sub = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("handler"); strada_stack_line_il(188); StradaValue *__call_result = config_get(config, __arg1); strada_decref(__arg1); __call_result; }); strada_decref(__old); g_handler_sub; });
 if ((({ StradaValue *__num_tmp = ({ StradaValue *__len_tmp = g_handler_sub; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); }); double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; }) == 0.0)) {
     ({ StradaValue *__say_tmp = STRADA_NEW_STR_LIT("cannoli_perl: ERROR - Missing required 'handler' parameter"); strada_say(__say_tmp); strada_decref(__say_tmp); });
     ({ StradaValue *__say_tmp = STRADA_NEW_STR_LIT("Usage: --library ./cannoli_perl.so:handler=MyApp::handle"); strada_say(__say_tmp); strada_decref(__say_tmp); });
     { StradaValue *__retval = strada_new_int(0);
         strada_cleanup_pop();
         strada_decref(config);
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
-StradaValue *bridge_path = (strada_stack_set_line(196), find_bridge_path());
+StradaValue *bridge_path = (strada_stack_line_il(196), find_bridge_path());
 strada_cleanup_push(bridge_path);
 ({ StradaValue *__old = g_perl_bridge; g_perl_bridge = strada_dl_open(bridge_path); strada_decref(__old); g_perl_bridge; });
 if ((strada_to_num(g_perl_bridge) == 0.0)) {
@@ -329,7 +329,7 @@ if ((strada_to_num(g_perl_bridge) == 0.0)) {
         strada_cleanup_pop(); strada_decref(bridge_path);
         strada_cleanup_pop();
         strada_decref(config);
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
 ({ StradaValue *__old = g_init_fn; g_init_fn = ({ StradaValue *__call_arg1 = STRADA_NEW_STR_LIT("perl_bridge_init"); StradaValue *__call_result = strada_dl_sym(g_perl_bridge, __call_arg1); strada_decref(__call_arg1); __call_result; }); strada_decref(__old); g_init_fn; });
@@ -344,22 +344,22 @@ if (((strada_to_num(g_init_fn) == 0.0) || (strada_to_num(g_call_handler_fn) == 0
         strada_cleanup_pop(); strada_decref(bridge_path);
         strada_cleanup_pop();
         strada_decref(config);
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
-StradaValue *init_result = ({ StradaValue *__call_arg1 = STRADA_NEW_STR_LIT("init"); StradaValue *__call_result = strada_dl_call_int(g_init_fn, __call_arg1); strada_decref(__call_arg1); __call_result; });
+StradaValue *init_result = ({ StradaValue *__icv = ({ StradaValue *__call_arg1 = STRADA_NEW_STR_LIT("init"); StradaValue *__call_result = strada_dl_call_int(g_init_fn, __call_arg1); strada_decref(__call_arg1); __call_result; }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); __icr; });
 strada_cleanup_push(init_result);
-if ((strada_to_int(init_result) == 0)) {
+if ((strada_to_int(init_result) == (int64_t)0)) {
     ({ StradaValue *__say_tmp = STRADA_NEW_STR_LIT("cannoli_perl: ERROR - Perl initialization failed"); strada_say(__say_tmp); strada_decref(__say_tmp); });
     { StradaValue *__retval = strada_new_int(0);
         strada_cleanup_pop(); strada_decref(bridge_path);
         strada_cleanup_pop(); strada_decref(init_result);
         strada_cleanup_pop();
         strada_decref(config);
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
-StradaValue *lib_paths = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("lib"); strada_stack_set_line(226); StradaValue *__call_result = config_get_all(config, __arg1); strada_decref(__arg1); __call_result; });
+StradaValue *lib_paths = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("lib"); strada_stack_line_il(226); StradaValue *__call_result = config_get_all(config, __arg1); strada_decref(__arg1); __call_result; });
 strada_cleanup_push(lib_paths);
 StradaValue *i = strada_new_int(0);
 strada_cleanup_push(i);
@@ -368,15 +368,15 @@ while ((strada_to_num(i) < ({ StradaValue *__num_tmp = strada_new_int(strada_arr
     StradaValue *lib_path = strada_array_get(strada_deref_array(lib_paths), strada_to_int(i)); strada_incref(lib_path);
     strada_cleanup_push(lib_path);
     ({ StradaValue *__dl_args = strada_anon_array(1, lib_path); StradaValue *__dl_res = strada_dl_call_int_sv(g_add_inc_fn, __dl_args); strada_decref(__dl_args); __dl_res; });
-    ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + 1); strada_decref(__old); i; });
+    ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + (int64_t)1); strada_decref(__old); i; });
     strada_break_self_cycle(lib_path);
     strada_cleanup_pop(); strada_decref(lib_path);
 }
-({ StradaValue *__old = g_cannoli_pm_path; g_cannoli_pm_path = (strada_stack_set_line(235), find_cannoli_pm_path()); strada_decref(__old); g_cannoli_pm_path; });
+({ StradaValue *__old = g_cannoli_pm_path; g_cannoli_pm_path = (strada_stack_line_il(235), find_cannoli_pm_path()); strada_decref(__old); g_cannoli_pm_path; });
 if ((strada_to_num(g_load_cannoli_fn) != 0.0)) {
-    StradaValue *load_result = ({ StradaValue *__dl_args = strada_anon_array(1, g_cannoli_pm_path); StradaValue *__dl_res = strada_dl_call_int_sv(g_load_cannoli_fn, __dl_args); strada_decref(__dl_args); __dl_res; });
+    StradaValue *load_result = ({ StradaValue *__icv = ({ StradaValue *__dl_args = strada_anon_array(1, g_cannoli_pm_path); StradaValue *__dl_res = strada_dl_call_int_sv(g_load_cannoli_fn, __dl_args); strada_decref(__dl_args); __dl_res; }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); __icr; });
     strada_cleanup_push(load_result);
-    if ((strada_to_int(load_result) == 0)) {
+    if ((strada_to_int(load_result) == (int64_t)0)) {
         ({ StradaValue *__say_tmp = STRADA_NEW_STR_LIT("cannoli_perl: ERROR - Failed to load Cannoli.pm"); strada_say(__say_tmp); strada_decref(__say_tmp); });
         { StradaValue *__retval = strada_new_int(0);
             strada_cleanup_pop(); strada_decref(load_result);
@@ -386,22 +386,22 @@ if ((strada_to_num(g_load_cannoli_fn) != 0.0)) {
             strada_cleanup_pop(); strada_decref(i);
             strada_cleanup_pop();
             strada_decref(config);
-            strada_stack_pop();
+            strada_stack_pop_il();
             return __retval; }
     }
     strada_break_self_cycle(load_result);
     strada_cleanup_pop(); strada_decref(load_result);
 }
-StradaValue *modules = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("use"); strada_stack_set_line(245); StradaValue *__call_result = config_get_all(config, __arg1); strada_decref(__arg1); __call_result; });
+StradaValue *modules = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("use"); strada_stack_line_il(245); StradaValue *__call_result = config_get_all(config, __arg1); strada_decref(__arg1); __call_result; });
 strada_cleanup_push(modules);
 ({ StradaValue *__old = i; i = strada_new_int(0); strada_decref(__old); i; });
 while ((strada_to_num(i) < ({ StradaValue *__num_tmp = strada_new_int(strada_array_length(strada_deref_array(modules))); double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; }))) {
     __redo_9: __attribute__((unused));
     StradaValue *module = strada_array_get(strada_deref_array(modules), strada_to_int(i)); strada_incref(module);
     strada_cleanup_push(module);
-    StradaValue *use_result = ({ StradaValue *__dl_args = strada_anon_array(1, module); StradaValue *__dl_res = strada_dl_call_int_sv(g_use_fn, __dl_args); strada_decref(__dl_args); __dl_res; });
+    StradaValue *use_result = ({ StradaValue *__icv = ({ StradaValue *__dl_args = strada_anon_array(1, module); StradaValue *__dl_res = strada_dl_call_int_sv(g_use_fn, __dl_args); strada_decref(__dl_args); __dl_res; }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); __icr; });
     strada_cleanup_push(use_result);
-    if ((strada_to_int(use_result) == 0)) {
+    if ((strada_to_int(use_result) == (int64_t)0)) {
         ({ StradaValue *__say_tmp = strada_concat_cstr_sv("cannoli_perl: ERROR - Failed to use ", 36, module); strada_say(__say_tmp); strada_decref(__say_tmp); });
         { StradaValue *__retval = strada_new_int(0);
             strada_cleanup_pop(); strada_decref(module);
@@ -413,21 +413,21 @@ while ((strada_to_num(i) < ({ StradaValue *__num_tmp = strada_new_int(strada_arr
             strada_cleanup_pop(); strada_decref(modules);
             strada_cleanup_pop();
             strada_decref(config);
-            strada_stack_pop();
+            strada_stack_pop_il();
             return __retval; }
     }
-    ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + 1); strada_decref(__old); i; });
+    ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + (int64_t)1); strada_decref(__old); i; });
     strada_break_self_cycle(module);
     strada_break_self_cycle(use_result);
     strada_cleanup_pop(); strada_decref(module);
     strada_cleanup_pop(); strada_decref(use_result);
 }
-StradaValue *script = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("script"); strada_stack_set_line(258); StradaValue *__call_result = config_get(config, __arg1); strada_decref(__arg1); __call_result; });
+StradaValue *script = ({ StradaValue *__arg1 = STRADA_NEW_STR_LIT("script"); strada_stack_line_il(258); StradaValue *__call_result = config_get(config, __arg1); strada_decref(__arg1); __call_result; });
 strada_cleanup_push(script);
 if ((({ StradaValue *__num_tmp = ({ StradaValue *__len_tmp = script; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); }); double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; }) > 0.0)) {
-    StradaValue *do_result = ({ StradaValue *__dl_args = strada_anon_array(1, script); StradaValue *__dl_res = strada_dl_call_int_sv(g_do_fn, __dl_args); strada_decref(__dl_args); __dl_res; });
+    StradaValue *do_result = ({ StradaValue *__icv = ({ StradaValue *__dl_args = strada_anon_array(1, script); StradaValue *__dl_res = strada_dl_call_int_sv(g_do_fn, __dl_args); strada_decref(__dl_args); __dl_res; }); StradaValue *__icr = strada_new_int(strada_to_int(__icv)); __icr; });
     strada_cleanup_push(do_result);
-    if ((strada_to_int(do_result) == 0)) {
+    if ((strada_to_int(do_result) == (int64_t)0)) {
         ({ StradaValue *__say_tmp = strada_concat_cstr_sv("cannoli_perl: ERROR - Failed to load ", 37, script); strada_say(__say_tmp); strada_decref(__say_tmp); });
         { StradaValue *__retval = strada_new_int(0);
             strada_cleanup_pop(); strada_decref(do_result);
@@ -439,7 +439,7 @@ if ((({ StradaValue *__num_tmp = ({ StradaValue *__len_tmp = script; int64_t __l
             strada_cleanup_pop(); strada_decref(script);
             strada_cleanup_pop();
             strada_decref(config);
-            strada_stack_pop();
+            strada_stack_pop_il();
             return __retval; }
     }
     strada_break_self_cycle(do_result);
@@ -454,7 +454,7 @@ if ((({ StradaValue *__num_tmp = ({ StradaValue *__len_tmp = script; int64_t __l
     strada_cleanup_pop(); strada_decref(script);
     strada_cleanup_pop();
     strada_decref(config);
-    strada_stack_pop();
+    strada_stack_pop_il();
     return __retval; }
 strada_break_self_cycle(bridge_path);
 strada_break_self_cycle(init_result);
@@ -470,39 +470,39 @@ strada_cleanup_pop(); strada_decref(modules);
 strada_cleanup_pop(); strada_decref(script);
 strada_cleanup_pop();
 strada_decref(config);
-strada_stack_pop();
+strada_stack_pop_il();
 return strada_new_undef();
 }
 
 
 StradaValue* cannoli_dispatch(StradaValue* c) {
-strada_stack_push("cannoli_dispatch", "cannoli_perl.strada");
+strada_stack_push_il("cannoli_dispatch", "cannoli_perl.strada");
 strada_incref(c);
 strada_cleanup_push(c);
 if (((strada_to_num(g_call_handler_fn) == 0.0) || (({ StradaValue *__num_tmp = ({ StradaValue *__len_tmp = g_handler_sub; int64_t __len_res = strada_length_chars_sv(__len_tmp); strada_new_int(__len_res); }); double __num_val = strada_to_num(__num_tmp); strada_decref(__num_tmp); __num_val; }) == 0.0))) {
     { StradaValue *__retval = STRADA_NEW_STR_LIT("");
         strada_cleanup_pop();
         strada_decref(c);
-        strada_stack_pop();
+        strada_stack_pop_il();
         return __retval; }
 }
-StradaValue *method = strada_hv_fetch_owned(c, "_method");
+StradaValue *method = strada_hv_fetch_owned_ph(c, "_method", 2588116357u);
 strada_cleanup_push(method);
-StradaValue *path = strada_hv_fetch_owned(c, "_path");
+StradaValue *path = strada_hv_fetch_owned_ph(c, "_path", 250949233u);
 strada_cleanup_push(path);
-StradaValue *path_info = strada_hv_fetch_owned(c, "_path_info");
+StradaValue *path_info = strada_hv_fetch_owned_ph(c, "_path_info", 199977532u);
 strada_cleanup_push(path_info);
-StradaValue *query_string = strada_hv_fetch_owned(c, "_query_string");
+StradaValue *query_string = strada_hv_fetch_owned_ph(c, "_query_string", 944722992u);
 strada_cleanup_push(query_string);
-StradaValue *body = strada_hv_fetch_owned(c, "_body");
+StradaValue *body = strada_hv_fetch_owned_ph(c, "_body", 250460850u);
 strada_cleanup_push(body);
-StradaValue *remote_addr = strada_hv_fetch_owned(c, "_remote_addr");
+StradaValue *remote_addr = strada_hv_fetch_owned_ph(c, "_remote_addr", 1540906442u);
 strada_cleanup_push(remote_addr);
-StradaValue *content_type = strada_hv_fetch_owned(c, "_content_type");
+StradaValue *content_type = strada_hv_fetch_owned_ph(c, "_content_type", 2257282656u);
 strada_cleanup_push(content_type);
 StradaValue *headers = STRADA_NEW_STR_LIT("");
 strada_cleanup_push(headers);
-StradaValue *hdrs = strada_hv_fetch_owned(c, "_headers");
+StradaValue *hdrs = strada_hv_fetch_owned_ph(c, "_headers", 1618402048u);
 strada_cleanup_push(hdrs);
 if (strada_defined_bool(hdrs)) {
     StradaValue *hdr_names = strada_new_array_from_av(strada_hash_keys(strada_deref_hash(strada_deref_hash_value(hdrs))));
@@ -515,8 +515,8 @@ if (strada_defined_bool(hdrs)) {
         strada_cleanup_push(hn);
         StradaValue *hv = ({ StradaValue *__hget_k = hn; StradaValue *__hget_r = strada_hv_fetch_owned_sv(hdrs, __hget_k); __hget_r; });
         strada_cleanup_push(hv);
-        ({ StradaValue *__old = headers; headers = ({ StradaValue *__concat_l = ({ StradaValue *__concat_l = ({ StradaValue *__concat_l = strada_concat_sv(headers, hn); strada_concat_inplace_cstr(__concat_l, ": ", 2); }); strada_cleanup_push(__concat_l); strada_cleanup_pop(); strada_concat_inplace(__concat_l, hv); }); strada_concat_inplace_cstr(__concat_l, "\r\n", 2); }); strada_decref(__old); headers; });
-        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + 1); strada_decref(__old); i; });
+        ({ headers = strada_concat_inplace(headers, hn); headers = strada_concat_inplace_cstr(headers, ": ", 2); headers = strada_concat_inplace(headers, hv); headers = strada_concat_inplace_cstr(headers, "\r\n", 2); headers; });
+        ({ StradaValue *__old = i; i = STRADA_MAKE_TAGGED_INT(strada_to_int(i) + (int64_t)1); strada_decref(__old); i; });
         strada_break_self_cycle(hn);
         strada_break_self_cycle(hv);
         strada_cleanup_pop(); strada_decref(hn);
@@ -543,7 +543,7 @@ strada_cleanup_push(result);
     strada_cleanup_pop(); strada_decref(result);
     strada_cleanup_pop();
     strada_decref(c);
-    strada_stack_pop();
+    strada_stack_pop_il();
     return __retval; }
 strada_break_self_cycle(method);
 strada_break_self_cycle(path);
@@ -567,7 +567,7 @@ strada_cleanup_pop(); strada_decref(hdrs);
 strada_cleanup_pop(); strada_decref(result);
 strada_cleanup_pop();
 strada_decref(c);
-strada_stack_pop();
+strada_stack_pop_il();
 return strada_new_undef();
 }
 
@@ -575,7 +575,7 @@ return strada_new_undef();
 
 /* Strada export metadata for import_lib */
 const char* __strada_export_info(void) {
-    return "func:config_get:str:2:str,str:-1\nfunc:config_get_all:array:2:str,str:-1\nfunc:find_bridge_path:str:0::-1\nfunc:find_cannoli_pm_path:str:0::-1\nfunc:cannoli_init:int:1:str:-1\nfunc:cannoli_dispatch:str:1:scalar:-1\n";
+    return "func:config_get:str:2:str,str:-1:config_get\nfunc:config_get_all:array:2:str,str:-1:config_get_all\nfunc:find_bridge_path:str:0::-1:find_bridge_path\nfunc:find_cannoli_pm_path:str:0::-1:find_cannoli_pm_path\nfunc:cannoli_init:int:1:str:-1:cannoli_init\nfunc:cannoli_dispatch:str:1:scalar:-1:cannoli_dispatch\nmodinfo:1\n";
 }
 
 /* Strada module version */
