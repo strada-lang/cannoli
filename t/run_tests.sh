@@ -44,6 +44,21 @@ for test in t/test_*.strada; do
     fi
 done
 
+# Shell tests (need the built ./cannoli, e.g. process lifecycle)
+for test in t/test_*.sh; do
+    [ -e "$test" ] || continue
+    name=$(basename "$test" .sh)
+    echo "Running $name..."
+    if "$test" > /tmp/cannoli_test_output.log 2>&1; then
+        echo "  PASS"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  FAIL"
+        cat /tmp/cannoli_test_output.log
+        FAILED=$((FAILED + 1))
+    fi
+done
+
 echo ""
 echo "========================================"
 echo "Tests: $((PASSED + FAILED))  Passed: $PASSED  Failed: $FAILED"

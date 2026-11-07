@@ -1,0 +1,51 @@
+# Regression test: cannoli_init failures in Strada libraries (2026-11).
+#
+# A Strada library's cannoli_init returns a StradaValue, not a C int; the
+# server called it through dl_call_int_sv, where a tagged 0 is the non-NULL
+# pointer 1, so a failing init was reported as success and the library's
+# dispatch was loaded anyway. This builds a tiny library whose init fails
+# when its config is "fail" and checks the server only loads it otherwise.
+
+func build_lib(str $dir) str {
+    my str $src = $dir . "/initlib.strada";
+    core::spew($src, "func cannoli_init(str $config) int {\n    if ($config eq \"fail\") { return 0; }\n    return 1;\n}\nfunc cannoli_dispatch(scalar $c) str { return \"\"; }\n");
+    my str $so = $dir . "/initlib.so";
+    my str $strada = core::getenv("STRADA");
+    if (length($strada) == 0) { $strada = "strada"; }
+    my int $rc = core::system($strada . " --shared " . $src . " -o " . $so . " > " . $dir . "/build.log 2>&1");
+    if ($rc != 0 || !core::is_file($so)) { return ""; }
+    return $so;
+}
+
+func loaded(str $spec) int {
+    my hash %cfg = Cannoli::Config::defaults();
+    $cfg{"app.library"} = $spec;
+    my scalar $srv = Cannoli::Server::new(%cfg);
+    return scalar(@{$srv->{"dispatch_funcs"}});
+}
+
+func main() int {
+    say("=== Cannoli Library Init Tests ===");
+    my str $dir = "/tmp/cannoli_test_initlib_" . core::getpid();
+    core::system("rm -rf " . $dir . " && mkdir -p " . $dir);
+    my str $so = build_lib($dir);
+    if (length($so) == 0) {
+        say("  FAIL: could not build test library (see " . $dir . "/build.log)");
+        return 1;
+    }
+    my int $failures = 0;
+    say("Testing failing cannoli_init is not loaded...");
+    my int $n = loaded($so . ":fail");
+    if ($n != 0) { say("  FAIL: library loaded despite cannoli_init returning 0 (" . $n . ")"); $failures = $failures + 1; }
+    else { say("  PASS"); }
+    say("Testing succeeding cannoli_init is loaded...");
+    $n = loaded($so . ":ok");
+    if ($n != 1) { say("  FAIL: library not loaded after successful init (" . $n . ")"); $failures = $failures + 1; }
+    else { say("  PASS"); }
+    core::system("rm -rf " . $dir);
+    if ($failures == 0) {
+        say("All library init tests passed!");
+        return 0;
+    }
+    return 1;
+}

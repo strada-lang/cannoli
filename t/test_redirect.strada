@@ -1,0 +1,60 @@
+# Regression tests: Cannoli object redirects (2026-11).
+#  - $c->redirect($url, $code) must answer with $code (301/302/303/307/308).
+#    build_response used to pass the status to Response::redirect, whose 2nd
+#    arg is only a "permanent" flag, so 301 and 303 both came out as 302.
+#  - headers set on the object (e.g. a login's Set-Cookie) must survive a
+#    redirect; they used to be dropped.
+
+func mk() scalar {
+    my hash %req = ();
+    $req{"method"} = "POST";
+    $req{"path"} = "/login";
+    $req{"headers"} = {};
+    $req{"params"} = {};
+    return Cannoli::new(%req);
+}
+
+func check_redirect(int $code, int $want) int {
+    my scalar $c = mk();
+    $c->set_header("Set-Cookie", "sid=abc123; Path=/; HttpOnly");
+    $c->set_header("X-Trace", "t-" . $code);
+    $c->redirect("/next", $code);
+    my hash %res = $c->build_response();
+    my int $bad = 0;
+    if ($res{"status"} != $want) {
+        say("  FAIL: redirect(" . $code . ") status " . $res{"status"} . ", want " . $want);
+        $bad = 1;
+    }
+    if (Cannoli::Response::get_header(%res, "Location") ne "/next") {
+        say("  FAIL: redirect(" . $code . ") Location [" . Cannoli::Response::get_header(%res, "Location") . "]");
+        $bad = 1;
+    }
+    if (index(Cannoli::Response::get_header(%res, "Set-Cookie"), "sid=abc123") != 0) {
+        say("  FAIL: redirect(" . $code . ") dropped Set-Cookie");
+        $bad = 1;
+    }
+    if (Cannoli::Response::get_header(%res, "X-Trace") ne "t-" . $code) {
+        say("  FAIL: redirect(" . $code . ") dropped custom header");
+        $bad = 1;
+    }
+    return $bad;
+}
+
+func main() int {
+    say("=== Cannoli Redirect Tests ===");
+    my int $failures = 0;
+    say("Testing redirect status codes and headers...");
+    $failures = $failures + check_redirect(0, 302);    # default
+    $failures = $failures + check_redirect(301, 301);
+    $failures = $failures + check_redirect(302, 302);
+    $failures = $failures + check_redirect(303, 303);
+    $failures = $failures + check_redirect(307, 307);
+    $failures = $failures + check_redirect(308, 308);
+    if ($failures == 0) {
+        say("  PASS");
+        say("All redirect tests passed!");
+        return 0;
+    }
+    say("" . $failures . " redirect test(s) failed!");
+    return 1;
+}
