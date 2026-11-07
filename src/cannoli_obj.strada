@@ -557,7 +557,7 @@ func Cannoli_error(scalar $self, int $code, str $message) scalar {
     if (length($message) == 0) {
         $message = "Internal Server Error";
     }
-    $self->body_set("{\"error\":\"" . $message . "\"}");
+    $self->body_set(Cannoli_to_json({"error" => $message}));
     return $self;
 }
 
@@ -787,9 +787,22 @@ func Cannoli_build_response(scalar $self) hash {
 
     my hash %res = Cannoli::Response::new();
 
-    # Handle redirect
+    # Handle redirect. Honour the status the handler asked for (301/302/303/
+    # 307/308 - Response::redirect's 2nd arg is only a "permanent" flag, so
+    # passing the status turned every 301/303 into a 302) and keep custom
+    # headers: a login redirect must still carry its Set-Cookie.
     if (length($self->{"_res_redirect"}) > 0) {
-        return Cannoli::Response::redirect($self->{"_res_redirect"}, $self->{"_res_status"});
+        my hash %rd = Cannoli::Response::redirect($self->{"_res_redirect"}, 0);
+        my int $rd_status = $self->{"_res_status"};
+        if ($rd_status >= 300 && $rd_status < 400) {
+            Cannoli::Response::status(%rd, $rd_status);
+        }
+        my scalar $rd_hdrs = $self->{"_res_headers"};
+        my array @rd_names = keys(%{$rd_hdrs});
+        foreach my str $rd_name (@rd_names) {
+            Cannoli::Response::header(%rd, $rd_name, $rd_hdrs->{$rd_name});
+        }
+        return %rd;
     }
 
     # Set status
@@ -1139,7 +1152,11 @@ func Cannoli_session_save(scalar $self) scalar {
         my str $cookie_name = Cannoli::Session::cookie_name();
         my str $session_id = Cannoli::Session::id($session);
         my int $ttl = Cannoli::Session::ttl();
-        $self->set_cookie($cookie_name, $session_id, "/", $ttl, 1, 0);
+        my int $secure = 0;
+        if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
+            $secure = 1;
+        }
+        $self->set_cookie($cookie_name, $session_id, "/", $ttl, 1, $secure);
         $self->{"_session_new"} = 0;
     }
 

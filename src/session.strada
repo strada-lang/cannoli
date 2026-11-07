@@ -38,8 +38,9 @@ my int $g_session_ttl = 3600;  # 1 hour default TTL
 # Initialize session system (creates directory if needed)
 func Cannoli_Session_init() void {
     if (core::is_dir($g_session_dir) == 0) {
-        core::mkdir($g_session_dir);
+        core::mkdir($g_session_dir, 448);  # 0700
     }
+    core::chmod($g_session_dir, 448);
 }
 
 # Configure session settings
@@ -58,22 +59,28 @@ func Cannoli_Session_configure(str $dir, str $cookie_name, int $ttl) void {
 
 # Generate a secure session ID (32 hex characters)
 func Cannoli_Session_generate_id() str {
-    my str $id = "";
-    my int $i = 0;
-    my str $hex = "0123456789abcdef";
+    my str $id = core::random_bytes_hex(16);
+    if (::is_valid_id($id) == 1) {
+        return $id;
+    }
+    return "";
+}
 
-    # Use random() to generate 32 hex chars
-    while ($i < 32) {
-        # math::rand() returns 0-1, scale to 0-15
-        my num $rand = math::rand();
-        my int $r = math::floor($rand * 16);
-        if ($r > 15) { $r = 15; }
-        my str $ch = substr($hex, $r, 1);
-        $id = $id . $ch;
+func Cannoli_Session_is_valid_id(str $id) int {
+    if (length($id) != 32) { return 0; }
+
+    my int $i = 0;
+    while ($i < length($id)) {
+        my str $ch = substr($id, $i, 1);
+        my int $is_hex = 0;
+        if ($ch ge "0" && $ch le "9") { $is_hex = 1; }
+        if ($ch ge "a" && $ch le "f") { $is_hex = 1; }
+        if ($ch ge "A" && $ch le "F") { $is_hex = 1; }
+        if ($is_hex == 0) { return 0; }
         $i = $i + 1;
     }
 
-    return $id;
+    return 1;
 }
 
 # Get session file path
@@ -96,8 +103,7 @@ func Cannoli_Session_new() scalar {
 
 # Load a session by ID
 func Cannoli_Session_load(str $id) scalar {
-    # Validate session ID (only hex chars allowed)
-    if (length($id) != 32) {
+    if (::is_valid_id($id) == 0) {
         return undef;
     }
 
@@ -167,6 +173,9 @@ func Cannoli_Session_save(scalar $session) int {
     ::init();
 
     my str $id = $session->{"id"};
+    if (::is_valid_id($id) == 0) {
+        return 0;
+    }
     my str $path = ::file_path($id);
 
     # Update modified time
@@ -191,11 +200,15 @@ func Cannoli_Session_save(scalar $session) int {
 
     # Write to file
     spew($path, $content);
+    core::chmod($path, 384);  # 0600
     return 1;
 }
 
 # Destroy a session
 func Cannoli_Session_destroy(str $id) void {
+    if (::is_valid_id($id) == 0) {
+        return;
+    }
     my str $path = ::file_path($id);
     if (core::is_file($path) == 1) {
         core::unlink($path);

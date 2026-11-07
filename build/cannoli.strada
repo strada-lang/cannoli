@@ -389,8 +389,9 @@ my int $g_session_ttl = 3600;  # 1 hour default TTL
 # Initialize session system (creates directory if needed)
 func Cannoli_Session_init() void {
     if (core::is_dir($g_session_dir) == 0) {
-        core::mkdir($g_session_dir);
+        core::mkdir($g_session_dir, 448);  # 0700
     }
+    core::chmod($g_session_dir, 448);
 }
 
 # Configure session settings
@@ -409,22 +410,28 @@ func Cannoli_Session_configure(str $dir, str $cookie_name, int $ttl) void {
 
 # Generate a secure session ID (32 hex characters)
 func Cannoli_Session_generate_id() str {
-    my str $id = "";
-    my int $i = 0;
-    my str $hex = "0123456789abcdef";
+    my str $id = core::random_bytes_hex(16);
+    if (::is_valid_id($id) == 1) {
+        return $id;
+    }
+    return "";
+}
 
-    # Use random() to generate 32 hex chars
-    while ($i < 32) {
-        # math::rand() returns 0-1, scale to 0-15
-        my num $rand = math::rand();
-        my int $r = math::floor($rand * 16);
-        if ($r > 15) { $r = 15; }
-        my str $ch = substr($hex, $r, 1);
-        $id = $id . $ch;
+func Cannoli_Session_is_valid_id(str $id) int {
+    if (length($id) != 32) { return 0; }
+
+    my int $i = 0;
+    while ($i < length($id)) {
+        my str $ch = substr($id, $i, 1);
+        my int $is_hex = 0;
+        if ($ch ge "0" && $ch le "9") { $is_hex = 1; }
+        if ($ch ge "a" && $ch le "f") { $is_hex = 1; }
+        if ($ch ge "A" && $ch le "F") { $is_hex = 1; }
+        if ($is_hex == 0) { return 0; }
         $i = $i + 1;
     }
 
-    return $id;
+    return 1;
 }
 
 # Get session file path
@@ -447,8 +454,7 @@ func Cannoli_Session_new() scalar {
 
 # Load a session by ID
 func Cannoli_Session_load(str $id) scalar {
-    # Validate session ID (only hex chars allowed)
-    if (length($id) != 32) {
+    if (::is_valid_id($id) == 0) {
         return undef;
     }
 
@@ -518,6 +524,9 @@ func Cannoli_Session_save(scalar $session) int {
     ::init();
 
     my str $id = $session->{"id"};
+    if (::is_valid_id($id) == 0) {
+        return 0;
+    }
     my str $path = ::file_path($id);
 
     # Update modified time
@@ -542,11 +551,15 @@ func Cannoli_Session_save(scalar $session) int {
 
     # Write to file
     spew($path, $content);
+    core::chmod($path, 384);  # 0600
     return 1;
 }
 
 # Destroy a session
 func Cannoli_Session_destroy(str $id) void {
+    if (::is_valid_id($id) == 0) {
+        return;
+    }
     my str $path = ::file_path($id);
     if (core::is_file($path) == 1) {
         core::unlink($path);
@@ -992,6 +1005,18 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
 
         # Look for {{ start (simple variable or dump)
         if ($i + 1 < $len) {
+            if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
+                my int $raw_end = ::find_triple_closing($template, $i + 3);
+                if ($raw_end > 0) {
+                    my str $raw_name = substr($template, $i + 3, $raw_end - $i - 3);
+                    $raw_name = trim($raw_name);
+                    my str $raw_value = ::resolve_var($raw_name, $vars);
+                    $result = $result . $raw_value;
+                    $i = $raw_end + 3;
+                    next;
+                }
+            }
+
             my str $two = substr($template, $i, 2);
             if ($two eq "{{") {
                 # Find closing }}
@@ -1016,7 +1041,7 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
 
                     # Regular variable
                     my str $value = ::resolve_var($content, $vars);
-                    $result = $result . $value;
+                    $result = $result . ::escape_html($value);
 
                     # Skip past }}
                     $i = $end + 2;
@@ -1501,66 +1526,12 @@ func Cannoli_Template_escape_html(str $s) str {
 
 # Render with HTML escaping for variables
 func Cannoli_Template_render_safe(str $name, scalar $vars) str {
-    my str $template = ::load($name);
-    if (length($template) == 0) {
-        return "";
-    }
-    return ::render_string_safe($template, $vars);
+    return ::render($name, $vars);
 }
 
 # Render string with HTML escaping
 func Cannoli_Template_render_string_safe(str $template, scalar $vars) str {
-    my str $result = "";
-    my int $len = length($template);
-    my int $i = 0;
-
-    while ($i < $len) {
-        # Look for {{ start
-        if ($i + 1 < $len) {
-            my str $two = substr($template, $i, 2);
-            if ($two eq "{{") {
-                # Find closing }}
-                my int $end = ::find_closing($template, $i + 2);
-                if ($end > $i + 2) {
-                    # Extract variable name
-                    my str $var_name = substr($template, $i + 2, $end - $i - 2);
-                    $var_name = trim($var_name);
-
-                    # Check for raw output marker {{{var}}}
-                    my int $raw = 0;
-                    if (length($var_name) > 0 && substr($var_name, 0, 1) eq "{") {
-                        # Check if this is {{{ which means raw
-                        if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
-                            my int $raw_end = ::find_triple_closing($template, $i + 3);
-                            if ($raw_end > 0) {
-                                $var_name = substr($template, $i + 3, $raw_end - $i - 3);
-                                $var_name = trim($var_name);
-                                my str $value = ::resolve_var($var_name, $vars);
-                                $result = $result . $value;
-                                $i = $raw_end + 3;
-                                next;
-                            }
-                        }
-                    }
-
-                    # Resolve and escape variable
-                    my str $value = ::resolve_var($var_name, $vars);
-                    $result = $result . ::escape_html($value);
-
-                    # Skip past }}
-                    $i = $end + 2;
-                    next;
-                }
-            }
-        }
-
-        # Regular character
-        my str $ch = substr($template, $i, 1);
-        $result = $result . $ch;
-        $i = $i + 1;
-    }
-
-    return $result;
+    return ::render_string($template, $vars);
 }
 
 # Find triple closing }}}
@@ -1584,6 +1555,22 @@ func Cannoli_Template_include(str $name, scalar $vars) str {
     return ::render($name, $vars);
 }
 
+func Cannoli_Template_rewrite_content_placeholder(str $template) str {
+    my str $result = "";
+    my int $i = 0;
+    my int $len = length($template);
+    while ($i < $len) {
+        if ($i + 11 <= $len && substr($template, $i, 11) eq "{{content}}") {
+            $result = $result . "{{{content}}}";
+            $i = $i + 11;
+            next;
+        }
+        $result = $result . substr($template, $i, 1);
+        $i = $i + 1;
+    }
+    return $result;
+}
+
 # Render a template with a layout
 # Layout should have {{content}} placeholder
 func Cannoli_Template_render_with_layout(str $template_name, str $layout_name, scalar $vars) str {
@@ -1596,8 +1583,14 @@ func Cannoli_Template_render_with_layout(str $template_name, str $layout_name, s
     }
     $vars->{"content"} = $content;
 
-    # Render the layout with the content
-    return ::render($layout_name, $vars);
+    my str $layout = ::load($layout_name);
+    if (length($layout) == 0) {
+        return "";
+    }
+
+    # Historical layouts use {{content}}; keep that raw while escaping other variables.
+    $layout = ::rewrite_content_placeholder($layout);
+    return ::render_string($layout, $vars);
 }
 /*
  This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
@@ -2118,7 +2111,6 @@ func Cannoli_Request_new() hash {
 # Parse an HTTP request from raw data
 func Cannoli_Request_parse(str $data) hash {
     my hash %req = ::new();
-    say("DEBUG parse: data=[" . substr($data, 0, 100) . "]");
 
     # Split headers and body
     my int $body_start = index($data, "\r\n\r\n");
@@ -3696,8 +3688,42 @@ func Cannoli_Response_status(hash %res, int $code) void {
     $res{"status"} = $code;
 }
 
+# Validate HTTP header names before they reach the wire.  RFC token chars are
+# deliberately narrow here; callers passing bad names get a skipped header.
+func Cannoli_Response_valid_header_name(str $name) int {
+    if (length($name) == 0) { return 0; }
+
+    my int $i = 0;
+    while ($i < length($name)) {
+        my str $ch = substr($name, $i, 1);
+        my int $code = ord($ch);
+        if ($code <= 32 || $code >= 127) { return 0; }
+        if ($ch eq "(" || $ch eq ")" || $ch eq "<" || $ch eq ">" || $ch eq "@") { return 0; }
+        if ($ch eq "," || $ch eq ";" || $ch eq ":" || $ch eq "\\" || $ch eq "\"") { return 0; }
+        if ($ch eq "/" || $ch eq "[" || $ch eq "]" || $ch eq "?" || $ch eq "=" || $ch eq "{" || $ch eq "}") { return 0; }
+        $i = $i + 1;
+    }
+
+    return 1;
+}
+
+func Cannoli_Response_valid_header_value(str $value) int {
+    my int $i = 0;
+    while ($i < length($value)) {
+        my str $ch = substr($value, $i, 1);
+        my int $code = ord($ch);
+        if ($code == 0 || $code == 10 || $code == 13) { return 0; }
+        $i = $i + 1;
+    }
+    return 1;
+}
+
 # Set a header
 func Cannoli_Response_header(hash %res, str $name, str $value) void {
+    if (::valid_header_name($name) == 0 || ::valid_header_value($value) == 0) {
+        return;
+    }
+
     # Classic handlers may return bare {status, body} hashes with no
     # headers hash — create it instead of storing into undef.
     if (!defined($res{"headers"})) {
@@ -3750,7 +3776,7 @@ func Cannoli_Response_build(hash %res) str {
     while ($i < scalar(@header_names)) {
         my str $name = $header_names[$i];
         my str $value = $headers->{$name};
-        if (length($value) > 0) {
+        if (length($value) > 0 && ::valid_header_name($name) == 1 && ::valid_header_value($value) == 1) {
             $response = $response . $name . ": " . $value . "\r\n";
         }
         $i = $i + 1;
@@ -4042,7 +4068,7 @@ func Cannoli_Response_build_headers(hash %res) str {
         my str $name = $header_names[$i];
         my str $value = $headers->{$name};
         # Skip Content-Length for chunked (it's not allowed)
-        if (length($value) > 0 && $name ne "Content-Length") {
+        if (length($value) > 0 && $name ne "Content-Length" && ::valid_header_name($name) == 1 && ::valid_header_value($value) == 1) {
             $response = $response . $name . ": " . $value . "\r\n";
         }
         $i = $i + 1;
@@ -5334,7 +5360,7 @@ func Cannoli_error(scalar $self, int $code, str $message) scalar {
     if (length($message) == 0) {
         $message = "Internal Server Error";
     }
-    $self->body_set("{\"error\":\"" . $message . "\"}");
+    $self->body_set(Cannoli_to_json({"error" => $message}));
     return $self;
 }
 
@@ -5564,9 +5590,22 @@ func Cannoli_build_response(scalar $self) hash {
 
     my hash %res = Cannoli::Response::new();
 
-    # Handle redirect
+    # Handle redirect. Honour the status the handler asked for (301/302/303/
+    # 307/308 - Response::redirect's 2nd arg is only a "permanent" flag, so
+    # passing the status turned every 301/303 into a 302) and keep custom
+    # headers: a login redirect must still carry its Set-Cookie.
     if (length($self->{"_res_redirect"}) > 0) {
-        return Cannoli::Response::redirect($self->{"_res_redirect"}, $self->{"_res_status"});
+        my hash %rd = Cannoli::Response::redirect($self->{"_res_redirect"}, 0);
+        my int $rd_status = $self->{"_res_status"};
+        if ($rd_status >= 300 && $rd_status < 400) {
+            Cannoli::Response::status(%rd, $rd_status);
+        }
+        my scalar $rd_hdrs = $self->{"_res_headers"};
+        my array @rd_names = keys(%{$rd_hdrs});
+        foreach my str $rd_name (@rd_names) {
+            Cannoli::Response::header(%rd, $rd_name, $rd_hdrs->{$rd_name});
+        }
+        return %rd;
     }
 
     # Set status
@@ -5916,7 +5955,11 @@ func Cannoli_session_save(scalar $self) scalar {
         my str $cookie_name = Cannoli::Session::cookie_name();
         my str $session_id = Cannoli::Session::id($session);
         my int $ttl = Cannoli::Session::ttl();
-        $self->set_cookie($cookie_name, $session_id, "/", $ttl, 1, 0);
+        my int $secure = 0;
+        if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
+            $secure = 1;
+        }
+        $self->set_cookie($cookie_name, $session_id, "/", $ttl, 1, $secure);
         $self->{"_session_new"} = 0;
     }
 
@@ -7259,9 +7302,36 @@ func Cannoli_Static_new() scalar {
     $s{"document_root"} = ".";
     $s{"index_files"} = "index.html,index.htm";
     $s{"directory_listing"} = 0;
+    $s{"max_file_size"} = 67108864;  # 64MB guard for slurp-based responses
     my hash %aliases = ();
     $s{"aliases"} = \%aliases;
     return \%s;
+}
+
+func Cannoli_Static_base_path(scalar $srv, str $url) str {
+    my scalar $aliases = $srv->{"aliases"};
+    my array @keys = keys(%{$aliases});
+    my str $best = "";
+    my str $target = "";
+    my int $i = 0;
+    while ($i < scalar(@keys)) {
+        my str $prefix = $keys[$i];
+        my int $plen = length($prefix);
+        my int $ulen = length($url);
+        if ($ulen >= $plen) {
+            my str $url_prefix = substr($url, 0, $plen);
+            if ($url_prefix eq $prefix) {
+                my int $blen = length($best);
+                if ($plen > $blen) {
+                    $best = $prefix;
+                    $target = $aliases->{$prefix};
+                }
+            }
+        }
+        $i = $i + 1;
+    }
+    if (length($best) > 0) { return $target; }
+    return $srv->{"document_root"};
 }
 
 func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
@@ -7299,9 +7369,83 @@ func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
 }
 
 func Cannoli_Static_is_safe(str $path) int {
-    my int $dotdot = index($path, "..");
-    if ($dotdot >= 0) { return 0; }
+    if (length($path) == 0) { return 0; }
+    if (substr($path, 0, 1) ne "/") { return 0; }
+
+    my array @parts = split("/", $path);
+    my int $i = 0;
+    while ($i < scalar(@parts)) {
+        my str $part = $parts[$i];
+        if ($part eq ".." || $part eq ".") { return 0; }
+        my int $j = 0;
+        while ($j < length($part)) {
+            if (ord(substr($part, $j, 1)) == 0) { return 0; }
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+
     return 1;
+}
+
+func Cannoli_Static_percent_decode_path(str $s) str {
+    my str $result = "";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "%" && $i + 2 < length($s)) {
+            my str $hex = substr($s, $i + 1, 2);
+            my int $code = Cannoli::Request::hex_to_int($hex);
+            if ($code >= 0) {
+                $result = $result . chr($code);
+                $i = $i + 3;
+                next;
+            }
+        }
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+func Cannoli_Static_is_under_root(str $path, str $root) int {
+    my scalar $real_path_sv = core::realpath($path);
+    my scalar $real_root_sv = core::realpath($root);
+    if (!defined($real_path_sv) || !defined($real_root_sv)) { return 0; }
+
+    my str $real_path = "" . $real_path_sv;
+    my str $real_root = "" . $real_root_sv;
+    if ($real_root eq "/") { return 1; }
+    if ($real_path eq $real_root) { return 1; }
+
+    my int $root_len = length($real_root);
+    if (length($real_path) > $root_len && substr($real_path, 0, $root_len) eq $real_root && substr($real_path, $root_len, 1) eq "/") {
+        return 1;
+    }
+    return 0;
+}
+
+func Cannoli_Static_url_encode_component(str $s) str {
+    my str $hex = "0123456789ABCDEF";
+    my str $result = "";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $ch = substr($s, $i, 1);
+        my int $code = ord($ch);
+        my int $unreserved = 0;
+        if (($ch ge "A" && $ch le "Z") || ($ch ge "a" && $ch le "z") || ($ch ge "0" && $ch le "9")) { $unreserved = 1; }
+        if ($ch eq "-" || $ch eq "_" || $ch eq "." || $ch eq "~") { $unreserved = 1; }
+
+        if ($unreserved == 1) {
+            $result = $result . $ch;
+        } else {
+            my int $hi = $code / 16;
+            my int $lo = $code - ($hi * 16);
+            $result = $result . "%" . substr($hex, $hi, 1) . substr($hex, $lo, 1);
+        }
+        $i = $i + 1;
+    }
+    return $result;
 }
 
 func Cannoli_Static_find_index(scalar $srv, str $dir) str {
@@ -7334,8 +7478,9 @@ func Cannoli_Static_format_size(int $size) str {
 }
 
 func Cannoli_Static_dir_listing(str $dir, str $url) str {
+    my str $safe_url = Cannoli::Response::html_escape($url);
     my str $html = "<!DOCTYPE html>\n<html>\n<head>\n";
-    $html = $html . "<title>Index of " . $url . "</title>\n";
+    $html = $html . "<title>Index of " . $safe_url . "</title>\n";
     $html = $html . "<style>\n";
     $html = $html . "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; }\n";
     $html = $html . "h1 { color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px; }\n";
@@ -7348,7 +7493,7 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
     $html = $html . ".icon { margin-right: 8px; }\n";
     $html = $html . ".size { color: #666; }\n";
     $html = $html . "</style>\n</head>\n<body>\n";
-    $html = $html . "<h1>Index of " . $url . "</h1>\n";
+    $html = $html . "<h1>Index of " . $safe_url . "</h1>\n";
     $html = $html . "<table>\n<tr><th>Name</th><th>Size</th></tr>\n";
 
     # Parent directory link
@@ -7367,20 +7512,21 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
         # Skip hidden files and . / ..
         my str $first = substr($name, 0, 1);
         if ($first ne ".") {
-            my str $href = $name;
+            my str $href = ::url_encode_component($name);
+            my str $safe_name = Cannoli::Response::html_escape($name);
             my str $icon = "&#128196;";  # File icon
             my str $size_str = "-";
 
             if (core::is_dir($full_entry)) {
                 $icon = "&#128193;";  # Folder icon
-                $href = $name . "/";
+                $href = $href . "/";
             } else {
                 my int $size = core::file_size($full_entry);
                 $size_str = ::format_size($size);
             }
 
             $html = $html . "<tr><td><span class=\"icon\">" . $icon . "</span>";
-            $html = $html . "<a href=\"" . $href . "\">" . $name . "</a></td>";
+            $html = $html . "<a href=\"" . $href . "\">" . $safe_name . "</a></td>";
             $html = $html . "<td class=\"size\">" . $size_str . "</td></tr>\n";
         }
         $i = $i + 1;
@@ -7394,12 +7540,15 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
     my hash %res = ();
     if ($method ne "GET" && $method ne "HEAD") { return %res; }
 
-    my int $safe = ::is_safe($url);
+    my str $decoded_url = ::percent_decode_path($url);
+    my int $safe = ::is_safe($decoded_url);
     if ($safe == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
 
-    my str $fs = ::resolve_path($srv, $url);
+    my str $fs = ::resolve_path($srv, $decoded_url);
+    my str $root = ::base_path($srv, $decoded_url);
 
     if (core::is_dir($fs)) {
+        if (::is_under_root($fs, $root) == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
         my str $idx = ::find_index($srv, $fs);
         my int $idx_len = length($idx);
         if ($idx_len > 0) {
@@ -7408,7 +7557,7 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
             # Check if directory listing is enabled
             my int $listing_enabled = $srv->{"directory_listing"};
             if ($listing_enabled == 1) {
-                my str $listing = ::dir_listing($fs, $url);
+                my str $listing = ::dir_listing($fs, $decoded_url);
                 $res{"status"} = 200;
                 $res{"content_type"} = "text/html";
                 $res{"body"} = $listing;
@@ -7419,6 +7568,13 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
     }
 
     if (!core::is_file($fs)) { return Cannoli::Response::not_found(); }
+    if (::is_under_root($fs, $root) == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
+
+    my int $size = core::file_size($fs);
+    my int $max_file_size = $srv->{"max_file_size"};
+    if ($max_file_size > 0 && $size > $max_file_size) {
+        return Cannoli::Response::payload_too_large($max_file_size);
+    }
 
     my str $content = slurp($fs);
     my str $mime = Cannoli::Mime::type($fs);
@@ -7607,7 +7763,12 @@ func Cannoli_Server_new(hash %config) scalar {
                     # Call cannoli_init if it exists (for libraries that need configuration)
                     my scalar $init_sym = core::dl_sym($lib, "cannoli_init");
                     if (defined($init_sym)) {
-                        my int $init_result = core::dl_call_int_sv($init_sym, [$lib_config]);
+                        # cannoli_init is a Strada function: it returns a StradaValue, not a C
+                        # int (a tagged 0 is the non-NULL pointer 1, so dl_call_int_sv read
+                        # every failure as success). Call it like cannoli_dispatch and test it.
+                        my scalar $init_ret = core::dl_call_sv($init_sym, [$lib_config]);
+                        my int $init_result = 0;
+                        if (defined($init_ret) && $init_ret) { $init_result = 1; }
                         if ($init_result == 0) {
                             say("  Error: cannoli_init failed");
                             $i = $i + 1;
@@ -7678,7 +7839,12 @@ func Cannoli_Server_new(hash %config) scalar {
                 # Call cannoli_init if it exists
                 my scalar $init_sym = core::dl_sym($lib, "cannoli_init");
                 if (defined($init_sym)) {
-                    my int $init_result = core::dl_call_int_sv($init_sym, [$lib_config]);
+                    # cannoli_init is a Strada function: it returns a StradaValue, not a C
+                    # int (a tagged 0 is the non-NULL pointer 1, so dl_call_int_sv read
+                    # every failure as success). Call it like cannoli_dispatch and test it.
+                    my scalar $init_ret = core::dl_call_sv($init_sym, [$lib_config]);
+                    my int $init_result = 0;
+                    if (defined($init_ret) && $init_ret) { $init_result = 1; }
                     if ($init_result == 0) {
                         say("    Error: cannoli_init failed");
                         $j = $j + 1;
@@ -7891,10 +8057,46 @@ func Cannoli_Server_read_error(str $code, int $limit) scalar {
     return \%result;
 }
 
-# Parse Content-Length from request headers (returns 0 if missing)
+# Check a decimal Content-Length value without relying on numeric coercion.
+func Cannoli_Server_is_decimal(str $value) int {
+    if (length($value) == 0) { return 0; }
+
+    my int $i = 0;
+    while ($i < length($value)) {
+        my str $ch = substr($value, $i, 1);
+        if ($ch lt "0" || $ch gt "9") { return 0; }
+        $i = $i + 1;
+    }
+
+    return 1;
+}
+
+# Cannoli currently supports fixed-length request bodies only.
+func Cannoli_Server_has_transfer_encoding(str $header_section) int {
+    my array @lines = split("\r\n", $header_section);
+    my int $i = 1;  # skip request line
+    while ($i < scalar(@lines)) {
+        my str $line = $lines[$i];
+        my int $colon = index($line, ":");
+        if ($colon > 0) {
+            my str $name = trim(substr($line, 0, $colon));
+            $name = lc($name);
+            if ($name eq "transfer-encoding") {
+                return 1;
+            }
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+# Parse Content-Length from request headers. Returns -1 for malformed or
+# conflicting values, and 0 if missing.
 func Cannoli_Server_parse_content_length(str $header_section) int {
     my array @lines = split("\r\n", $header_section);
     my int $i = 1;  # skip request line
+    my int $seen = 0;
+    my int $content_len = 0;
     while ($i < scalar(@lines)) {
         my str $line = $lines[$i];
         my int $colon = index($line, ":");
@@ -7903,12 +8105,17 @@ func Cannoli_Server_parse_content_length(str $header_section) int {
             my str $value = trim(substr($line, $colon + 1, length($line) - $colon - 1));
             $name = lc($name);
             if ($name eq "content-length") {
-                return $value + 0;
+                if (::is_decimal($value) == 0) { return -1; }
+                my int $parsed = $value + 0;
+                if ($parsed < 0) { return -1; }
+                if ($seen == 1 && $parsed != $content_len) { return -1; }
+                $seen = 1;
+                $content_len = $parsed;
             }
         }
         $i = $i + 1;
     }
-    return 0;
+    return $content_len;
 }
 
 # Decide if the connection should be kept alive
@@ -7993,7 +8200,14 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $client, str $buffer
     }
 
     my str $header_section = substr($buffer, 0, $header_end);
+    if (::has_transfer_encoding($header_section) == 1) {
+        return ::read_error("bad_request", 0);
+    }
+
     my int $content_len = ::parse_content_length($header_section);
+    if ($content_len < 0) {
+        return ::read_error("bad_request", 0);
+    }
     if ($content_len > $max_body) {
         return ::read_error("body_too_large", $max_body);
     }
@@ -8111,7 +8325,14 @@ func Cannoli_Server_read_ssl_request(scalar $server_ref, scalar $ssl_conn, scala
     }
 
     my str $header_section = substr($buffer, 0, $header_end);
+    if (::has_transfer_encoding($header_section) == 1) {
+        return ::read_error("bad_request", 0);
+    }
+
     my int $content_len = ::parse_content_length($header_section);
+    if ($content_len < 0) {
+        return ::read_error("bad_request", 0);
+    }
     if ($content_len > $max_body) {
         return ::read_error("body_too_large", $max_body);
     }

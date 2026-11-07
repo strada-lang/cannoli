@@ -24,9 +24,36 @@ func Cannoli_Static_new() scalar {
     $s{"document_root"} = ".";
     $s{"index_files"} = "index.html,index.htm";
     $s{"directory_listing"} = 0;
+    $s{"max_file_size"} = 67108864;  # 64MB guard for slurp-based responses
     my hash %aliases = ();
     $s{"aliases"} = \%aliases;
     return \%s;
+}
+
+func Cannoli_Static_base_path(scalar $srv, str $url) str {
+    my scalar $aliases = $srv->{"aliases"};
+    my array @keys = keys(%{$aliases});
+    my str $best = "";
+    my str $target = "";
+    my int $i = 0;
+    while ($i < scalar(@keys)) {
+        my str $prefix = $keys[$i];
+        my int $plen = length($prefix);
+        my int $ulen = length($url);
+        if ($ulen >= $plen) {
+            my str $url_prefix = substr($url, 0, $plen);
+            if ($url_prefix eq $prefix) {
+                my int $blen = length($best);
+                if ($plen > $blen) {
+                    $best = $prefix;
+                    $target = $aliases->{$prefix};
+                }
+            }
+        }
+        $i = $i + 1;
+    }
+    if (length($best) > 0) { return $target; }
+    return $srv->{"document_root"};
 }
 
 func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
@@ -64,9 +91,83 @@ func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
 }
 
 func Cannoli_Static_is_safe(str $path) int {
-    my int $dotdot = index($path, "..");
-    if ($dotdot >= 0) { return 0; }
+    if (length($path) == 0) { return 0; }
+    if (substr($path, 0, 1) ne "/") { return 0; }
+
+    my array @parts = split("/", $path);
+    my int $i = 0;
+    while ($i < scalar(@parts)) {
+        my str $part = $parts[$i];
+        if ($part eq ".." || $part eq ".") { return 0; }
+        my int $j = 0;
+        while ($j < length($part)) {
+            if (ord(substr($part, $j, 1)) == 0) { return 0; }
+            $j = $j + 1;
+        }
+        $i = $i + 1;
+    }
+
     return 1;
+}
+
+func Cannoli_Static_percent_decode_path(str $s) str {
+    my str $result = "";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $ch = substr($s, $i, 1);
+        if ($ch eq "%" && $i + 2 < length($s)) {
+            my str $hex = substr($s, $i + 1, 2);
+            my int $code = Cannoli::Request::hex_to_int($hex);
+            if ($code >= 0) {
+                $result = $result . chr($code);
+                $i = $i + 3;
+                next;
+            }
+        }
+        $result = $result . $ch;
+        $i = $i + 1;
+    }
+    return $result;
+}
+
+func Cannoli_Static_is_under_root(str $path, str $root) int {
+    my scalar $real_path_sv = core::realpath($path);
+    my scalar $real_root_sv = core::realpath($root);
+    if (!defined($real_path_sv) || !defined($real_root_sv)) { return 0; }
+
+    my str $real_path = "" . $real_path_sv;
+    my str $real_root = "" . $real_root_sv;
+    if ($real_root eq "/") { return 1; }
+    if ($real_path eq $real_root) { return 1; }
+
+    my int $root_len = length($real_root);
+    if (length($real_path) > $root_len && substr($real_path, 0, $root_len) eq $real_root && substr($real_path, $root_len, 1) eq "/") {
+        return 1;
+    }
+    return 0;
+}
+
+func Cannoli_Static_url_encode_component(str $s) str {
+    my str $hex = "0123456789ABCDEF";
+    my str $result = "";
+    my int $i = 0;
+    while ($i < length($s)) {
+        my str $ch = substr($s, $i, 1);
+        my int $code = ord($ch);
+        my int $unreserved = 0;
+        if (($ch ge "A" && $ch le "Z") || ($ch ge "a" && $ch le "z") || ($ch ge "0" && $ch le "9")) { $unreserved = 1; }
+        if ($ch eq "-" || $ch eq "_" || $ch eq "." || $ch eq "~") { $unreserved = 1; }
+
+        if ($unreserved == 1) {
+            $result = $result . $ch;
+        } else {
+            my int $hi = $code / 16;
+            my int $lo = $code - ($hi * 16);
+            $result = $result . "%" . substr($hex, $hi, 1) . substr($hex, $lo, 1);
+        }
+        $i = $i + 1;
+    }
+    return $result;
 }
 
 func Cannoli_Static_find_index(scalar $srv, str $dir) str {
@@ -99,8 +200,9 @@ func Cannoli_Static_format_size(int $size) str {
 }
 
 func Cannoli_Static_dir_listing(str $dir, str $url) str {
+    my str $safe_url = Cannoli::Response::html_escape($url);
     my str $html = "<!DOCTYPE html>\n<html>\n<head>\n";
-    $html = $html . "<title>Index of " . $url . "</title>\n";
+    $html = $html . "<title>Index of " . $safe_url . "</title>\n";
     $html = $html . "<style>\n";
     $html = $html . "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; }\n";
     $html = $html . "h1 { color: #333; border-bottom: 1px solid #ddd; padding-bottom: 10px; }\n";
@@ -113,7 +215,7 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
     $html = $html . ".icon { margin-right: 8px; }\n";
     $html = $html . ".size { color: #666; }\n";
     $html = $html . "</style>\n</head>\n<body>\n";
-    $html = $html . "<h1>Index of " . $url . "</h1>\n";
+    $html = $html . "<h1>Index of " . $safe_url . "</h1>\n";
     $html = $html . "<table>\n<tr><th>Name</th><th>Size</th></tr>\n";
 
     # Parent directory link
@@ -132,20 +234,21 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
         # Skip hidden files and . / ..
         my str $first = substr($name, 0, 1);
         if ($first ne ".") {
-            my str $href = $name;
+            my str $href = ::url_encode_component($name);
+            my str $safe_name = Cannoli::Response::html_escape($name);
             my str $icon = "&#128196;";  # File icon
             my str $size_str = "-";
 
             if (core::is_dir($full_entry)) {
                 $icon = "&#128193;";  # Folder icon
-                $href = $name . "/";
+                $href = $href . "/";
             } else {
                 my int $size = core::file_size($full_entry);
                 $size_str = ::format_size($size);
             }
 
             $html = $html . "<tr><td><span class=\"icon\">" . $icon . "</span>";
-            $html = $html . "<a href=\"" . $href . "\">" . $name . "</a></td>";
+            $html = $html . "<a href=\"" . $href . "\">" . $safe_name . "</a></td>";
             $html = $html . "<td class=\"size\">" . $size_str . "</td></tr>\n";
         }
         $i = $i + 1;
@@ -159,12 +262,15 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
     my hash %res = ();
     if ($method ne "GET" && $method ne "HEAD") { return %res; }
 
-    my int $safe = ::is_safe($url);
+    my str $decoded_url = ::percent_decode_path($url);
+    my int $safe = ::is_safe($decoded_url);
     if ($safe == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
 
-    my str $fs = ::resolve_path($srv, $url);
+    my str $fs = ::resolve_path($srv, $decoded_url);
+    my str $root = ::base_path($srv, $decoded_url);
 
     if (core::is_dir($fs)) {
+        if (::is_under_root($fs, $root) == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
         my str $idx = ::find_index($srv, $fs);
         my int $idx_len = length($idx);
         if ($idx_len > 0) {
@@ -173,7 +279,7 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
             # Check if directory listing is enabled
             my int $listing_enabled = $srv->{"directory_listing"};
             if ($listing_enabled == 1) {
-                my str $listing = ::dir_listing($fs, $url);
+                my str $listing = ::dir_listing($fs, $decoded_url);
                 $res{"status"} = 200;
                 $res{"content_type"} = "text/html";
                 $res{"body"} = $listing;
@@ -184,6 +290,13 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
     }
 
     if (!core::is_file($fs)) { return Cannoli::Response::not_found(); }
+    if (::is_under_root($fs, $root) == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
+
+    my int $size = core::file_size($fs);
+    my int $max_file_size = $srv->{"max_file_size"};
+    if ($max_file_size > 0 && $size > $max_file_size) {
+        return Cannoli::Response::payload_too_large($max_file_size);
+    }
 
     my str $content = slurp($fs);
     my str $mime = Cannoli::Mime::type($fs);

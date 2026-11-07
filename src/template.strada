@@ -278,6 +278,18 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
 
         # Look for {{ start (simple variable or dump)
         if ($i + 1 < $len) {
+            if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
+                my int $raw_end = ::find_triple_closing($template, $i + 3);
+                if ($raw_end > 0) {
+                    my str $raw_name = substr($template, $i + 3, $raw_end - $i - 3);
+                    $raw_name = trim($raw_name);
+                    my str $raw_value = ::resolve_var($raw_name, $vars);
+                    $result = $result . $raw_value;
+                    $i = $raw_end + 3;
+                    next;
+                }
+            }
+
             my str $two = substr($template, $i, 2);
             if ($two eq "{{") {
                 # Find closing }}
@@ -302,7 +314,7 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
 
                     # Regular variable
                     my str $value = ::resolve_var($content, $vars);
-                    $result = $result . $value;
+                    $result = $result . ::escape_html($value);
 
                     # Skip past }}
                     $i = $end + 2;
@@ -787,66 +799,12 @@ func Cannoli_Template_escape_html(str $s) str {
 
 # Render with HTML escaping for variables
 func Cannoli_Template_render_safe(str $name, scalar $vars) str {
-    my str $template = ::load($name);
-    if (length($template) == 0) {
-        return "";
-    }
-    return ::render_string_safe($template, $vars);
+    return ::render($name, $vars);
 }
 
 # Render string with HTML escaping
 func Cannoli_Template_render_string_safe(str $template, scalar $vars) str {
-    my str $result = "";
-    my int $len = length($template);
-    my int $i = 0;
-
-    while ($i < $len) {
-        # Look for {{ start
-        if ($i + 1 < $len) {
-            my str $two = substr($template, $i, 2);
-            if ($two eq "{{") {
-                # Find closing }}
-                my int $end = ::find_closing($template, $i + 2);
-                if ($end > $i + 2) {
-                    # Extract variable name
-                    my str $var_name = substr($template, $i + 2, $end - $i - 2);
-                    $var_name = trim($var_name);
-
-                    # Check for raw output marker {{{var}}}
-                    my int $raw = 0;
-                    if (length($var_name) > 0 && substr($var_name, 0, 1) eq "{") {
-                        # Check if this is {{{ which means raw
-                        if ($i + 2 < $len && substr($template, $i, 3) eq "{{{") {
-                            my int $raw_end = ::find_triple_closing($template, $i + 3);
-                            if ($raw_end > 0) {
-                                $var_name = substr($template, $i + 3, $raw_end - $i - 3);
-                                $var_name = trim($var_name);
-                                my str $value = ::resolve_var($var_name, $vars);
-                                $result = $result . $value;
-                                $i = $raw_end + 3;
-                                next;
-                            }
-                        }
-                    }
-
-                    # Resolve and escape variable
-                    my str $value = ::resolve_var($var_name, $vars);
-                    $result = $result . ::escape_html($value);
-
-                    # Skip past }}
-                    $i = $end + 2;
-                    next;
-                }
-            }
-        }
-
-        # Regular character
-        my str $ch = substr($template, $i, 1);
-        $result = $result . $ch;
-        $i = $i + 1;
-    }
-
-    return $result;
+    return ::render_string($template, $vars);
 }
 
 # Find triple closing }}}
@@ -870,6 +828,22 @@ func Cannoli_Template_include(str $name, scalar $vars) str {
     return ::render($name, $vars);
 }
 
+func Cannoli_Template_rewrite_content_placeholder(str $template) str {
+    my str $result = "";
+    my int $i = 0;
+    my int $len = length($template);
+    while ($i < $len) {
+        if ($i + 11 <= $len && substr($template, $i, 11) eq "{{content}}") {
+            $result = $result . "{{{content}}}";
+            $i = $i + 11;
+            next;
+        }
+        $result = $result . substr($template, $i, 1);
+        $i = $i + 1;
+    }
+    return $result;
+}
+
 # Render a template with a layout
 # Layout should have {{content}} placeholder
 func Cannoli_Template_render_with_layout(str $template_name, str $layout_name, scalar $vars) str {
@@ -882,6 +856,12 @@ func Cannoli_Template_render_with_layout(str $template_name, str $layout_name, s
     }
     $vars->{"content"} = $content;
 
-    # Render the layout with the content
-    return ::render($layout_name, $vars);
+    my str $layout = ::load($layout_name);
+    if (length($layout) == 0) {
+        return "";
+    }
+
+    # Historical layouts use {{content}}; keep that raw while escaping other variables.
+    $layout = ::rewrite_content_placeholder($layout);
+    return ::render_string($layout, $vars);
 }
