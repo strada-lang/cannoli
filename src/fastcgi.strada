@@ -432,8 +432,8 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
 
     # Master waits for children
     while (1) {
-        my int $status = 0;
-        my int $pid = core::waitpid(-1, $status);
+        # core::wait() returns the reaped pid (waitpid returns the status)
+        my int $pid = core::wait();
 
         if ($pid > 0) {
             say("FastCGI worker " . $pid . " exited, respawning...");

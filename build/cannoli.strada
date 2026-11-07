@@ -9291,37 +9291,43 @@ func Cannoli_Server_graceful_shutdown(scalar $server_ref) void {
             $i = $i + 1;
         }
 
-        # Wait for workers with timeout
-        my int $timeout = 30;  # seconds
+        # Wait for the workers to exit. core::waitpid() returns the child's
+        # exit STATUS (not its pid), so the old "pid > 0" countdown never
+        # moved for workers that exited 0 and every shutdown sat out the
+        # full 30s timeout. Instead: reap each worker without blocking and
+        # check whether it still exists.
+        my int $timeout = 10;  # seconds before SIGKILL
         my int $start = core::time();
-        my int $remaining = $num;
-
-        say("Waiting for workers to exit (timeout: " . $timeout . "s)...");
-
-        while ($remaining > 0) {
-            my int $status = 0;
-            my int $pid = core::waitpid(-1, $status);
-
-            if ($pid > 0) {
-                $remaining = $remaining - 1;
-                say("Worker " . $pid . " exited (" . $remaining . " remaining)");
+        say("Waiting for workers to exit...");
+        my int $alive = $num;
+        while ($alive > 0) {
+            $alive = 0;
+            $i = 0;
+            while ($i < $num) {
+                my int $wpid = $pids->[$i];
+                core::waitpid($wpid, 1);  # WNOHANG: reap it if it has exited
+                if (core::kill($wpid, 0) == 0) {
+                    $alive = $alive + 1;
+                }
+                $i = $i + 1;
             }
-
-            # Check timeout
-            my int $elapsed = core::time() - $start;
-            if ($elapsed > $timeout) {
-                say("Timeout reached, force-killing remaining workers...");
+            if ($alive == 0) {
+                last;
+            }
+            if (core::time() - $start >= $timeout) {
+                say("Timeout reached, force-killing " . $alive . " worker(s)...");
                 $i = 0;
-                while ($i < scalar(@{$pids})) {
+                while ($i < $num) {
                     my int $kill_pid = $pids->[$i];
                     core::kill($kill_pid, 9);  # SIGKILL
+                    core::waitpid($kill_pid, 0);
                     $i = $i + 1;
                 }
                 last;
             }
-
-            core::usleep(100000);  # 100ms
+            core::usleep(20000);  # 20ms
         }
+        say("All workers exited");
     }
 
     say("Shutdown complete");
@@ -9343,9 +9349,10 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
     $server_ref->{"running"} = 1;
 
     while ($server_ref->{"running"} == 1) {
-        # Wait for any child to exit
-        my int $status = 0;
-        my int $pid = core::waitpid(-1, $status);
+        # Wait for any child to exit. core::wait() returns the reaped pid
+        # (core::waitpid returns the exit status, which made a worker that
+        # exited 0 - e.g. after max_requests - never get respawned).
+        my int $pid = core::wait();
 
         if ($pid > 0 && $server_ref->{"running"} == 1) {
             # A worker exited, respawn it
@@ -9940,8 +9947,8 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
 
     # Master waits for children
     while (1) {
-        my int $status = 0;
-        my int $pid = core::waitpid(-1, $status);
+        # core::wait() returns the reaped pid (waitpid returns the status)
+        my int $pid = core::wait();
 
         if ($pid > 0) {
             say("FastCGI worker " . $pid . " exited, respawning...");
