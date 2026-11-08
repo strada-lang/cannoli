@@ -416,6 +416,8 @@ workers = 5
 max_requests = 1000
 timeout = 30
 keep_alive = true
+tick_interval = 30   # seconds between cannoli_tick() calls (0: no ticker)
+tick_max = 1000      # ticks before the ticker is recycled
 
 [ssl]
 enabled = true
@@ -495,6 +497,10 @@ See the `examples/` directory:
 - Master process spawns and monitors workers
 - Each worker handles requests independently
 - Workers recycle after `max_requests`
+- Background jobs: a library that exports `cannoli_tick()` gets one extra
+  process, the ticker, that calls it every `tick_interval` seconds. It is
+  respawned if it dies, recycled after `tick_max` ticks, and stopped (with
+  `cannoli_worker_exit()`) on shutdown. A tick that throws is logged.
 - Graceful shutdown via SIGTERM/SIGINT
 - Graceful reload via SIGHUP
 

@@ -20,6 +20,11 @@ package Cannoli::Server;
 # just before it exits (max_requests reached, SIGTERM, orphaned, admin
 # kill) so they can close database connections and other resources.
 my scalar $_g_exit_funcs = [];
+# Libraries may export cannoli_tick(): when one does, the master runs one
+# extra process, the ticker, that calls it every server.tick_interval
+# seconds (default 30; 0 turns the ticker off) for background jobs. It is
+# respawned like a worker and gets SIGTERM and cannoli_worker_exit too.
+my scalar $_g_tick_funcs = [];
 my int $_g_worker_busy = 0;      # inside a request: SIGTERM waits for it
 my int $_g_exit_requested = 0;
 my int $_g_exiting = 0;
@@ -52,6 +57,9 @@ func Cannoli_Server_new(hash %config) scalar {
     $server{"port"} = Cannoli::Config::get_int(%config, "server.port", 8080);
     $server{"num_workers"} = Cannoli::Config::get_int(%config, "server.workers", 5);
     $server{"max_requests"} = Cannoli::Config::get_int(%config, "server.max_requests", 1000);
+    $server{"tick_interval"} = Cannoli::Config::get_int(%config, "server.tick_interval", 30);
+    $server{"tick_max"} = Cannoli::Config::get_int(%config, "server.tick_max", 1000);
+    $server{"ticker_pid"} = 0;
     $server{"timeout"} = Cannoli::Config::get_int(%config, "server.timeout", 30);
     $server{"keep_alive_enabled"} = Cannoli::Config::get_bool(%config, "server.keep_alive", 1);
     # Idle timeout for a kept-alive connection between requests (seconds). Kept
@@ -210,6 +218,8 @@ func Cannoli_Server_new(hash %config) scalar {
                         push(@{$server{"after_funcs"}}, $after_sym);
                         my scalar $exit_sym = core::dl_sym($lib, "cannoli_worker_exit");
                         if (defined($exit_sym)) { push(@{$_g_exit_funcs}, $exit_sym); }
+                        my scalar $tick_sym = core::dl_sym($lib, "cannoli_tick");
+                        if (defined($tick_sym)) { push(@{$_g_tick_funcs}, $tick_sym); say("  Loaded: cannoli_tick"); }
                         if (defined($after_sym)) {
                             say("  Loaded: cannoli_after_request");
                         }
@@ -287,6 +297,8 @@ func Cannoli_Server_new(hash %config) scalar {
                     $lib_route{"after"} = core::dl_sym($lib, "cannoli_after_request");
                     my scalar $exit_sym2 = core::dl_sym($lib, "cannoli_worker_exit");
                     if (defined($exit_sym2)) { push(@{$_g_exit_funcs}, $exit_sym2); }
+                    my scalar $tick_sym2 = core::dl_sym($lib, "cannoli_tick");
+                    if (defined($tick_sym2)) { push(@{$_g_tick_funcs}, $tick_sym2); say("    Loaded: cannoli_tick"); }
                     push(@{$server{"library_routes"}}, \%lib_route);
                     say("    Loaded: cannoli_dispatch");
                     if (defined($lib_route{"after"})) {
@@ -1595,6 +1607,51 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
 }
 
 # Spawn worker processes
+# The ticker: call every cannoli_tick hook, sleep, repeat. A tick that
+# throws is logged and the next one runs on schedule. After tick_max
+# ticks it exits and the master starts a fresh one (as with max_requests).
+func Cannoli_Server_ticker_loop(scalar $server_ref) void {
+    my int $interval = $server_ref->{"tick_interval"};
+    my int $max = $server_ref->{"tick_max"};
+    my int $parent_pid = core::getppid();
+    my int $n = 0;
+    while ($max <= 0 || $n < $max) {
+        $_g_worker_busy = 1;
+        foreach my scalar $fn (@{$_g_tick_funcs}) {
+            try { core::dl_call_void_sv($fn, []); } catch ($e) { Cannoli::Log::error("cannoli_tick: " . $e); }
+        }
+        $_g_worker_busy = 0;
+        if ($_g_exit_requested == 1) { return; }
+        $n = $n + 1;
+        # sleep in short steps so SIGTERM and an exited master are noticed
+        my int $waited = 0;
+        while ($waited < $interval * 10) {
+            if ($_g_exit_requested == 1 || core::getppid() != $parent_pid) { return; }
+            core::usleep(100000);
+            $waited = $waited + 1;
+        }
+    }
+}
+
+# Fork the ticker (when a library has cannoli_tick and it is enabled).
+func Cannoli_Server_spawn_ticker(scalar $server_ref) void {
+    if (scalar(@{$_g_tick_funcs}) == 0 || $server_ref->{"tick_interval"} <= 0) { return; }
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        core::setproctitle("cannoli [ticker]");
+        core::signal("TERM", \&Cannoli_Server_worker_handle_term);
+        core::signal("INT", "IGNORE");
+        ::ticker_loop($server_ref);
+        ::worker_exit();
+    } elsif ($pid > 0) {
+        $server_ref->{"ticker_pid"} = $pid;
+        push(@{$server_ref->{"worker_pids"}}, $pid);
+        say("Spawned ticker with PID " . $pid . " (every " . $server_ref->{"tick_interval"} . "s)");
+    } else {
+        say("Error: fork() failed for the ticker");
+    }
+}
+
 func Cannoli_Server_spawn_workers(scalar $server_ref) void {
     my int $num_workers = $server_ref->{"num_workers"};
     my scalar $pids = $server_ref->{"worker_pids"};
@@ -1819,6 +1876,13 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
 
             $server_ref->{"worker_pids"} = \@new_pids;
 
+            if ($pid == $server_ref->{"ticker_pid"}) {
+                $server_ref->{"ticker_pid"} = 0;
+                ::spawn_ticker($server_ref);
+                core::usleep(100000);
+                next;
+            }
+
             # Fork new worker
             my int $new_pid = core::fork();
 
@@ -1868,8 +1932,9 @@ func Cannoli_Server_run(scalar $server_ref) int {
 
     say("Starting " . $server_ref->{"num_workers"} . " worker processes...");
 
-    # Spawn workers
+    # Spawn workers (and the ticker, if a library wants one)
     ::spawn_workers($server_ref);
+    ::spawn_ticker($server_ref);
 
     # Run master loop
     ::master_loop($server_ref);
