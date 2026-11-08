@@ -418,6 +418,8 @@ timeout = 30
 keep_alive = true
 tick_interval = 30   # seconds between cannoli_tick() calls (0: no ticker)
 tick_max = 1000      # ticks before the ticker is recycled
+tickers = 1          # how many ticker processes
+http = true          # false: no listener or request workers, tickers only
 
 [ssl]
 enabled = true
@@ -501,6 +503,8 @@ See the `examples/` directory:
   process, the ticker, that calls it every `tick_interval` seconds. It is
   respawned if it dies, recycled after `tick_max` ticks, and stopped (with
   `cannoli_worker_exit()`) on shutdown. A tick that throws is logged.
+  `tickers = N` runs N of them; `http = false` makes a background-job
+  server with only tickers (for a job queue's workers on another machine).
 - Graceful shutdown via SIGTERM/SIGINT
 - Graceful reload via SIGHUP
 
