@@ -1108,14 +1108,14 @@ func Cannoli_Template_merge_scope(scalar $parent_vars, scalar $obj) scalar {
     my scalar $new_vars = {};
 
     # Copy parent vars first
-    if (ref($parent_vars) eq "HASH") {
+    if (reftype($parent_vars) eq "HASH") {
         foreach my str $k (keys(%{$parent_vars})) {
             $new_vars->{$k} = $parent_vars->{$k};
         }
     }
 
     # Merge object fields (overrides parent)
-    if (ref($obj) eq "HASH") {
+    if (reftype($obj) eq "HASH") {
         foreach my str $k (keys(%{$obj})) {
             $new_vars->{$k} = $obj->{$k};
         }
@@ -1132,7 +1132,7 @@ func Cannoli_Template_dump(scalar $val, int $indent) str {
         return "undef";
     }
 
-    my str $r = ref($val);
+    my str $r = reftype($val);
 
     if ($r eq "HASH") {
         my str $out = "{\n";
@@ -1167,7 +1167,7 @@ func Cannoli_Template_dump_value(scalar $val) str {
         return "undef";
     }
 
-    my str $r = ref($val);
+    my str $r = reftype($val);
 
     if ($r eq "HASH") {
         my str $out = "{";
@@ -1264,7 +1264,7 @@ func Cannoli_Template_resolve_var(str $name, scalar $vars) str {
         my str $rest = substr($name, $dot + 1, length($name) - $dot - 1);
 
         # Get nested value
-        if (ref($vars) eq "HASH" && exists(%{$vars}, $first)) {
+        if (reftype($vars) eq "HASH" && exists(%{$vars}, $first)) {
             my scalar $nested = $vars->{$first};
             return ::resolve_var($rest, $nested);
         }
@@ -1272,7 +1272,7 @@ func Cannoli_Template_resolve_var(str $name, scalar $vars) str {
     }
 
     # Simple variable lookup
-    if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
+    if (reftype($vars) eq "HASH" && exists(%{$vars}, $name)) {
         my scalar $value = $vars->{$name};
 
         # Convert to string
@@ -1297,7 +1297,7 @@ func Cannoli_Template_get_var(str $name, scalar $vars) scalar {
         my str $first = substr($name, 0, $dot);
         my str $rest = substr($name, $dot + 1, length($name) - $dot - 1);
 
-        if (ref($vars) eq "HASH" && exists(%{$vars}, $first)) {
+        if (reftype($vars) eq "HASH" && exists(%{$vars}, $first)) {
             my scalar $nested = $vars->{$first};
             return ::get_var($rest, $nested);
         }
@@ -1305,7 +1305,7 @@ func Cannoli_Template_get_var(str $name, scalar $vars) scalar {
     }
 
     # Simple variable lookup
-    if (ref($vars) eq "HASH" && exists(%{$vars}, $name)) {
+    if (reftype($vars) eq "HASH" && exists(%{$vars}, $name)) {
         return $vars->{$name};
     }
 
@@ -1318,7 +1318,7 @@ func Cannoli_Template_is_truthy(scalar $val) int {
         return 0;
     }
 
-    my str $r = ref($val);
+    my str $r = reftype($val);
     if ($r eq "ARRAY") {
         my int $len = scalar(@{$val});
         return $len > 0;
@@ -1423,7 +1423,7 @@ func Cannoli_Template_find_else(str $template, int $start, int $block_end) int {
 func Cannoli_Template_process_each_named(str $collection_name, str $loop_var, str $body, scalar $vars) str {
     my scalar $arr = ::get_var($collection_name, $vars);
 
-    if (!defined($arr) || ref($arr) ne "ARRAY") {
+    if (!defined($arr) || reftype($arr) ne "ARRAY") {
         return "";
     }
 
@@ -1436,7 +1436,7 @@ func Cannoli_Template_process_each_named(str $collection_name, str $loop_var, st
         my scalar $iter_vars = {};
 
         # Copy parent vars
-        if (ref($vars) eq "HASH") {
+        if (reftype($vars) eq "HASH") {
             foreach my str $k (keys(%{$vars})) {
                 $iter_vars->{$k} = $vars->{$k};
             }
@@ -1448,7 +1448,7 @@ func Cannoli_Template_process_each_named(str $collection_name, str $loop_var, st
             $iter_vars->{$loop_var} = $item;
         } else {
             # Legacy mode: merge hash fields into scope, or use "this" for scalars
-            if (ref($item) eq "HASH") {
+            if (reftype($item) eq "HASH") {
                 foreach my str $k (keys(%{$item})) {
                     $iter_vars->{$k} = $item->{$k};
                 }
@@ -7587,6 +7587,14 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
 */
 package Cannoli::Server;
 
+# Libraries may export cannoli_worker_exit(): called once in each worker
+# just before it exits (max_requests reached, SIGTERM, orphaned, admin
+# kill) so they can close database connections and other resources.
+my scalar $_g_exit_funcs = [];
+my int $_g_worker_busy = 0;      # inside a request: SIGTERM waits for it
+my int $_g_exit_requested = 0;
+my int $_g_exiting = 0;
+
 
 # cannoli/src/server.strada - Preforking HTTP server
 #
@@ -7771,6 +7779,8 @@ func Cannoli_Server_new(hash %config) scalar {
 
                         my scalar $after_sym = core::dl_sym($lib, "cannoli_after_request");
                         push(@{$server{"after_funcs"}}, $after_sym);
+                        my scalar $exit_sym = core::dl_sym($lib, "cannoli_worker_exit");
+                        if (defined($exit_sym)) { push(@{$_g_exit_funcs}, $exit_sym); }
                         if (defined($after_sym)) {
                             say("  Loaded: cannoli_after_request");
                         }
@@ -7846,6 +7856,8 @@ func Cannoli_Server_new(hash %config) scalar {
                     $lib_route{"prefix"} = $prefix;
                     $lib_route{"dispatch"} = $sym;
                     $lib_route{"after"} = core::dl_sym($lib, "cannoli_after_request");
+                    my scalar $exit_sym2 = core::dl_sym($lib, "cannoli_worker_exit");
+                    if (defined($exit_sym2)) { push(@{$_g_exit_funcs}, $exit_sym2); }
                     push(@{$server{"library_routes"}}, \%lib_route);
                     say("    Loaded: cannoli_dispatch");
                     if (defined($lib_route{"after"})) {
@@ -8661,7 +8673,7 @@ func Cannoli_Server_handle_client(scalar $server_ref, scalar $client) void {
         # Check if admin requested worker termination
         if ($res{"_exit_after"} == 1) {
             core::socket_close($client);
-            exit(0);
+            ::worker_exit();
         }
 
         if ($keep_alive == 0) {
@@ -8920,7 +8932,7 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
         # Check if admin requested worker termination
         if ($res{"_exit_after"} == 1) {
             core::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
-            exit(0);
+            ::worker_exit();
         }
 
         if ($keep_alive == 0) {
@@ -8961,7 +8973,7 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
         my int $current_ppid = core::getppid();
         if ($current_ppid != $parent_pid) {
             # Master died, exit cleanly
-            exit(0);
+            ::worker_exit();
         }
 
         # Build array of file descriptors to monitor
@@ -8982,6 +8994,7 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
         }
 
         my int $i = 0;
+        $_g_worker_busy = 1;
         while ($i < $num_ready) {
             my int $ready_fd = $ready[$i];
 
@@ -9004,6 +9017,8 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
 
             $i = $i + 1;
         }
+        $_g_worker_busy = 0;
+        if ($_g_exit_requested == 1) { ::worker_exit(); }
     }
 
     # Worker exits after max requests (will be respawned by master)
@@ -9040,6 +9055,8 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
         }
     }
 
+    # tasks interleave, so SIGTERM always defers to the watchdog below
+    $_g_worker_busy = 1;
     my int $max_requests = $server_ref->{"max_requests"};
     my int $acceptors = $server_ref->{"loop_acceptors"};
     if ($acceptors < 1) { $acceptors = 1; }
@@ -9054,8 +9071,8 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
     $loop->spawn(fn () {
         while (1) {
             Async::Task::sleep(1000);
-            if (core::getppid() != $parent_pid) {
-                exit(0);
+            if (core::getppid() != $parent_pid || $_g_exit_requested == 1) {
+                ::worker_exit();
             }
             if ($state->{"draining"} == 1) {
                 last;
@@ -9166,7 +9183,7 @@ func Cannoli_Server_spawn_workers(scalar $server_ref) void {
             # Initialize per-worker stats
             ::init_worker_stats();
             ::worker_loop($server_ref);
-            exit(0);
+            ::worker_exit();
         } elsif ($pid > 0) {
             # Parent - track child PID
             push(@{$pids}, $pid);
@@ -9206,6 +9223,19 @@ func Cannoli_Server_record_request(int $elapsed_ms) void {
 # Worker signal handler for SIGTERM - exit cleanly
 func Cannoli_Server_worker_handle_term(int $sig) void {
     defined($sig);
+    # mid-request: finish the response first (the loop checks the flag)
+    if ($_g_worker_busy == 1) { $_g_exit_requested = 1; return; }
+    ::worker_exit();
+}
+
+# Run the libraries' cannoli_worker_exit hooks (once), then exit.
+func Cannoli_Server_worker_exit() void {
+    if ($_g_exiting == 0) {
+        $_g_exiting = 1;
+        foreach my scalar $fn (@{$_g_exit_funcs}) {
+            try { core::dl_call_void_sv($fn, []); } catch ($e) { Cannoli::Log::error("cannoli_worker_exit: " . $e); }
+        }
+    }
     exit(0);
 }
 
@@ -9369,7 +9399,7 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
                 core::signal("TERM", \&Cannoli_Server_worker_handle_term);
                 core::signal("INT", "IGNORE");
                 ::worker_loop($server_ref);
-                exit(0);
+                ::worker_exit();
             } elsif ($new_pid > 0) {
                 # Parent
                 push(@{$server_ref->{"worker_pids"}}, $new_pid);
