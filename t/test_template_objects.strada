@@ -1,0 +1,18 @@
+# t/test_template_objects.strada - templates read fields of blessed objects
+# (ref() is the class name for those; the engine checks reftype()).
+
+func make_obj(str $name, str $email) scalar {
+    my hash %h = ("name" => $name, "email" => $email, "tags" => [{"t" => "a"}, {"t" => "b"}]);
+    return bless(\%h, "Test::Person");
+}
+
+func main() int {
+    my int $fail = 0;
+    my scalar $vars = {"me" => make_obj("Wile", "w@acme.test"),
+                       "people" => [make_obj("Road", "r@acme.test"), make_obj("Coyote", "c@acme.test")]};
+    my str $out = Cannoli::Template::render_string("{{me.name}}|{{#each people}}[{{name}} {{email}}]{{/each}}|{{#each me.tags}}{{t}}{{/each}}|{{#if me}}yes{{/if}}", $vars);
+    my str $want = "Wile|[Road r@acme.test][Coyote c@acme.test]|ab|yes";
+    if ($out ne $want) { say("FAIL got [" . $out . "] want [" . $want . "]"); $fail = 1; }
+    if ($fail == 0) { say("template object tests passed"); }
+    return $fail;
+}
