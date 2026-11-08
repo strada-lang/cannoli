@@ -1327,77 +1327,63 @@ func Cannoli_handle_preflight(scalar $self, str $origin) int {
 # ===== Flash message methods =====
 
 # Set a flash message (stored in session, cleared after read)
+# Flash messages live in the session as plain strings under "_flash.<key>".
+# (They used to be one hash under "_flash", but file sessions store strings,
+# so the hash was saved as "HASH(0x...)" and every flash was lost on the
+# redirect it was meant to survive.)
 func Cannoli_flash(scalar $self, str $key, str $message) scalar {
     my scalar $session = $self->session();
-    my scalar $flash = Cannoli::Session::get($session, "_flash");
-
-    if (!defined($flash)) {
-        $flash = {};
-    }
-
-    $flash->{$key} = $message;
-    Cannoli::Session::set($session, "_flash", $flash);
-
+    Cannoli::Session::set($session, "_flash." . $key, $message);
     return $self;
 }
 
 # Get and clear a flash message
 func Cannoli_get_flash(scalar $self, str $key) str {
     my scalar $session = $self->session();
-    my scalar $flash = Cannoli::Session::get($session, "_flash");
-
-    if (!defined($flash)) {
+    my scalar $data = $session->{"data"};
+    my str $k = "_flash." . $key;
+    if (!exists(%{$data}, $k)) {
         return "";
     }
-
-    if (!exists(%{$flash}, $key)) {
+    my scalar $message = $data->{$k};
+    delete($data->{$k});
+    if (!defined($message)) {
         return "";
     }
-
-    my str $message = $flash->{$key};
-
-    # Remove the message after reading - create new hash without this key
-    my hash %new_flash = ();
-    my array @flash_keys = keys(%{$flash});
-    my int $i = 0;
-    while ($i < scalar(@flash_keys)) {
-        my str $k = $flash_keys[$i];
-        if ($k ne $key) {
-            $new_flash{$k} = $flash->{$k};
-        }
-        $i = $i + 1;
-    }
-    Cannoli::Session::set($session, "_flash", \%new_flash);
-
-    return $message;
+    return "" . $message;
 }
 
 # Check if a flash message exists
 func Cannoli_has_flash(scalar $self, str $key) int {
     my scalar $session = $self->session();
-    my scalar $flash = Cannoli::Session::get($session, "_flash");
-
-    if (!defined($flash)) {
+    my scalar $data = $session->{"data"};
+    my str $k = "_flash." . $key;
+    if (!exists(%{$data}, $k)) {
         return 0;
     }
-
-    return exists(%{$flash}, $key);
+    my scalar $v = $data->{$k};
+    if (!defined($v) || length("" . $v) == 0) {
+        return 0;
+    }
+    return 1;
 }
 
-# Get all flash messages and clear them
+# Get all flash messages (hash of key => message) and clear them
 func Cannoli_get_all_flash(scalar $self) scalar {
     my scalar $session = $self->session();
-    my scalar $flash = Cannoli::Session::get($session, "_flash");
-
-    if (!defined($flash)) {
-        my hash %empty = ();
-        return \%empty;
+    my scalar $data = $session->{"data"};
+    my hash %out = ();
+    my array @keys = keys(%{$data});
+    foreach my str $k (@keys) {
+        if (index($k, "_flash.") == 0) {
+            my scalar $v = $data->{$k};
+            if (defined($v) && length("" . $v) > 0) {
+                $out{substr($k, 7, length($k) - 7)} = "" . $v;
+            }
+            delete($data->{$k});
+        }
     }
-
-    # Clear all flash messages
-    Cannoli::Session::set($session, "_flash", {});
-
-    return $flash;
+    return \%out;
 }
 
 # Common flash types
