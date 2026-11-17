@@ -1,0 +1,407 @@
+/* Comprehensive regression tests for critical Cannoli bug fixes. */
+
+func test_websocket_binary_frames() int {
+    say("Testing WebSocket raw binary framing and UTF-8 unmasking...");
+    my scalar $pipe = core::pipe();
+    my int $rfd = $pipe->[0];
+    my int $wfd = $pipe->[1];
+
+    my hash %ws_out = ("_ssl" => 0, "_fd" => $wfd, "_buffer" => "");
+    Cannoli::WebSocket::send_text(\%ws_out, "Hi");
+    core::close_fd($wfd);
+
+    my str $wire = core::read_all_fd($rfd);
+    core::close_fd($rfd);
+
+    if (core::byte_length($wire) != 4 || core::get_byte($wire, 0) != 129 || core::get_byte($wire, 1) != 2) {
+        say("  FAIL: WebSocket text frame header was corrupted (len=" . core::byte_length($wire) . ", b0=" . core::get_byte($wire, 0) . ")");
+        return 1;
+    }
+
+    # Simulate a masked client frame containing UTF-8 "é" (0xC3 0xA9) with mask 0x11,0x22,0x33,0x44
+    my str $masked_frame = core::byte(129) . core::byte(130)
+        . core::byte(17) . core::byte(34) . core::byte(51) . core::byte(68)
+        . core::byte(210) . core::byte(139);
+    my hash %ws_in = ("_ssl" => 0, "_buffer" => $masked_frame);
+    my scalar $frame = Cannoli::WebSocket::recv_frame(\%ws_in);
+    if (!defined($frame) || core::byte_length($frame->{"payload"}) != 2
+        || core::get_byte($frame->{"payload"}, 0) != 195
+        || core::get_byte($frame->{"payload"}, 1) != 169) {
+        say("  FAIL: WebSocket masked UTF-8 payload was corrupted during unmasking");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_fastcgi_binary_and_headers() int {
+    say("Testing FastCGI binary headers (>=128 bytes) and CGI header normalization...");
+
+    my str $hdr = Cannoli::FastCGI::make_header(6, 300, 200, 4);
+    if (core::byte_length($hdr) != 8) {
+        say("  FAIL: FastCGI header must be 8 bytes, got " . core::byte_length($hdr));
+        return 1;
+    }
+    my hash %parsed = Cannoli::FastCGI::parse_header($hdr);
+    if ($parsed{"valid"} != 1 || $parsed{"request_id"} != 300 || $parsed{"content_length"} != 200 || $parsed{"padding_length"} != 4) {
+        say("  FAIL: FastCGI header round-trip mismatch");
+        return 1;
+    }
+
+    my hash %fcgi_params = (
+        "REQUEST_METHOD" => "GET",
+        "DOCUMENT_URI" => "/test",
+        "HTTP_USER_AGENT" => "FastCGIClient/1.0",
+        "HTTP_X_CUSTOM_TOKEN" => "secret",
+        "CONTENT_TYPE" => "application/json"
+    );
+    my hash %req = Cannoli::FastCGI::params_to_request(%fcgi_params);
+    if (Cannoli::Request::get_header(%req, "User-Agent") ne "FastCGIClient/1.0"
+        || Cannoli::Request::get_header(%req, "X-Custom-Token") ne "secret"
+        || Cannoli::Request::get_header(%req, "Content-Type") ne "application/json") {
+        say("  FAIL: FastCGI headers were not normalized for Request::get_header");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_json_parser_and_encoder() int {
+    say("Testing JSON parser DoS resistance, scientific notation, escapes, and encoder...");
+
+    # Previously caused infinite loop / OOM crash!
+    if (defined(Cannoli::Request::json_parse("[invalid]"))
+        || defined(Cannoli::Request::json_parse("{\"a\": }"))
+        || defined(Cannoli::Request::json_parse("[1 2]"))
+        || defined(Cannoli::Request::json_parse("\"unterminated"))
+        || defined(Cannoli::Request::json_parse("{\"a\": 1"))
+        || defined(Cannoli::Request::json_parse("123 trailing"))) {
+        say("  FAIL: malformed JSON was accepted instead of returning undef");
+        return 1;
+    }
+
+    my scalar $parsed = Cannoli::Request::json_parse("{\"exp\": 1e3, \"str\": \"caf\\u00e9\", \"ok\": true, \"nil\": null}");
+    if (!defined($parsed) || $parsed->{"exp"} != 1000 || $parsed->{"ok"} != 1) {
+        say("  FAIL: valid JSON with scientific notation failed to parse");
+        return 1;
+    }
+    if (core::byte_length($parsed->{"str"}) != 5 || core::get_byte($parsed->{"str"}, 3) != 195 || core::get_byte($parsed->{"str"}, 4) != 169) {
+        say("  FAIL: JSON \\u00e9 did not UTF-8 encode to 0xC3 0xA9");
+        return 1;
+    }
+
+    # Leading-zero strings must stay quoted in JSON
+    my str $encoded = Cannoli::to_json({"zip" => "01234", "count" => 42});
+    if (index($encoded, "\"01234\"") < 0 || index($encoded, "42") < 0) {
+        say("  FAIL: Cannoli::to_json mishandled leading-zero string or int: " . $encoded);
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_utf8_url_and_multipart() int {
+    say("Testing UTF-8 URL decoding, static URL encoding, and multipart regex boundaries...");
+
+    my str $dec = Cannoli::Request::url_decode("caf%C3%A9");
+    if (core::byte_length($dec) != 5 || core::get_byte($dec, 3) != 195 || core::get_byte($dec, 4) != 169) {
+        say("  FAIL: Request::url_decode corrupted UTF-8 bytes");
+        return 1;
+    }
+    if (Cannoli::url_decode("bad%ZZpct") ne "bad%ZZpct") {
+        say("  FAIL: Cannoli::url_decode did not preserve invalid %ZZ");
+        return 1;
+    }
+    my str $static_dec = Cannoli::Static::percent_decode_path("/caf%C3%A9.txt");
+    if ($static_dec ne "/" . $dec . ".txt") {
+        say("  FAIL: Static::percent_decode_path corrupted UTF-8 path");
+        return 1;
+    }
+    # Test url_encode_component on a UTF-8-flagged string (chr(233) = é)
+    my str $utf8_name = "caf" . chr(233) . ".txt";
+    if (Cannoli::Static::url_encode_component($utf8_name) ne "caf%C3%A9.txt") {
+        say("  FAIL: Static::url_encode_component failed on UTF-8 string");
+        return 1;
+    }
+
+    # Multipart boundary containing regex metacharacters '+', '.', '(', ')'
+    my str $boundary = "----Form+Boundary.123(abc)";
+    my str $bin_data = "A" . core::byte(0) . core::byte(255);
+    my str $mp_body = "--" . $boundary . "\r\n"
+        . "Content-Disposition: form-data; name=\"field\"\r\n\r\nhello\r\n"
+        . "--" . $boundary . "\r\n"
+        . "Content-Disposition: form-data; name=\"upload\"; filename=\"bin.dat\"\r\n"
+        . "Content-Type: application/octet-stream\r\n\r\n" . $bin_data . "\r\n"
+        . "--" . $boundary . "--\r\n";
+    my hash %mp = Cannoli::Request::parse_multipart($mp_body, $boundary);
+    if ($mp{"params"}->{"field"} ne "hello") {
+        say("  FAIL: multipart form field failed with regex-char boundary");
+        return 1;
+    }
+    my scalar $f = $mp{"files"}->{"upload"};
+    if (!defined($f) || $f->{"size"} != 3 || core::get_byte($f->{"content"}, 1) != 0 || core::get_byte($f->{"content"}, 2) != 255) {
+        say("  FAIL: multipart binary upload corrupted");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_response_framing_and_headers() int {
+    say("Testing UTF-8 byte Content-Length, 204 framing, header dedup, and status texts...");
+
+    # chr(233) sets SVf_UTF8: 1 character, 2 UTF-8 bytes
+    my str $utf8_body = "caf" . chr(233);
+    my hash %res = Cannoli::Response::text(200, $utf8_body);
+    my str $wire = Cannoli::Response::build(%res);
+    if (index($wire, "Content-Length: 5\r\n") < 0) {
+        say("  FAIL: Content-Length used character count instead of UTF-8 byte length: " . $wire);
+        return 1;
+    }
+
+    # Lowercase header override should replace default Content-Type rather than duplicating it
+    my hash %res2 = Cannoli::Response::new();
+    Cannoli::Response::header(%res2, "content-type", "application/json");
+    my str $wire2 = Cannoli::Response::build(%res2);
+    if (index($wire2, "Content-Type:") >= 0 || index($wire2, "content-type: application/json\r\n") < 0) {
+        say("  FAIL: case-insensitive header deduplication failed");
+        return 1;
+    }
+
+    # 204 No Content must omit body and Content-Length
+    my hash %res204 = Cannoli::Response::text(204, "ignored");
+    my str $wire204 = Cannoli::Response::build(%res204);
+    if (index($wire204, "Content-Length") >= 0 || index($wire204, "ignored") >= 0) {
+        say("  FAIL: 204 response should not include Content-Length or body");
+        return 1;
+    }
+
+    if (Cannoli::Response::status_message(206) ne "Partial Content"
+        || Cannoli::Response::status_message(303) ne "See Other"
+        || Cannoli::Response::status_message(416) ne "Range Not Satisfiable"
+        || Cannoli::Response::status_message(429) ne "Too Many Requests") {
+        say("  FAIL: missing standard HTTP status reason phrases");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_session_and_cookies() int {
+    say("Testing session delete/has, key/CR roundtrip, and cookie destroy...");
+
+    my scalar $sess = Cannoli::Session::new();
+    my str $sid = Cannoli::Session::id($sess);
+    Cannoli::Session::set($sess, "keep=key", "line1\r\nline2=ok");
+    Cannoli::Session::set($sess, "temp", "val");
+    Cannoli::Session::delete($sess, "temp");
+
+    if (Cannoli::Session::has($sess, "temp") != 0) {
+        say("  FAIL: Session::has returned 1 after Session::delete");
+        Cannoli::Session::destroy($sid);
+        return 1;
+    }
+
+    Cannoli::Session::save($sess);
+    my scalar $loaded = Cannoli::Session::load($sid);
+    if (!defined($loaded) || Cannoli::Session::has($loaded, "temp") != 0
+        || Cannoli::Session::get($loaded, "keep=key") ne "line1\r\nline2=ok") {
+        say("  FAIL: Session save/load round-trip failed");
+        Cannoli::Session::destroy($sid);
+        return 1;
+    }
+
+    # Test Cannoli object session loading from compact Cookie header (no space after ';') and session_destroy Max-Age=0
+    my hash %req = Cannoli::Request::parse("GET /logout HTTP/1.1\r\nCookie: foo=bar;cannoli_session=" . $sid . "\r\n\r\n");
+    my scalar $c = Cannoli::new(%req);
+    $c->session_destroy();
+    my hash %out_res = $c->build_response();
+    my str $set_cookie = Cannoli::Response::get_header(%out_res, "Set-Cookie");
+    if (index($set_cookie, "Max-Age=0") < 0) {
+        say("  FAIL: session_destroy did not emit Max-Age=0: " . $set_cookie);
+        return 1;
+    }
+    if (defined(Cannoli::Session::load($sid))) {
+        say("  FAIL: session_destroy did not remove session file");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_router_group_and_after_middleware() int {
+    say("Testing Router::group (Cannoli + named params) and use_after ordering...");
+
+    my scalar $router = Cannoli::Router::new();
+    Cannoli::Router::use($router, func (scalar $c, scalar $next_fn) {
+        $c->set_header("X-Before", "1");
+        return $next_fn->($c);
+    });
+    Cannoli::Router::use_after($router, func (scalar $c) {
+        $c->set_header("X-After", "1");
+    });
+
+    Cannoli::Router::group($router, "/api", func (scalar $sub) {
+        Cannoli::Router::get_c($sub, "/items/:id", func (scalar $c) {
+            $c->render_text("item=" . $c->param("id"));
+        });
+    });
+
+    my hash %req = Cannoli::Request::parse("GET /api/items/42 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    my hash %res = Cannoli::Router::dispatch($router, %req);
+    if ($res{"status"} != 200 || $res{"body"} ne "item=42") {
+        say("  FAIL: Router::group dropped Cannoli handler or named param (:id)");
+        return 1;
+    }
+    if (Cannoli::Response::get_header(%res, "X-Before") ne "1"
+        || Cannoli::Response::get_header(%res, "X-After") ne "1") {
+        say("  FAIL: use_after headers were lost when before-middleware was active");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_static_alias_and_method() int {
+    say("Testing Static alias segment boundaries and 405 Method Not Allowed...");
+
+    my str $root = "/tmp/cannoli_fix_docroot";
+    my str $img = "/tmp/cannoli_fix_images";
+    core::mkdir($root, 493);
+    core::mkdir($root . "/img_other", 493);
+    core::mkdir($img, 493);
+    core::spew($img . "/logo.txt", "IMG");
+    core::spew($root . "/img_other/file.txt", "OTHER");
+
+    my scalar $srv = Cannoli::Static::new();
+    $srv->{"document_root"} = $root;
+    $srv->{"aliases"}->{"/img"} = $img;
+
+    my hash %r1 = Cannoli::Static::handle_request($srv, "GET", "/img/logo.txt", {});
+    my hash %r2 = Cannoli::Static::handle_request($srv, "GET", "/img_other/file.txt", {});
+    my hash %r3 = Cannoli::Static::handle_request($srv, "POST", "/img/logo.txt", {});
+
+    if ($r1{"status"} != 200 || $r1{"body"} ne "IMG") {
+        say("  FAIL: /img/logo.txt alias failed");
+        return 1;
+    }
+    if ($r2{"status"} != 200 || $r2{"body"} ne "OTHER") {
+        say("  FAIL: /img_other/file.txt wrongly matched /img alias (status=" . $r2{"status"} . ")");
+        return 1;
+    }
+    if ($r3{"status"} != 405 || Cannoli::Response::get_header(%r3, "Allow") ne "GET, HEAD") {
+        say("  FAIL: POST to static server did not return 405 with Allow: GET, HEAD");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_validation_and_templates() int {
+    say("Testing Validation float min/max + declarative 'in:' and Template safety...");
+
+    if (Cannoli::Validation::max("10.5", 10) != 0 || Cannoli::Validation::min("-0.5", 0) != 0) {
+        say("  FAIL: Validation min/max truncated decimal values to integers");
+        return 1;
+    }
+    if (Cannoli::Validation::email("a@b@c.com") != 0 || Cannoli::Validation::email("a b@c.com") != 0) {
+        say("  FAIL: Validation::email accepted malformed addresses");
+        return 1;
+    }
+
+    my scalar $v = Cannoli::Validation::from_rules({"role" => "admin"}, {"role" => ["required", "in:admin,user"]});
+    if (Cannoli::Validation::validate($v) != 1) {
+        say("  FAIL: declarative in:admin,user rule failed");
+        return 1;
+    }
+
+    # Template tag boundary: {{#iffy}} is not {{#if ...}}
+    my str $tpl = "{{#if ok}}YES{{/if}}";
+    if (Cannoli::Template::render_string($tpl, {"ok" => 1}) ne "YES") {
+        say("  FAIL: basic #if rendering failed");
+        return 1;
+    }
+
+    my str $tdir = "/tmp/cannoli_tpl_test";
+    core::mkdir($tdir, 493);
+    core::spew($tdir . "/page.html", "<p>{{title}}</p>");
+    core::spew($tdir . "/layout.html", "<div>{{content}}</div>");
+    Cannoli::Template::init($tdir);
+    if (Cannoli::Template::load("../etc/passwd") ne "") {
+        say("  FAIL: Template::load allowed path traversal");
+        return 1;
+    }
+    my scalar $vars = {"title" => "Hi"};
+    my str $rendered = Cannoli::Template::render_with_layout("page.html", "layout.html", $vars);
+    if ($rendered ne "<div><p>Hi</p></div>" || exists(%{$vars}, "content")) {
+        say("  FAIL: render_with_layout failed or mutated caller vars");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_server_parsing_hardening() int {
+    say("Testing request-line validation, 64-bit overflow guards, and IPv4-mapped admin IPs...");
+
+    if (Cannoli::Server::valid_request_line("GARBAGE") != 0
+        || Cannoli::Server::valid_request_line("GET / extra HTTP/1.1") != 0
+        || Cannoli::Server::valid_request_line("GET / HTTP/2.0") != 0
+        || Cannoli::Server::valid_request_line("GET / HTTP/1.1") != 1) {
+        say("  FAIL: valid_request_line checks were wrong");
+        return 1;
+    }
+
+    # 2^64 chunk size ("10000000000000000") must be rejected as too_large, never wrap to 0!
+    my scalar $overflow_chunk = Cannoli::Server::decode_chunked("10000000000000000\r\n\r\n", 1048576, 8192);
+    if ($overflow_chunk->{"status"} ne "too_large") {
+        say("  FAIL: 64-bit chunk size overflow wrapped instead of returning too_large: " . $overflow_chunk->{"status"});
+        return 1;
+    }
+
+    # Huge Content-Length > INT64_MAX must be rejected (-1)
+    if (Cannoli::Server::parse_content_length("POST / HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n") != -1) {
+        say("  FAIL: overflowing Content-Length was not rejected");
+        return 1;
+    }
+
+    if (Cannoli::Server::is_admin_allowed("::ffff:127.0.0.1", "127.0.0.1, ::1") != 1
+        || Cannoli::Server::is_admin_allowed("::ffff:10.0.0.5", "127.0.0.1, ::1") != 0) {
+        say("  FAIL: IPv4-mapped IPv6 admin IP matching failed");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func main() int {
+    say("=== Cannoli Bugfix Regression Suite ===");
+    my int $failed = 0;
+    $failed = $failed + test_websocket_binary_frames();
+    $failed = $failed + test_fastcgi_binary_and_headers();
+    $failed = $failed + test_json_parser_and_encoder();
+    $failed = $failed + test_utf8_url_and_multipart();
+    $failed = $failed + test_response_framing_and_headers();
+    $failed = $failed + test_session_and_cookies();
+    $failed = $failed + test_router_group_and_after_middleware();
+    $failed = $failed + test_static_alias_and_method();
+    $failed = $failed + test_validation_and_templates();
+    $failed = $failed + test_server_parsing_hardening();
+
+    if ($failed == 0) {
+        say("All bugfix regression tests passed!");
+        return 0;
+    }
+    say($failed . " bugfix regression test(s) failed");
+    return 1;
+}

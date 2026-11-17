@@ -108,6 +108,8 @@ $obj->method();
 - `keys(%hash)` returns array of keys
 - `bless(\%hash, "ClassName")` creates blessed object
 - `sys::` namespace for system calls (open, close, fork, etc.)
+- `split()` takes a **regex** (Perl semantics): `split(".", $ip)` returns nothing; use `split("\\.", $ip)`
+- `index()` counts characters on UTF-8 strings but bytes on byte data (socket input), so request framing on received data is byte-accurate
 - `math::` namespace for math functions (sqrt, sin, rand, etc.)
 
 ---
@@ -230,10 +232,21 @@ cannoli_obj.strada (OOP wrapper)
 | `Server_handle_request` | `(scalar $server, int $client_fd, hash %req) void` | Process one request |
 | `Server_spawn_worker` | `(scalar $server) int` | Fork a worker process |
 
+**Connection layer:** plain and TLS connections share one path. A conn hash
+(`plain_conn` / `tls_conn` / `accept_tls`) is read with `conn_recv` and written
+with `conn_send`, both deadline-bounded (`wait_fd` parks in loop mode, polls in
+classic mode). `read_request` frames a request (strict `parse_head`,
+incremental `decode_chunked_step`, 100-continue); `handle_connection` runs
+`dispatch` inside try/catch (a throw = 500, not a dead worker) and
+`finish_headers` adds Date / `[headers]` / X-Request-Id. Errors before a full
+request is read go through `send_read_error` + `conn_linger_close`.
+
 **Signal handling:**
-- `SIGTERM/SIGINT`: Graceful shutdown
-- `SIGHUP`: Graceful reload (restart workers)
-- `SIGCHLD`: Worker died, respawn
+- `SIGTERM/SIGINT`: Graceful shutdown (workers SIGKILLed after `shutdown_timeout`)
+- `SIGHUP`: Graceful reload (new worker generation; old one SIGKILLed if it outstays `shutdown_timeout`)
+- Dead workers are respawned; ones that crash within 2s of starting back off exponentially
+- Loop workers detect SIGTERM through a raw C handler flag (`install_raw_term`): Strada
+  signal handlers are not dispatched while an `Async::Loop` runs tasks
 
 ---
 
@@ -489,6 +502,9 @@ level = info
 
 **Default config keys:**
 - `server.host`, `server.port`, `server.workers`, `server.max_requests`, `server.timeout`
+- `server.header_timeout`, `server.body_min_rate`, `server.write_timeout`, `server.keep_alive_timeout`, `server.shutdown_timeout`
+- `server.pid_file`, `server.user`, `server.group`, `server.trusted_proxies`, `server.request_id`, `server.tokens`
+- `[headers]` section: default response headers (`headers.X-Content-Type-Options = nosniff`)
 - `ssl.enabled`, `ssl.port`, `ssl.cert`, `ssl.key`
 - `fastcgi.enabled`, `fastcgi.socket`
 - `log.level`, `log.error_file`, `log.access_file`
@@ -673,8 +689,11 @@ make
 # Point Cannoli at a specific SSL library (skips the install/dev path search)
 STRADA_SSL_LIB=/path/to/libstrada_ssl.so ./cannoli --ssl --ssl-cert cert.pem --ssl-key key.pem
 
-# FastCGI mode
-./cannoli --fastcgi --socket /tmp/cannoli.sock
+# FastCGI mode (TCP host:port; loopback by default)
+./cannoli --fastcgi --socket 127.0.0.1:9000
+
+# Production: pid file + privilege drop after binding
+sudo ./cannoli -c /etc/cannoli.conf --pid-file /run/cannoli.pid --user www-data
 ```
 
 **SSL library resolution.** When `--ssl` is set, the SSL library is `dlopen`'d
@@ -701,6 +720,9 @@ Test files:
 - `test_config.strada` - Configuration parsing
 - `test_router.strada` - URL routing
 - `test_request.strada` - Request parsing
+- `test_hardening.strada` - Framing/strictness, chunked decoding, cookies, templates, middleware, ranges
+- `test_hardening.sh` / `test_hardening_loop.sh` - Live timeouts, smuggling inputs, 100-continue, pid file (classic / loop workers)
+- `test_tls.sh` - classic+loop x HTTP+HTTPS smoke test (skips without openssl / SSL lib)
 
 ---
 

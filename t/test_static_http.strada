@@ -1,0 +1,69 @@
+/* Static HTTP validators, HEAD, and range response regressions. */
+
+func make_server(str $root) scalar {
+    my scalar $srv = Cannoli::Static::new();
+    $srv->{"document_root"} = $root;
+    return $srv;
+}
+
+func test_head(scalar $srv) int {
+    my hash %res = Cannoli::Static::handle_request($srv, "HEAD", "/sample.txt", {});
+    if ($res{"status"} != 200 || $res{"body"} ne "" || $res{"headers"}{"Content-Length"} ne "10") {
+        say("FAIL: HEAD did not preserve the representation length without a body");
+        return 1;
+    }
+    return 0;
+}
+
+func test_conditional(scalar $srv) int {
+    my hash %first = Cannoli::Static::handle_request($srv, "GET", "/sample.txt", {});
+    my str $etag = $first{"headers"}{"ETag"};
+    my hash %headers = {"if-none-match" => $etag};
+    my hash %res = Cannoli::Static::handle_request($srv, "GET", "/sample.txt", \%headers);
+    if ($res{"status"} != 304 || $res{"body"} ne "") {
+        say("FAIL: matching If-None-Match did not return 304");
+        return 1;
+    }
+    return 0;
+}
+
+func test_ranges(scalar $srv) int {
+    my hash %headers = {"range" => "bytes=2-5"};
+    my hash %res = Cannoli::Static::handle_request($srv, "GET", "/sample.txt", \%headers);
+    if ($res{"status"} != 206 || $res{"body"} ne "2345"
+        || $res{"headers"}{"Content-Range"} ne "bytes 2-5/10"
+        || $res{"headers"}{"Content-Length"} ne "4") {
+        say("FAIL: explicit byte range was incorrect");
+        return 1;
+    }
+
+    my hash %suffix_headers = {"range" => "bytes=-3"};
+    my hash %suffix = Cannoli::Static::handle_request($srv, "GET", "/sample.txt", \%suffix_headers);
+    if ($suffix{"status"} != 206 || $suffix{"body"} ne "789") {
+        say("FAIL: suffix byte range was incorrect");
+        return 1;
+    }
+
+    my hash %bad_headers = {"range" => "bytes=99-100"};
+    my hash %bad = Cannoli::Static::handle_request($srv, "GET", "/sample.txt", \%bad_headers);
+    if ($bad{"status"} != 416 || $bad{"headers"}{"Content-Range"} ne "bytes */10") {
+        say("FAIL: unsatisfiable byte range was not rejected");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my str $root = "/tmp/cannoli_static_http";
+    core::mkdir($root, 493);
+    core::spew($root . "/sample.txt", "0123456789");
+    my scalar $srv = make_server($root);
+
+    my int $failed = 0;
+    $failed = $failed + test_head($srv);
+    $failed = $failed + test_conditional($srv);
+    $failed = $failed + test_ranges($srv);
+    if ($failed == 0) { say("All static HTTP tests passed!"); return 0; }
+    say($failed . " static HTTP test(s) failed");
+    return 1;
+}

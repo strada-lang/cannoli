@@ -46,7 +46,7 @@ my str $g_log_format = "%m %p %s %b %Tms";  # Default console format
 func Cannoli_Log_init(hash %config) void {
     $g_error_log_file = Cannoli::Config::get_str(%config, "log.error_file", "");
     $g_access_log_file = Cannoli::Config::get_str(%config, "log.access_file", "");
-    my str $level_str = Cannoli::Config::get_str(%config, "log.level", "info");
+    my str $level_str = lc(trim(Cannoli::Config::get_str(%config, "log.level", "info")));
 
     # Set log level
     if ($level_str eq "error") {
@@ -93,27 +93,59 @@ func Cannoli_Log_init(hash %config) void {
 }
 
 # Close log files (no-op, we open/close per write for safety in forked processes)
+# Configured log file paths (for handing them to server.user on startup)
+func Cannoli_Log_files() array {
+    my array @f = ();
+    if (length($g_error_log_file) > 0) { push(@f, $g_error_log_file); }
+    if (length($g_access_log_file) > 0) { push(@f, $g_access_log_file); }
+    return @f;
+}
+
 func Cannoli_Log_close() void {
     # Nothing to do - files are opened/closed per write
 }
 
-# Get current timestamp in log format
+# Get current timestamp for the error log: [YYYY-MM-DD HH:MM:SS +zone]
 func Cannoli_Log_timestamp() str {
-    my int $now = core::time();
-    # Format: [DD/Mon/YYYY:HH:MM:SS +0000]
-    # For now, use Unix timestamp as we don't have strftime
-    return "[" . $now . "]";
+    return core::strftime("[%Y-%m-%d %H:%M:%S %z]", core::localtime(core::time()));
 }
 
-# Get timestamp for access log
+# Get timestamp for access log (Common Log Format): [DD/Mon/YYYY:HH:MM:SS +zone]
 func Cannoli_Log_access_timestamp() str {
-    my int $now = core::time();
-    return "[" . $now . "]";
+    return core::strftime("[%d/%b/%Y:%H:%M:%S %z]", core::localtime(core::time()));
+}
+
+# Make a client-supplied value safe for a log line: '"' and '\' are
+# backslash-escaped and control bytes become \xHH, so a request cannot end
+# the field early or forge extra log lines.
+func Cannoli_Log_escape(str $s) str {
+    if ($s !~ /[\x00-\x1f\x7f"\\]/) { return $s; }
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($s);
+    while ($i < $n) {
+        my str $ch = substr($s, $i, 1);
+        my int $c = ord($ch);
+        if ($ch eq "\"" || $ch eq "\\") {
+            $out = $out . "\\" . $ch;
+        } elsif ($c < 32 || $c == 127) {
+            $out = $out . sprintf("\\x%02x", $c);
+        } else {
+            $out = $out . $ch;
+        }
+        $i = $i + 1;
+    }
+    return $out;
 }
 
 # Write to error log
 func Cannoli_Log_write_error(str $level, str $message) void {
     my str $timestamp = ::timestamp();
+    # one entry per line, whatever the message contains
+    if (index($message, "\n") >= 0 || index($message, "\r") >= 0) {
+        $message = join("\\n", split("\n", $message));
+        $message = join("\\r", split("\r", $message));
+    }
     my str $line = $timestamp . " [" . $level . "] " . $message . "\n";
 
     if (length($g_error_log_file) > 0) {
@@ -125,7 +157,9 @@ func Cannoli_Log_write_error(str $level, str $message) void {
     }
 
     if ($g_log_to_stderr == 1) {
-        print($line);
+        # stderr, unbuffered: stdout is block-buffered when redirected
+        # (systemd, a log file), which held errors back until exit.
+        say(STDERR, substr($line, 0, length($line) - 1));
     }
 }
 
@@ -228,7 +262,13 @@ func Cannoli_Log_format_line(str $format, str $remote_ip, str $method, str $path
 func Cannoli_Log_access(str $remote_ip, str $method, str $path, str $protocol, int $status, int $size, str $referer, str $user_agent, int $time_ms) void {
     my str $timestamp = ::access_timestamp();
 
-    # Escape or default values
+    # Escape client-controlled fields, then default empty ones
+    $remote_ip = ::escape($remote_ip);
+    $method = ::escape($method);
+    $path = ::escape($path);
+    $protocol = ::escape($protocol);
+    $referer = ::escape($referer);
+    $user_agent = ::escape($user_agent);
     if (length($referer) == 0) {
         $referer = "-";
     }
@@ -259,13 +299,19 @@ func Cannoli_Log_access(str $remote_ip, str $method, str $path, str $protocol, i
 
 # Convenience function for logging a request with timing
 func Cannoli_Log_request_timed(hash %req, hash %res, int $time_ms) void {
-    my str $remote_ip = "127.0.0.1";  # TODO: Get from socket
+    my str $remote_ip = "127.0.0.1";
+    if (exists(%req, "remote_addr") && defined($req{"remote_addr"}) && length($req{"remote_addr"}) > 0) {
+        $remote_ip = $req{"remote_addr"};
+    }
     my str $method = $req{"method"};
     my str $path = $req{"path"};
     my str $protocol = "HTTP/1.1";
+    if (exists(%req, "http_version") && defined($req{"http_version"}) && length($req{"http_version"}) > 0) {
+        $protocol = $req{"http_version"};
+    }
     my int $status = $res{"status"};
-    my str $body = $res{"body"};
-    my int $size = length($body);
+    my str $body = defined($res{"body"}) ? ("" . $res{"body"}) : "";
+    my int $size = core::byte_length($body);
     my str $referer = Cannoli::Request::get_header(%req, "Referer");
     my str $user_agent = Cannoli::Request::get_header(%req, "User-Agent");
 

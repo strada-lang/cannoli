@@ -1,0 +1,38 @@
+func check_decode(str $wire, str $status, str $body, int $consumed) int {
+    my scalar $got = Cannoli::Server::decode_chunked($wire, 1024, 1024);
+    if ($got->{"status"} ne $status) {
+        say("FAIL: expected status " . $status . ", got " . $got->{"status"});
+        return 1;
+    }
+    if ($status eq "ok" && ($got->{"body"} ne $body || $got->{"consumed"} != $consumed)) {
+        say("FAIL: decoded body or consumed length was wrong");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    my int $failed = 0;
+    my str $valid = "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\nNEXT";
+    $failed = $failed + check_decode($valid, "ok", "Wikipedia", length($valid) - 4);
+    my str $with_trailers = "A;name=value\r\n0123456789\r\n0\r\nX-Test: yes\r\n\r\n";
+    $failed = $failed + check_decode($with_trailers, "ok", "0123456789", length($with_trailers));
+    $failed = $failed + check_decode("4\r\nWiki\r\n", "need_more", "", 0);
+    $failed = $failed + check_decode("z\r\nnope\r\n", "bad", "", 0);
+
+    my scalar $large = Cannoli::Server::decode_chunked("1000\r\n", 10, 1024);
+    if ($large->{"status"} ne "too_large") { say("FAIL: oversized chunk was accepted"); $failed = $failed + 1; }
+
+    my str $both = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 4";
+    if (Cannoli::Server::parse_transfer_encoding($both) != 1 || Cannoli::Server::has_content_length($both) != 1) {
+        say("FAIL: TE/CL conflict was not detectable");
+        $failed = $failed + 1;
+    }
+    if (Cannoli::Server::parse_transfer_encoding("POST / HTTP/1.1\r\nTransfer-Encoding: gzip") != -1) {
+        say("FAIL: unsupported transfer coding was accepted");
+        $failed = $failed + 1;
+    }
+
+    if ($failed == 0) { say("All chunked request tests passed!"); return 0; }
+    return 1;
+}

@@ -81,7 +81,7 @@ func format_uptime(int $seconds) str {
 
 func http_get(str $host, int $port, str $path) str {
     # Connect and send HTTP request
-    my scalar $sock = sys::socket_client($host, $port);
+    my scalar $sock = core::socket_client($host, $port);
     if (!defined($sock)) {
         return "";
     }
@@ -92,20 +92,35 @@ func http_get(str $host, int $port, str $path) str {
     $request = $request . "Connection: close\r\n";
     $request = $request . "\r\n";
 
-    sys::socket_send($sock, $request);
+    core::socket_send($sock, $request);
 
     # Read response
     my str $response = "";
     while (1) {
-        my str $chunk = sys::socket_recv($sock, 4096);
+        my str $chunk = core::socket_recv($sock, 4096);
         if (length($chunk) == 0) {
             last;
         }
         $response = $response . $chunk;
     }
-    sys::socket_close($sock);
+    core::socket_close($sock);
 
     return $response;
+}
+
+func parse_http_status(str $response) str {
+    my int $eol = index($response, "\r\n");
+    my str $line = ($eol >= 0) ? substr($response, 0, $eol) : $response;
+    my int $space1 = index($line, " ");
+    if ($space1 < 0) {
+        return "";
+    }
+    my str $rest = substr($line, $space1 + 1, length($line) - $space1 - 1);
+    my int $space2 = index($rest, " ");
+    if ($space2 > 0) {
+        return substr($rest, 0, $space2);
+    }
+    return trim($rest);
 }
 
 func show_status(str $host, int $port, str $path) int {
@@ -116,15 +131,11 @@ func show_status(str $host, int $port, str $path) int {
         return 1;
     }
 
-    # Parse status line
-    my int $space1 = index($response, " ");
-    if ($space1 < 0) {
+    my str $status_code = parse_http_status($response);
+    if (length($status_code) == 0) {
         say("Error: Invalid HTTP response");
         return 1;
     }
-
-    my int $space2 = index(substr($response, $space1 + 1, length($response) - $space1 - 1), " ");
-    my str $status_code = substr($response, $space1 + 1, $space2);
 
     if ($status_code ne "200") {
         say("Error: Server returned HTTP " . $status_code);
@@ -180,15 +191,11 @@ func kill_worker(str $host, int $port, str $path) int {
         return 1;
     }
 
-    # Parse status line
-    my int $space1 = index($response, " ");
-    if ($space1 < 0) {
+    my str $status_code = parse_http_status($response);
+    if (length($status_code) == 0) {
         say("Error: Invalid HTTP response");
         return 1;
     }
-
-    my int $space2 = index(substr($response, $space1 + 1, length($response) - $space1 - 1), " ");
-    my str $status_code = substr($response, $space1 + 1, $space2);
 
     if ($status_code ne "200") {
         say("Error: Server returned HTTP " . $status_code);
@@ -232,7 +239,7 @@ func show_help() void {
 }
 
 func main() int {
-    my array @args = sys::argv();
+    my array @args = core::argv();
     my int $argc = scalar(@args);
 
     # Parse arguments
@@ -256,17 +263,29 @@ func main() int {
         return 0;
     }
 
-    # Parse host[:port]
+    # Parse host[:port] (including [ipv6]:port and bare ipv6)
     if ($argc > $arg_idx) {
         my str $hostarg = $args[$arg_idx];
 
-        # Check for host:port format
-        my int $colon = index($hostarg, ":");
-        if ($colon > 0) {
-            $host = substr($hostarg, 0, $colon);
-            $port = substr($hostarg, $colon + 1, length($hostarg) - $colon - 1) + 0;
+        if (substr($hostarg, 0, 1) eq "[") {
+            my int $bracket = index($hostarg, "]");
+            if ($bracket > 1) {
+                $host = substr($hostarg, 1, $bracket - 1);
+                if ($bracket + 1 < length($hostarg) && substr($hostarg, $bracket + 1, 1) eq ":") {
+                    $port = substr($hostarg, $bracket + 2, length($hostarg) - $bracket - 2) + 0;
+                }
+            } else {
+                $host = $hostarg;
+            }
         } else {
-            $host = $hostarg;
+            my int $first_colon = index($hostarg, ":");
+            my int $last_colon = rindex($hostarg, ":");
+            if ($first_colon > 0 && $first_colon == $last_colon) {
+                $host = substr($hostarg, 0, $first_colon);
+                $port = substr($hostarg, $first_colon + 1, length($hostarg) - $first_colon - 1) + 0;
+            } else {
+                $host = $hostarg;
+            }
         }
         $arg_idx = $arg_idx + 1;
     }

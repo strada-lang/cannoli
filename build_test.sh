@@ -37,8 +37,10 @@ cat "$CANNOLI_DIR/src/config.strada" \
     "$TEST_FILE" \
     "$CANNOLI_DIR/lib/compress.strada" > "$COMBINED"
 
-# Compile using $STRADA (defaults to the installed strada)
+# Compile using $STRADA (defaults to the installed strada). Test programs are
+# built unoptimized for speed; override with STRADA_TEST_FLAGS.
 STRADA="${STRADA:-strada}"
-"$STRADA" "$COMBINED" -o "/tmp/$TEST_NAME" -l z
+STRADA_TEST_FLAGS="${STRADA_TEST_FLAGS--O0 --no-lto}"
+"$STRADA" $STRADA_TEST_FLAGS "$COMBINED" -o "/tmp/$TEST_NAME" -l z
 
 echo "Built /tmp/$TEST_NAME"

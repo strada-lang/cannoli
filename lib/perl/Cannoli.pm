@@ -486,19 +486,42 @@ sub set_cookie {
 }
 
 #
+# Internal: a header line is only serialized when the name is an HTTP token
+# and the value has no CR, LF or NUL. The bridge format separates headers
+# with "\n", so an unchecked value ("/next\nSet-Cookie: admin=1") would
+# inject extra response headers.
+#
+sub _header_line {
+    my ($name, $value) = @_;
+    return () unless defined $name && $name =~ /\A[!#\$%&'*+.^_`|~0-9A-Za-z-]+\z/;
+    $value = '' unless defined $value;
+    return () if $value =~ /[\r\n\0]/;
+    return ("$name:$value");
+}
+
+#
 # Internal: Build response string for bridge
 #
 sub _build_response {
     my ($self) = @_;
 
-    # Handle redirect
-    if (defined $self->{_res_redirect}) {
-        return "REDIRECT:" . $self->{_res_redirect};
-    }
-
-    # Build response with status and headers
     my $status = $self->{_res_status};
     my $body = $self->{_res_body};
+
+    # Handle redirect while preserving explicit 3xx status and custom headers
+    if (defined $self->{_res_redirect}) {
+        my $rd_status = ($status && $status >= 300 && $status < 400) ? $status : 302;
+        if ($rd_status == 302 && !keys %{$self->{_res_headers}} && $self->{_res_redirect} !~ /[\r\n\0]/) {
+            return "REDIRECT:" . $self->{_res_redirect};
+        }
+        my @rd_headers = _header_line('Location', $self->{_res_redirect});
+        for my $name (keys %{$self->{_res_headers}}) {
+            push @rd_headers, _header_line($name, $self->{_res_headers}{$name});
+        }
+        my $rd_hdr_str = join("\n", @rd_headers);
+        use bytes;
+        return "RESPONSE:$rd_status:" . length($rd_hdr_str) . ":$rd_hdr_str:";
+    }
 
     # If no body written, return empty for 404 handling
     return '' if $status == 200 && length($body) == 0;
@@ -506,15 +529,16 @@ sub _build_response {
     # Build header string
     my @header_parts;
     if (length($self->{_res_content_type})) {
-        push @header_parts, "Content-Type:" . $self->{_res_content_type};
+        push @header_parts, _header_line('Content-Type', $self->{_res_content_type});
     }
     for my $name (keys %{$self->{_res_headers}}) {
-        push @header_parts, "$name:" . $self->{_res_headers}{$name};
+        push @header_parts, _header_line($name, $self->{_res_headers}{$name});
     }
     my $headers_str = join("\n", @header_parts);
 
-    # Format: RESPONSE:status:headers_len:headers:body
+    # Format: RESPONSE:status:headers_len:headers:body (length in octets)
     if (@header_parts || $status != 200) {
+        use bytes;
         return "RESPONSE:$status:" . length($headers_str) . ":$headers_str:$body";
     }
 

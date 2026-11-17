@@ -43,10 +43,19 @@ func Cannoli_Config_defaults() hash {
     $config{"server.backlog"} = "128";
     $config{"server.max_body_size"} = "10485760";    # 10MB default
     $config{"server.max_header_size"} = "8192";      # 8KB default
+    $config{"server.header_timeout"} = "20";         # seconds for the whole header block / TLS handshake
+    $config{"server.body_min_rate"} = "1024";        # bytes/s floor for request bodies after server.timeout
+    $config{"server.shutdown_timeout"} = "10";       # seconds before stopping/retiring workers are killed
+    $config{"server.pid_file"} = "";
+    $config{"server.user"} = "";                     # drop to this user after binding (when started as root)
+    $config{"server.group"} = "";
+    $config{"server.trusted_proxies"} = "";          # e.g. 127.0.0.1, 10.0.0.0/8
+    $config{"server.request_id"} = "1";              # X-Request-Id on every response
+    $config{"server.tokens"} = "1";                  # Server: Cannoli/1.0 header
 
     # FastCGI settings
     $config{"fastcgi.enabled"} = "0";
-    $config{"fastcgi.socket"} = "/tmp/cannoli.sock";
+    $config{"fastcgi.socket"} = "127.0.0.1:9000";  # host:port (TCP; loopback by default)
 
     # Logging
     $config{"log.level"} = "info";
@@ -177,7 +186,8 @@ func Cannoli_Config_get_str(hash %config, str $key, str $fallback) str {
 # Get an integer configuration value with fallback
 func Cannoli_Config_get_int(hash %config, str $key, int $fallback) int {
     if (exists(%config, $key)) {
-        my str $val = $config{$key};
+        my str $val = ::trim("" . $config{$key});
+        if (length($val) == 0) { return $fallback; }
         return $val + 0;
     }
     return $fallback;
@@ -189,7 +199,7 @@ func Cannoli_Config_get_bool(hash %config, str $key, int $fallback) int {
         return $fallback;
     }
 
-    my str $val = lc($config{$key});
+    my str $val = lc(::trim("" . $config{$key}));
     if ($val eq "1" || $val eq "true" || $val eq "yes" || $val eq "on") {
         return 1;
     }
@@ -197,6 +207,120 @@ func Cannoli_Config_get_bool(hash %config, str $key, int $fallback) int {
         return 0;
     }
     return $fallback;
+}
+
+# Validate the server settings before opening sockets or loading libraries.
+# Returns an array reference of human-readable errors. Applications may add
+# their own sections; only Cannoli-owned keys are checked here.
+func Cannoli_Config_validate_uint(hash %config, scalar $errors, str $key, int $minimum, int $maximum) void {
+    if (!exists(%config, $key)) { return; }
+    my str $raw = trim("" . $config{$key});
+    if ($raw !~ /^[0-9]+$/) {
+        push(@{$errors}, $key . " must be an integer");
+        return;
+    }
+    my int $value = int($raw);
+    if ($value < $minimum || ($maximum >= 0 && $value > $maximum)) {
+        my str $range = "at least " . $minimum;
+        if ($maximum >= 0) { $range = $minimum . ".." . $maximum; }
+        push(@{$errors}, $key . " must be " . $range);
+    }
+}
+
+func Cannoli_Config_validate_bool(hash %config, scalar $errors, str $key) void {
+    if (!exists(%config, $key)) { return; }
+    my str $raw = lc(trim("" . $config{$key}));
+    if ($raw !~ /^(0|1|true|false|yes|no|on|off)$/) {
+        push(@{$errors}, $key . " must be a boolean (0/1, true/false, yes/no, on/off)");
+    }
+}
+
+func Cannoli_Config_validate(hash %config) scalar {
+    my scalar $errors = [];
+
+    ::validate_uint(%config, $errors, "server.port", 1, 65535);
+    ::validate_uint(%config, $errors, "server.workers", 1, 65536);
+    ::validate_uint(%config, $errors, "server.max_requests", 0, -1);   # 0 = never recycle
+    ::validate_uint(%config, $errors, "server.timeout", 1, 86400);
+    ::validate_uint(%config, $errors, "server.keep_alive_timeout", 1, 86400);
+    ::validate_uint(%config, $errors, "server.loop_acceptors", 1, 1024);
+    ::validate_uint(%config, $errors, "server.backlog", 1, 1048576);
+    ::validate_uint(%config, $errors, "server.max_body_size", 1, -1);
+    ::validate_uint(%config, $errors, "server.max_header_size", 1, -1);
+    ::validate_uint(%config, $errors, "server.tick_interval", 0, -1);
+    ::validate_uint(%config, $errors, "server.tick_max", 0, -1);
+    ::validate_uint(%config, $errors, "server.tickers", 1, 65536);
+    ::validate_uint(%config, $errors, "ssl.port", 1, 65535);
+    ::validate_uint(%config, $errors, "server.header_timeout", 1, 3600);
+    ::validate_uint(%config, $errors, "server.body_min_rate", 0, -1);
+    ::validate_uint(%config, $errors, "server.write_timeout", 1, 86400);
+    ::validate_uint(%config, $errors, "server.shutdown_timeout", 1, 86400);
+
+    foreach my str $key ("server.http", "server.keep_alive", "server.loop_workers", "server.request_id", "server.tokens", "ssl.enabled", "ssl.only", "fastcgi.enabled", "admin.enabled", "static.listing") {
+        ::validate_bool(%config, $errors, $key);
+    }
+
+    my str $level = lc(Cannoli::Config::get_str(%config, "log.level", "info"));
+    if ($level !~ /^(error|warn|info|debug)$/) {
+        push(@{$errors}, "log.level must be error, warn, info, or debug");
+    }
+
+    my int $ssl_enabled = Cannoli::Config::get_bool(%config, "ssl.enabled", 0);
+    my int $ssl_only = Cannoli::Config::get_bool(%config, "ssl.only", 0);
+    if ($ssl_only == 1 && $ssl_enabled != 1) {
+        push(@{$errors}, "ssl.only requires ssl.enabled");
+    }
+    if ($ssl_enabled == 1) {
+        my str $cert = Cannoli::Config::get_str(%config, "ssl.cert", "");
+        my str $key = Cannoli::Config::get_str(%config, "ssl.key", "");
+        if (length($cert) == 0) { push(@{$errors}, "ssl.cert is required when SSL is enabled"); }
+        elsif (!core::is_file($cert)) { push(@{$errors}, "ssl.cert is not a readable file: " . $cert); }
+        if (length($key) == 0) { push(@{$errors}, "ssl.key is required when SSL is enabled"); }
+        elsif (!core::is_file($key)) { push(@{$errors}, "ssl.key is not a readable file: " . $key); }
+
+        my int $http_enabled = Cannoli::Config::get_bool(%config, "server.http", 1);
+        if ($http_enabled == 1 && $ssl_only == 0) {
+            my int $http_port = Cannoli::Config::get_int(%config, "server.port", 8080);
+            my int $https_port = Cannoli::Config::get_int(%config, "ssl.port", 443);
+            if ($http_port == $https_port) {
+                push(@{$errors}, "server.port and ssl.port cannot be equal unless ssl.only is enabled");
+            }
+        }
+    }
+
+    if (exists(%config, "static.root")) {
+        my str $root = trim("" . $config{"static.root"});
+        if (length($root) > 0 && !core::is_dir($root)) {
+            push(@{$errors}, "static.root is not a directory: " . $root);
+        }
+    }
+
+    foreach my str $ck (keys(%config)) {
+        if (length($ck) > 8 && substr($ck, 0, 8) eq "headers.") {
+            my str $hname = substr($ck, 8, length($ck) - 8);
+            my str $hval = "" . $config{$ck};
+            if (Cannoli::Response::valid_header_name($hname) == 0) {
+                push(@{$errors}, $ck . ": not a valid header name");
+            } elsif ($hval =~ /[\x00-\x08\x0a-\x1f\x7f]/) {
+                push(@{$errors}, $ck . ": header value contains control characters");
+            }
+        }
+    }
+
+    my str $pid_file = Cannoli::Config::get_str(%config, "server.pid_file", "");
+    if (length($pid_file) > 0) {
+        my str $pid_dir = core::dirname($pid_file);
+        if (length($pid_dir) > 0 && !core::is_dir($pid_dir)) {
+            push(@{$errors}, "server.pid_file directory does not exist: " . $pid_dir);
+        }
+    }
+
+    my str $admin_path = Cannoli::Config::get_str(%config, "admin.path", "/__admin");
+    if (length($admin_path) == 0 || substr($admin_path, 0, 1) ne "/") {
+        push(@{$errors}, "admin.path must start with /");
+    }
+
+    return $errors;
 }
 
 # Set a configuration value

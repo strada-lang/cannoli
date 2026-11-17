@@ -1,0 +1,206 @@
+# t/test_hardening.strada - request framing, header strictness, and the
+# fixes made for production use (cookies, templates, middleware, ranges,
+# JSON depth, log escaping, proxy addresses).
+
+my int $g_failed = 0;
+
+func check(int $cond, str $name) void {
+    if ($cond) {
+        say("  PASS: " . $name);
+    } else {
+        say("  FAIL: " . $name);
+        $g_failed = $g_failed + 1;
+    }
+}
+
+func test_parse_head() void {
+    say("Testing strict header parsing...");
+    my scalar $h = Cannoli::Server::parse_head("POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 5");
+    check($h->{"ok"} == 1 && $h->{"cl"} == 5 && $h->{"te"} == 0, "valid request");
+    check(Cannoli::Server::parse_head("POST /x HTTP/1.1\r\nHost: a\r\nContent-Length : 5")->{"ok"} == 0, "space before colon");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nHost: a\r\nX: a\nTransfer-Encoding: chunked")->{"ok"} == 0, "bare LF");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nHost: a\r\nX: a\r\n b")->{"ok"} == 0, "obs-fold");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nHost: a\r\nHost: b")->{"ok"} == 0, "duplicate Host");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nX: y")->{"ok"} == 0, "HTTP/1.1 without Host");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.0\r\nX: y")->{"ok"} == 1, "HTTP/1.0 without Host");
+    check(Cannoli::Server::parse_head("POST /x HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nContent-Length: 1")->{"ok"} == 0, "TE + CL");
+    check(Cannoli::Server::parse_head("POST /x HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: gzip, chunked")->{"ok"} == 0, "unsupported coding");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nHost: a\r\nX: a\x01b")->{"ok"} == 0, "control byte in value");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nHost: a\r\nX@Y: b")->{"ok"} == 0, "non-token header name");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nHost: a\r\nExpect: 100-continue")->{"expect"} eq "100-continue", "Expect captured");
+    check(Cannoli::Server::valid_request_line("GET  /x HTTP/1.1") == 0, "double space in request line");
+    check(Cannoli::Server::valid_request_line("GET /a\x7fb HTTP/1.1") == 0, "control byte in target");
+    check(Cannoli::Server::valid_request_line("OPTIONS * HTTP/1.1") == 1, "asterisk-form");
+    check(Cannoli::Server::origin_form("GET http://h.example:8080/p?q=1 HTTP/1.1\r\nHost: h") eq "GET /p?q=1 HTTP/1.1\r\nHost: h", "absolute-form -> origin-form");
+    check(Cannoli::Server::origin_form("GET https://h.example HTTP/1.1") eq "GET / HTTP/1.1", "absolute-form without path");
+}
+
+func test_chunked_incremental() void {
+    say("Testing incremental chunked decoding...");
+    my str $wire = "4\r\nWiki\r\n5;ext=1\r\npedia\r\n0\r\nX-T: 1\r\n\r\nNEXT";
+    # feed one byte at a time: every prefix must be need_more until the end
+    my scalar $st = Cannoli::Server::chunked_state();
+    my int $n = 1;
+    my int $early = 0;
+    while ($n <= length($wire)) {
+        Cannoli::Server::decode_chunked_step(substr($wire, 0, $n), $st, 1024, 1024);
+        if ($st->{"status"} ne "need_more") { last; }
+        $n = $n + 1;
+    }
+    check($st->{"status"} eq "ok" && $st->{"body"} eq "Wikipedia" && $st->{"consumed"} == length($wire) - 4,
+          "byte-at-a-time decode (" . $st->{"status"} . ", body=" . $st->{"body"} . ")");
+    check($n == length($wire) - 4, "completes exactly at the end of the trailers");
+    check(Cannoli::Server::decode_chunked("2;\nxx\r\nhi\r\n0\r\n\r\n", 1024, 1024)->{"status"} eq "bad", "bare LF in chunk extension");
+    check(Cannoli::Server::decode_chunked("2 \r\nhi\r\n0\r\n\r\n", 1024, 1024)->{"status"} eq "bad", "trailing space after size");
+    check(Cannoli::Server::decode_chunked("2\r\nhiXX0\r\n\r\n", 1024, 1024)->{"status"} eq "bad", "missing CRLF after data");
+    check(Cannoli::Server::decode_chunked("0\r\nBad\nTrailer\r\n\r\n", 1024, 1024)->{"status"} eq "bad", "bare LF in trailer");
+    check(Cannoli::Server::decode_chunked("8\r\n12345678\r\n", 4, 1024)->{"status"} eq "too_large", "body limit");
+}
+
+func test_proxy_addresses() void {
+    say("Testing trusted proxy matching...");
+    check(Cannoli::Server::ip_in_list("10.1.2.3", "10.0.0.0/8") == 1, "IPv4 CIDR match");
+    check(Cannoli::Server::ip_in_list("11.1.2.3", "10.0.0.0/8") == 0, "IPv4 CIDR miss");
+    check(Cannoli::Server::ip_in_list("::ffff:192.168.1.9", "192.168.1.0/24") == 1, "IPv4-mapped CIDR");
+    check(Cannoli::Server::ip_in_list("::1", "127.0.0.1, ::1") == 1, "IPv6 exact");
+    check(Cannoli::Server::ip_in_list("1.2.3.4", "") == 0, "empty list");
+
+    my hash %config = Cannoli::Config::defaults();
+    $config{"server.trusted_proxies"} = "127.0.0.1";
+    my scalar $server = Cannoli::Server::new(%config);
+    my scalar $conn = {"tls" => 0, "peer" => "127.0.0.1"};
+    my hash %req = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 6.6.6.6, 1.2.3.4, 127.0.0.1\r\nX-Forwarded-Proto: https\r\n\r\n");
+    Cannoli::Server::apply_client_info($server, $conn, \%req);
+    check($req{"remote_addr"} eq "1.2.3.4", "rightmost untrusted XFF hop (" . $req{"remote_addr"} . ")");
+    check($req{"scheme"} eq "https" && $req{"peer_addr"} eq "127.0.0.1", "scheme from proxy, peer kept");
+
+    my scalar $other = {"tls" => 0, "peer" => "8.8.8.8"};
+    my hash %req2 = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n");
+    Cannoli::Server::apply_client_info($server, $other, \%req2);
+    check($req2{"remote_addr"} eq "8.8.8.8", "untrusted peer's XFF ignored");
+}
+
+func test_cookies() void {
+    say("Testing cookies...");
+    my hash %res = Cannoli::Response::text(200, "x");
+    Cannoli::Response::set_cookie(%res, "a", "1", "Path=/");
+    Cannoli::Response::set_cookie(%res, "b", "2", "");
+    Cannoli::Response::set_cookie(%res, "c", "x; Domain=evil", "");
+    my str $wire = Cannoli::Response::build(%res);
+    check(index($wire, "Set-Cookie: a=1; Path=/\r\n") >= 0 && index($wire, "Set-Cookie: b=2\r\n") >= 0, "two Set-Cookie lines");
+    check(index($wire, "evil") < 0, "attribute injection refused");
+
+    my hash %req = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    my scalar $c = Cannoli::new(%req);
+    $c->set_cookie("flash", "hi", "/");
+    $c->set_cookie("sid", "1", "/");
+    $c->set_cookie("sid", "2", "/");
+    $c->render_text("ok");
+    my hash %built = $c->build_response();
+    my str $out = Cannoli::Response::build(%built);
+    check(index($out, "flash=hi") >= 0 && index($out, "sid=2") >= 0 && index($out, "sid=1") < 0, "Cannoli set_cookie: accumulate, same name replaces");
+}
+
+func test_template_layout_escaping() void {
+    say("Testing layout {{content}} escaping...");
+    my str $dir = "/tmp/cannoli_hardening_tpl_" . core::getpid();
+    core::mkdir($dir);
+    core::spew($dir . "/page.html", "<p>{{title}}</p>");
+    core::spew($dir . "/layout.html", "<main>{{content}}</main>{{#each posts}}<i>{{content}}</i>{{/each}}");
+    Cannoli::Template::init($dir);
+    my scalar $vars = {"title" => "T", "posts" => [{"content" => "<script>x</script>"}]};
+    my str $html = Cannoli::Template::render_with_layout("page.html", "layout.html", $vars);
+    check(index($html, "<main><p>T</p></main>") >= 0, "page content raw in layout");
+    check(index($html, "<script>") < 0, "item content escaped inside each (" . $html . ")");
+    core::unlink($dir . "/page.html");
+    core::unlink($dir . "/layout.html");
+    core::rmdir($dir);
+}
+
+my int $g_after_ran = 0;
+
+func test_after_middleware() void {
+    say("Testing after-middleware...");
+    my scalar $router = Cannoli::Router::new();
+    Cannoli::Router::use($router, func (scalar $c, scalar $next) {
+        if ($c->path() eq "/blocked") {
+            $c->status(401);
+            $c->render_text("no");
+            return $c->build_response();
+        }
+        return $next->($c);
+    });
+    Cannoli::Router::use_after($router, func (scalar $c) {
+        $g_after_ran = $g_after_ran + 1;
+        $c->set_header("X-After", "1");
+    });
+    Cannoli::Router::get_c($router, "/blocked", func (scalar $c) { $c->render_text("yes"); return $c->build_response(); });
+    Cannoli::Router::get_c($router, "/direct", func (scalar $c) {
+        my hash %r = Cannoli::Response::json(201, "{}");
+        return \%r;
+    });
+
+    my hash %req = Cannoli::Request::parse("GET /blocked HTTP/1.1\r\nHost: a\r\n\r\n");
+    my hash %res = Cannoli::Router::dispatch($router, %req);
+    check($res{"status"} == 401 && $g_after_ran == 1, "after-middleware runs when the chain short-circuits");
+    check(Cannoli::Response::get_header(%res, "X-After") eq "1", "after-middleware header applied");
+
+    my hash %req2 = Cannoli::Request::parse("GET /direct HTTP/1.1\r\nHost: a\r\n\r\n");
+    my hash %res2 = Cannoli::Router::dispatch($router, %req2);
+    check($res2{"status"} == 201 && Cannoli::Response::get_header(%res2, "X-After") eq "1", "returned response kept, after-middleware header merged");
+}
+
+func test_static_ranges() void {
+    say("Testing Range parsing...");
+    check(Cannoli::Static::parse_range("bytes=0-1,4-5", 10)->{"ok"} == -1, "multi-range ignored");
+    check(Cannoli::Static::parse_range("items=0-3", 10)->{"ok"} == -1, "other unit ignored");
+    check(Cannoli::Static::parse_range("bytes=20-", 10)->{"ok"} == 0, "past end unsatisfiable");
+    check(Cannoli::Static::parse_range("bytes=-0", 10)->{"ok"} == 0, "zero suffix unsatisfiable");
+    my scalar $r = Cannoli::Static::parse_range("bytes=-3", 10);
+    check($r->{"ok"} == 1 && $r->{"start"} == 7 && $r->{"end"} == 9, "suffix range");
+    my hash %nm = Cannoli::Response::new();
+    Cannoli::Response::status(%nm, 304);
+    check(index(Cannoli::Response::build(%nm), "Content-Length") < 0, "no Content-Length invented on 304");
+}
+
+func test_json_depth() void {
+    say("Testing JSON nesting limit...");
+    my str $deep = "";
+    my int $i = 0;
+    while ($i < 600) { $deep = $deep . "["; $i = $i + 1; }
+    check(!defined(Cannoli::Request::json_parse($deep)), "600-deep JSON rejected without crashing");
+    my scalar $ok = Cannoli::Request::json_parse("{\"a\":[[1,2],{\"b\":\"[[[\"}]}");
+    check(defined($ok), "normal nesting (brackets inside strings ignored)");
+}
+
+func test_multipart_boundary() void {
+    say("Testing multipart boundary parsing...");
+    check(Cannoli::Request::extract_boundary("Multipart/Form-Data; boundary=QQ") eq "QQ", "case-insensitive type");
+    check(Cannoli::Request::extract_boundary("multipart/form-data; xboundary=bad; boundary=good") eq "good", "exact parameter name");
+    check(Cannoli::Request::extract_boundary("multipart/form-data; boundary=\"a b\"") eq "a b", "quoted boundary");
+}
+
+func test_log_escape() void {
+    say("Testing access log escaping...");
+    check(Cannoli::Log::escape("ua\" 1ms\n6.6.6.6 - -") eq "ua\\\" 1ms\\x0a6.6.6.6 - -", "quote and newline escaped");
+    check(Cannoli::Log::escape("Mozilla/5.0") eq "Mozilla/5.0", "plain value unchanged");
+}
+
+func main() int {
+    test_parse_head();
+    test_chunked_incremental();
+    test_proxy_addresses();
+    test_cookies();
+    test_template_layout_escaping();
+    test_after_middleware();
+    test_static_ranges();
+    test_json_depth();
+    test_multipart_boundary();
+    test_log_escape();
+    if ($g_failed == 0) {
+        say("All hardening tests passed!");
+        return 0;
+    }
+    say($g_failed . " hardening test(s) failed");
+    return 1;
+}

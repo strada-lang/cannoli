@@ -1,0 +1,107 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+# t/test_server.strada - Test server connection behavior
+
+func test_http11_keep_alive_default() int {
+    say("Testing HTTP/1.1 keep-alive in normal server mode...");
+
+    my hash %config = Cannoli::Config::defaults();
+    my scalar $server = Cannoli::Server::new(%config);
+    my hash %req = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    if (Cannoli::Server::should_keep_alive($server, %req) != 1) {
+        say("  FAIL: HTTP/1.1 requests should keep connections alive outside dev mode");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_http11_keep_alive_disabled_in_dev() int {
+    say("Testing keep-alive is disabled in single-process dev mode...");
+
+    my hash %config = Cannoli::Config::defaults();
+    my scalar $server = Cannoli::Server::new(%config);
+    $server->{"single_process"} = 1;
+
+    my hash %req = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    if (Cannoli::Server::should_keep_alive($server, %req) != 0) {
+        say("  FAIL: single-process dev mode should close HTTP/1.1 connections");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_keep_alive_disabled_by_config() int {
+    say("Testing keep-alive can be disabled by config...");
+
+    my hash %config = Cannoli::Config::defaults();
+    $config{"server.keep_alive"} = "0";
+    my scalar $server = Cannoli::Server::new(%config);
+
+    my hash %req = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    if (Cannoli::Server::should_keep_alive($server, %req) != 0) {
+        say("  FAIL: server.keep_alive = 0 should disable keep-alive");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_connection_close_header() int {
+    say("Testing Connection: close still disables keep-alive...");
+
+    my hash %config = Cannoli::Config::defaults();
+    my scalar $server = Cannoli::Server::new(%config);
+    my hash %req = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+
+    if (Cannoli::Server::should_keep_alive($server, %req) != 0) {
+        say("  FAIL: Connection: close should disable keep-alive");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func main() int {
+    say("=== Cannoli Server Tests ===");
+    say("");
+
+    my int $failures = 0;
+
+    $failures = $failures + test_http11_keep_alive_default();
+    $failures = $failures + test_http11_keep_alive_disabled_in_dev();
+    $failures = $failures + test_keep_alive_disabled_by_config();
+    $failures = $failures + test_connection_close_header();
+
+    say("");
+    if ($failures == 0) {
+        say("All server tests passed!");
+        return 0;
+    }
+
+    say($failures . " server test(s) failed");
+    return 1;
+}

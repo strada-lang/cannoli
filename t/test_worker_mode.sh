@@ -47,6 +47,10 @@ echo "Testing a dead ticker is replaced..."
 VICTIM=$(sort -u "$TMP/ticks" | head -1); kill -9 "$VICTIM"; sleep 2.5
 KIDS=$(pgrep -P "$MPID" | wc -l); N=$(sort -u "$TMP/ticks" | wc -l)
 if [ "$KIDS" -eq 3 ] && [ "$N" -eq 4 ]; then echo "  PASS"; else echo "  FAIL: $KIDS children, $N pids seen"; FAIL=1; fi
+echo "Testing SIGHUP rotates tickers without spawning HTTP workers..."
+kill -HUP "$MPID"; sleep 2.5
+KIDS=$(pgrep -P "$MPID" | wc -l)
+if [ "$KIDS" -eq 3 ]; then echo "  PASS"; else echo "  FAIL: expected 3 tickers after SIGHUP, got $KIDS children"; FAIL=1; fi
 echo "Testing shutdown..."
 kill -INT "$MPID"
 for _ in $(seq 1 100); do kill -0 "$MPID" 2>/dev/null || break; sleep 0.05; done

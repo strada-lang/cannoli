@@ -155,14 +155,9 @@ int perl_bridge_add_inc(void *path_sv) {
     const char *path = sv_to_cstr(path_sv);
     if (!my_perl || !path) return 0;
 
-    char code[2048];
-    snprintf(code, sizeof(code), "push @INC, '%s'; 1;", path);
-    eval_pv(code, FALSE);
-
-    if (SvTRUE(ERRSV)) {
-        fprintf(stderr, "perl_bridge: add_inc error: %s\n", SvPV_nolen(ERRSV));
-        return 0;
-    }
+    AV *inc = GvAVn(PL_incgv);
+    if (!inc) return 0;
+    av_push(inc, newSVpv(path, 0));
     return 1;
 }
 

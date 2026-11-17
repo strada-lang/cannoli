@@ -89,8 +89,39 @@ func Cannoli_Template_clear_cache() void {
     %g_template_cache = ();
 }
 
+func Cannoli_Template_is_tag_boundary(str $template, int $pos) int {
+    my int $len = length($template);
+    if ($pos >= $len) { return 0; }
+    my str $ch = substr($template, $pos, 1);
+    if ($ch eq " " || $ch eq "\t" || $ch eq "\r" || $ch eq "\n") {
+        return 1;
+    }
+    if ($pos + 1 < $len && substr($template, $pos, 2) eq "}}") {
+        return 1;
+    }
+    return 0;
+}
+
+func Cannoli_Template_is_safe_name(str $name) int {
+    if (length($name) == 0) { return 0; }
+    if (substr($name, 0, 1) eq "/") { return 0; }
+    foreach my str $part (split("/", $name)) {
+        if ($part eq "..") { return 0; }
+        my int $j = 0;
+        while ($j < length($part)) {
+            if (ord(substr($part, $j, 1)) == 0) { return 0; }
+            $j = $j + 1;
+        }
+    }
+    return 1;
+}
+
 # Load a template file (with caching)
 func Cannoli_Template_load(str $name) str {
+    if (::is_safe_name($name) == 0) {
+        return "";
+    }
+
     # Check cache first
     if ($g_cache_enabled == 1 && exists(%g_template_cache, $name)) {
         return $g_template_cache{$name};
@@ -99,9 +130,22 @@ func Cannoli_Template_load(str $name) str {
     # Build full path
     my str $path = $g_template_dir . "/" . $name;
 
-    # Check if file exists
+    # Check if file exists and stays within template directory
     if (core::is_file($path) == 0) {
         return "";
+    }
+    my scalar $real_path_sv = core::realpath($path);
+    my scalar $real_root_sv = core::realpath($g_template_dir);
+    if (!defined($real_path_sv) || !defined($real_root_sv)) {
+        return "";
+    }
+    my str $real_path = "" . $real_path_sv;
+    my str $real_root = "" . $real_root_sv;
+    if ($real_root ne "/" && $real_path ne $real_root) {
+        my int $root_len = length($real_root);
+        if (length($real_path) <= $root_len || substr($real_path, 0, $root_len) ne $real_root || substr($real_path, $root_len, 1) ne "/") {
+            return "";
+        }
     }
 
     # Load file content
@@ -134,7 +178,7 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
         # Check for {{#each ...}}
         if ($i + 7 < $len) {
             my str $check_each = substr($template, $i, 7);
-            if ($check_each eq "{{#each") {
+            if ($check_each eq "{{#each" && ::is_tag_boundary($template, $i + 7) == 1) {
                 # Find the closing }} of the opening tag
                 my int $tag_end = ::find_closing($template, $i + 7);
                 if ($tag_end > $i + 7) {
@@ -174,7 +218,7 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
         # Check for {{#if ...}}
         if ($i + 5 < $len) {
             my str $check_if = substr($template, $i, 5);
-            if ($check_if eq "{{#if") {
+            if ($check_if eq "{{#if" && ::is_tag_boundary($template, $i + 5) == 1) {
                 # Find the closing }} of the opening tag
                 my int $tag_end = ::find_closing($template, $i + 5);
                 if ($tag_end > $i + 5) {
@@ -213,7 +257,7 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
         # Check for {{#set varname = value}}
         if ($i + 6 < $len) {
             my str $check_set = substr($template, $i, 6);
-            if ($check_set eq "{{#set") {
+            if ($check_set eq "{{#set" && ::is_tag_boundary($template, $i + 6) == 1) {
                 # Find the closing }}
                 my int $tag_end = ::find_closing($template, $i + 6);
                 if ($tag_end > $i + 6) {
@@ -232,8 +276,10 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
                         # Resolve the value
                         my scalar $value = ::resolve_value($value_expr, $vars);
 
-                        # Set in vars (modify in place)
-                        $vars->{$var_name} = $value;
+                        # Set in vars if scope is a hash
+                        if (reftype($vars) eq "HASH") {
+                            $vars->{$var_name} = $value;
+                        }
                     }
 
                     # Skip past }}
@@ -246,7 +292,7 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
         # Check for {{#with object}}...{{/with}}
         if ($i + 7 < $len) {
             my str $check_with = substr($template, $i, 7);
-            if ($check_with eq "{{#with") {
+            if ($check_with eq "{{#with" && ::is_tag_boundary($template, $i + 7) == 1) {
                 # Find the closing }} of the opening tag
                 my int $tag_end = ::find_closing($template, $i + 7);
                 if ($tag_end > $i + 7) {
@@ -623,7 +669,7 @@ func Cannoli_Template_find_block_end(str $template, int $start, str $block_type)
         # Check for nested open tag
         if ($i + $open_len <= $len) {
             my str $check_open = substr($template, $i, $open_len);
-            if ($check_open eq $open_tag) {
+            if ($check_open eq $open_tag && ::is_tag_boundary($template, $i + $open_len) == 1) {
                 $depth = $depth + 1;
                 $i = $i + $open_len;
                 next;
@@ -658,7 +704,7 @@ func Cannoli_Template_find_else(str $template, int $start, int $block_end) int {
         # Track nested #if blocks
         if ($i + 5 <= $block_end) {
             my str $check = substr($template, $i, 5);
-            if ($check eq "{{#if") {
+            if ($check eq "{{#if" && ::is_tag_boundary($template, $i + 5) == 1) {
                 $depth = $depth + 1;
                 $i = $i + 5;
                 next;
@@ -829,14 +875,25 @@ func Cannoli_Template_include(str $name, scalar $vars) str {
 }
 
 func Cannoli_Template_rewrite_content_placeholder(str $template) str {
+    # Only the layout's own {{content}} (outside {{#each}} / {{#with}}, which
+    # change scope) is the rendered page and is emitted raw, via a reserved
+    # name. Inside those blocks "content" is the item's field and stays
+    # HTML-escaped -- rewriting it too turned item data into raw HTML (XSS).
     my str $result = "";
+    my int $depth = 0;
     my int $i = 0;
     my int $len = length($template);
     while ($i < $len) {
-        if ($i + 11 <= $len && substr($template, $i, 11) eq "{{content}}") {
-            $result = $result . "{{{content}}}";
-            $i = $i + 11;
-            next;
+        if (substr($template, $i, 2) eq "{{") {
+            if (substr($template, $i, 7) eq "{{#each" || substr($template, $i, 7) eq "{{#with") {
+                $depth = $depth + 1;
+            } elsif (substr($template, $i, 9) eq "{{/each}}" || substr($template, $i, 9) eq "{{/with}}") {
+                if ($depth > 0) { $depth = $depth - 1; }
+            } elsif ($depth == 0 && $i + 11 <= $len && substr($template, $i, 11) eq "{{content}}") {
+                $result = $result . "{{{__layout_content}}}";
+                $i = $i + 11;
+                next;
+            }
         }
         $result = $result . substr($template, $i, 1);
         $i = $i + 1;
@@ -850,11 +907,10 @@ func Cannoli_Template_render_with_layout(str $template_name, str $layout_name, s
     # First render the main template
     my str $content = ::render($template_name, $vars);
 
-    # Add content to vars
-    if (!defined($vars)) {
-        $vars = {};
-    }
-    $vars->{"content"} = $content;
+    # Copy vars so we don't mutate the caller's scope
+    my scalar $layout_vars = ::merge_scope($vars, undef);
+    $layout_vars->{"content"} = $content;
+    $layout_vars->{"__layout_content"} = $content;
 
     my str $layout = ::load($layout_name);
     if (length($layout) == 0) {
@@ -863,5 +919,5 @@ func Cannoli_Template_render_with_layout(str $template_name, str $layout_name, s
 
     # Historical layouts use {{content}}; keep that raw while escaping other variables.
     $layout = ::rewrite_content_placeholder($layout);
-    return ::render_string($layout, $vars);
+    return ::render_string($layout, $layout_vars);
 }

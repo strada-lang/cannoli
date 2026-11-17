@@ -13,7 +13,13 @@ A preforking web server and framework for [Strada](https://github.com/strada-lan
 - **SSL/HTTPS Support**: Secure connections via OpenSSL
 - **FastCGI Support**: Run behind nginx, Apache, or other web servers
 - **WebSockets**: Basic upgrade + frame helpers
-- **Keep-Alive**: Basic HTTP/1.1 persistent connections
+- **Keep-Alive**: HTTP/1.1 persistent connections and pipelining
+- **Hardened connection handling**: deadlines on every read and write
+  (slowloris, slow readers, silent TLS clients), strict RFC 9112 framing
+  against request smuggling, `Expect: 100-continue`
+- **Operations**: pid file, privilege drop, trusted proxies
+  (`X-Forwarded-For`/`-Proto`), request IDs, `Date` and custom default
+  headers, crash-loop backoff, bounded SIGHUP/shutdown drains
 - **Dynamic Libraries**: Load handlers from shared libraries (.so)
 - **HTTP Method Filtering**: Route handlers for GET, POST, PUT, DELETE, etc.
 - **Simple API**: Easy-to-use application framework
@@ -62,16 +68,21 @@ make
 ### FastCGI Mode (with nginx)
 
 ```bash
-./cannoli --fastcgi --socket /tmp/cannoli.sock
+./cannoli --fastcgi --socket 127.0.0.1:9000
 ```
 
 nginx configuration:
 ```nginx
 location / {
-    fastcgi_pass unix:/tmp/cannoli.sock;
+    fastcgi_pass 127.0.0.1:9000;
     include fastcgi_params;
 }
 ```
+
+FastCGI listens on TCP (`fastcgi.socket = host:port`, default
+`127.0.0.1:9000`); Unix-domain sockets are not supported by the runtime yet.
+Keep it on loopback or a private network: FastCGI parameters such as
+`REMOTE_ADDR` and `HTTPS` are trusted as sent.
 
 ### Dynamic Library Mode
 
@@ -413,9 +424,22 @@ func handle_api(hash %req) hash {
 host = 0.0.0.0
 port = 8080
 workers = 5
-max_requests = 1000
-timeout = 30
+max_requests = 1000  # recycle a worker after N requests (0: never)
+timeout = 30         # max silence while reading a request (seconds)
+header_timeout = 20  # the whole header block / TLS handshake must arrive within this
+body_min_rate = 1024 # after `timeout` seconds a body must average >= this many bytes/s (0: off)
+write_timeout = 30   # a response write that makes no progress for this long is dropped
 keep_alive = true
+keep_alive_timeout = 2  # idle seconds between requests on a kept-alive connection
+max_body_size = 10485760
+max_header_size = 8192
+shutdown_timeout = 10   # grace for stopping (SIGTERM) or retiring (SIGHUP) workers before SIGKILL
+pid_file = /run/cannoli.pid
+user = www-data      # drop to this user/group after binding (only when started as root)
+group = www-data
+trusted_proxies = 127.0.0.1, 10.0.0.0/8  # believe X-Forwarded-For/-Proto and X-Request-Id from these
+request_id = true    # send X-Request-Id (generated, or a trusted proxy's)
+tokens = true        # send "Server: Cannoli/1.0"
 tick_interval = 30   # seconds between cannoli_tick() calls (0: no ticker)
 tick_max = 1000      # ticks before the ticker is recycled
 tickers = 1          # how many ticker processes
@@ -429,7 +453,11 @@ key = /path/to/key.pem
 
 [fastcgi]
 enabled = false
-socket = /tmp/cannoli.sock
+socket = 127.0.0.1:9000
+
+[headers]            # added to every response that does not set them itself
+X-Content-Type-Options = nosniff
+Referrer-Policy = strict-origin-when-cross-origin
 
 [static]
 root = ./public
@@ -442,8 +470,42 @@ library = lib1.so, lib2.so
 level = info
 ```
 
-`server.timeout` also controls the keep-alive idle timeout (seconds).
 Set `server.keep_alive = false` or pass `--no-keep-alive` to always close each response.
+Command-line options override the config file regardless of their order.
+`cannoli -t -c FILE` validates a configuration without starting.
+
+## Running in Production
+
+- **Build optimized**: `make` (the default). `make STRADA_FLAGS="-O0 --no-lto"`
+  gives fast, unoptimized development builds.
+- **Behind a reverse proxy** (recommended for TLS termination, HTTP/2 and
+  static assets): bind to loopback and list the proxy in
+  `server.trusted_proxies`; `$c->remote_addr()` then reports the client from
+  `X-Forwarded-For`, `$c->scheme()` / `$c->is_secure()` honor
+  `X-Forwarded-Proto` (session cookies get `Secure` automatically), and the
+  proxy's `X-Request-Id` is reused. The admin endpoint is always authorized
+  by the real socket address, never by forwarded headers.
+- **Directly on ports 80/443**: start as root with `server.user`/`server.group`;
+  sockets are bound first, then the master and all workers switch user
+  (supplementary groups are reset, configured log files are chowned to the
+  new user). Libraries' `cannoli_init` runs before the switch. The pid file
+  stays root-owned, so the unprivileged master may not be able to remove it.
+- **FastCGI mode** honors `pid_file`, `user`/`group` and `max_body_size`; the
+  connection timeouts above apply to HTTP/HTTPS mode (FastCGI's peer is the
+  trusted front-end server).
+- **Timeouts**: every request read is bounded (`header_timeout`, `timeout`,
+  `body_min_rate`) and every response write (`write_timeout`), so slow or
+  silent clients cannot hold workers; a client that times out mid-request
+  gets `408`. Size limits answer `413`/`431`; malformed or ambiguous framing
+  (whitespace before a colon, bare CR/LF, obsolete line folding, TE with
+  Content-Length, duplicate Host, invalid chunk sizes/extensions) gets `400`.
+- **Process supervision**: write a `pid_file` for init scripts, or run under
+  systemd (`Type=simple`, `KillSignal=SIGTERM`, `ExecReload=/bin/kill -HUP $MAINPID`).
+  A handler that throws produces a `500` (details go to the error log, not the
+  client) and the worker keeps serving; workers that crash right after
+  starting are respawned with exponential backoff instead of a fork storm.
+- **Logs** are reopened on every write, so `logrotate` needs no signal.
+  Access-log fields that come from the client are escaped.
 
 ## Dynamic Library Interface
 
@@ -506,7 +568,9 @@ See the `examples/` directory:
   `tickers = N` runs N of them; `http = false` makes a background-job
   server with only tickers (for a job queue's workers on another machine).
 - Graceful shutdown via SIGTERM/SIGINT
-- Graceful reload via SIGHUP
+- Zero-downtime worker rotation via SIGHUP (starts a fresh worker generation,
+  then drains the old generation). Listener and configuration changes require
+  a new master process.
 
 ## License
 

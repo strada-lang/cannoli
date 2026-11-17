@@ -128,7 +128,12 @@ func Cannoli_WebSocket_send_pong(scalar $ws, str $payload) int {
 func Cannoli_WebSocket_send_close(scalar $ws, int $code, str $reason) int {
     my str $payload = "";
     if ($code > 0) {
-        $payload = ::pack_u16($code) . $reason;
+        # Control frames must not exceed 125 bytes total (2-byte code + 123-byte reason)
+        my str $safe_reason = $reason;
+        if (core::byte_length($safe_reason) > 123) {
+            $safe_reason = core::byte_substr($safe_reason, 0, 123);
+        }
+        $payload = ::pack_u16($code) . $safe_reason;
     }
     return ::send_frame($ws, 8, $payload);
 }
@@ -227,7 +232,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
             elsif ($m == 2) { $mask = $mask2; }
             else { $mask = $mask3; }
             my int $out = ::xor8($byte, $mask);
-            $decoded = $decoded . chr($out);
+            $decoded = $decoded . core::byte($out);
             $i = $i + 1;
         }
         $payload = $decoded;
@@ -247,14 +252,14 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
 func Cannoli_WebSocket_send_frame(scalar $ws, int $opcode, str $payload) int {
     my int $len = core::byte_length($payload);
     my int $byte1 = 128 + ($opcode % 16);
-    my str $header = chr($byte1);
+    my str $header = core::byte($byte1);
 
     if ($len <= 125) {
-        $header = $header . chr($len);
+        $header = $header . core::byte($len);
     } elsif ($len <= 65535) {
-        $header = $header . chr(126) . ::pack_u16($len);
+        $header = $header . core::byte(126) . ::pack_u16($len);
     } else {
-        $header = $header . chr(127) . ::pack_u64($len);
+        $header = $header . core::byte(127) . ::pack_u64($len);
     }
 
     return ::write_ws($ws, $header . $payload);

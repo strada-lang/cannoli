@@ -55,30 +55,30 @@ func Cannoli_FastCGI_make_header(int $type, int $request_id, int $content_len, i
     my str $header = "";
 
     # Version (1)
-    $header = $header . chr(1);
+    $header = $header . core::byte(1);
 
     # Type
-    $header = $header . chr($type);
+    $header = $header . core::byte($type);
 
     # Request ID (big-endian 16-bit)
     my int $req_high = $request_id / 256;
     $req_high = fcgi_mod($req_high, 256);
     my int $req_low = fcgi_mod($request_id, 256);
-    $header = $header . chr($req_high);
-    $header = $header . chr($req_low);
+    $header = $header . core::byte($req_high);
+    $header = $header . core::byte($req_low);
 
     # Content length (big-endian 16-bit)
     my int $len_high = $content_len / 256;
     $len_high = fcgi_mod($len_high, 256);
     my int $len_low = fcgi_mod($content_len, 256);
-    $header = $header . chr($len_high);
-    $header = $header . chr($len_low);
+    $header = $header . core::byte($len_high);
+    $header = $header . core::byte($len_low);
 
     # Padding length
-    $header = $header . chr($padding_len);
+    $header = $header . core::byte($padding_len);
 
     # Reserved
-    $header = $header . chr(0);
+    $header = $header . core::byte(0);
 
     return $header;
 }
@@ -87,17 +87,17 @@ func Cannoli_FastCGI_make_header(int $type, int $request_id, int $content_len, i
 func Cannoli_FastCGI_parse_header(str $data) hash {
     my hash %header = ();
 
-    if (length($data) < 8) {
+    if (core::byte_length($data) < 8) {
         $header{"valid"} = 0;
         return %header;
     }
 
     $header{"valid"} = 1;
-    $header{"version"} = ord(substr($data, 0, 1));
-    $header{"type"} = ord(substr($data, 1, 1));
-    $header{"request_id"} = ord(substr($data, 2, 1)) * 256 + ord(substr($data, 3, 1));
-    $header{"content_length"} = ord(substr($data, 4, 1)) * 256 + ord(substr($data, 5, 1));
-    $header{"padding_length"} = ord(substr($data, 6, 1));
+    $header{"version"} = core::get_byte($data, 0);
+    $header{"type"} = core::get_byte($data, 1);
+    $header{"request_id"} = core::get_byte($data, 2) * 256 + core::get_byte($data, 3);
+    $header{"content_length"} = core::get_byte($data, 4) * 256 + core::get_byte($data, 5);
+    $header{"padding_length"} = core::get_byte($data, 6);
 
     return %header;
 }
@@ -106,19 +106,20 @@ func Cannoli_FastCGI_parse_header(str $data) hash {
 func Cannoli_FastCGI_parse_params(str $data) hash {
     my hash %params = ();
     my int $pos = 0;
-    my int $len = length($data);
+    my int $len = core::byte_length($data);
 
     while ($pos < $len) {
         # Read name length
-        my int $name_len = ord(substr($data, $pos, 1));
+        my int $name_len = core::get_byte($data, $pos);
         $pos = $pos + 1;
 
         if ($name_len > 127) {
+            if ($pos + 3 > $len) { last; }
             # 4-byte length
             my int $b0 = fcgi_mod($name_len, 128);
-            my int $b1 = ord(substr($data, $pos, 1));
-            my int $b2 = ord(substr($data, $pos + 1, 1));
-            my int $b3 = ord(substr($data, $pos + 2, 1));
+            my int $b1 = core::get_byte($data, $pos);
+            my int $b2 = core::get_byte($data, $pos + 1);
+            my int $b3 = core::get_byte($data, $pos + 2);
             $name_len = ($b0 * 16777216) + ($b1 * 65536) + ($b2 * 256) + $b3;
             $pos = $pos + 3;
         }
@@ -126,26 +127,27 @@ func Cannoli_FastCGI_parse_params(str $data) hash {
         if ($pos >= $len) { last; }
 
         # Read value length
-        my int $value_len = ord(substr($data, $pos, 1));
+        my int $value_len = core::get_byte($data, $pos);
         $pos = $pos + 1;
 
         if ($value_len > 127) {
+            if ($pos + 3 > $len) { last; }
             # 4-byte length
             my int $b0 = fcgi_mod($value_len, 128);
-            my int $b1 = ord(substr($data, $pos, 1));
-            my int $b2 = ord(substr($data, $pos + 1, 1));
-            my int $b3 = ord(substr($data, $pos + 2, 1));
+            my int $b1 = core::get_byte($data, $pos);
+            my int $b2 = core::get_byte($data, $pos + 1);
+            my int $b3 = core::get_byte($data, $pos + 2);
             $value_len = ($b0 * 16777216) + ($b1 * 65536) + ($b2 * 256) + $b3;
             $pos = $pos + 3;
         }
 
-        if ($pos + $name_len + $value_len > $len) { last; }
+        if ($name_len < 0 || $value_len < 0 || $pos + $name_len + $value_len > $len) { last; }
 
         # Extract name and value
-        my str $name = substr($data, $pos, $name_len);
+        my str $name = core::byte_substr($data, $pos, $name_len);
         $pos = $pos + $name_len;
 
-        my str $value = substr($data, $pos, $value_len);
+        my str $value = core::byte_substr($data, $pos, $value_len);
         $pos = $pos + $value_len;
 
         $params{$name} = $value;
@@ -187,8 +189,14 @@ func Cannoli_FastCGI_params_to_request(hash %params) hash {
         $req{"remote_port"} = $params{"REMOTE_PORT"};
     }
 
-    # Map HTTP headers
+    # Map HTTP headers (lowercase keys to match Cannoli::Request)
     my hash %headers = ();
+    if (exists(%params, "CONTENT_TYPE")) {
+        $headers{"content-type"} = $params{"CONTENT_TYPE"};
+    }
+    if (exists(%params, "CONTENT_LENGTH")) {
+        $headers{"content-length"} = $params{"CONTENT_LENGTH"};
+    }
     my array @k = keys(%params);
     my int $i = 0;
 
@@ -196,7 +204,7 @@ func Cannoli_FastCGI_params_to_request(hash %params) hash {
         my str $key = $k[$i];
         if (substr($key, 0, 5) eq "HTTP_") {
             my str $header_name = substr($key, 5, length($key) - 5);
-            # Convert HTTP_CONTENT_TYPE to content-type
+            # Convert HTTP_USER_AGENT to user-agent
             $header_name = ::header_from_cgi($header_name);
             $headers{$header_name} = $params{$key};
         }
@@ -208,24 +216,18 @@ func Cannoli_FastCGI_params_to_request(hash %params) hash {
     return %req;
 }
 
-# Convert CGI header name to HTTP header name
+# Convert CGI header name to normalized lowercase HTTP header name
 func Cannoli_FastCGI_header_from_cgi(str $name) str {
     my str $result = "";
     my int $i = 0;
     my int $len = length($name);
-    my int $next_upper = 1;
 
     while ($i < $len) {
         my str $ch = substr($name, $i, 1);
 
         if ($ch eq "_") {
             $result = $result . "-";
-            $next_upper = 1;
-        } elsif ($next_upper == 1) {
-            $result = $result . $ch;
-            $next_upper = 0;
         } else {
-            # Lowercase
             my int $code = ord($ch);
             if ($code >= 65 && $code <= 90) {
                 $result = $result . chr($code + 32);
@@ -245,10 +247,22 @@ func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
     # Build HTTP response
     my str $http_response = Cannoli::Response::build(%res);
 
+    # Note: FastCGI expects CGI Status: header rather than an HTTP/1.1 status line,
+    # or nginx/Apache CGI response headers. Keep HTTP headers and prepend Status:
+    # if starting with HTTP/1.1.
+    my str $fcgi_payload = $http_response;
+    if (substr($http_response, 0, 9) eq "HTTP/1.1 ") {
+        my int $eol = index($http_response, "\r\n");
+        if ($eol > 9) {
+            my str $status_rest = substr($http_response, 9, $eol - 9);
+            $fcgi_payload = "Status: " . $status_rest . "\r\n" . core::byte_substr($http_response, $eol + 2, core::byte_length($http_response) - $eol - 2);
+        }
+    }
+
     # Build FCGI_STDOUT record(s)
     my str $output = "";
     my int $pos = 0;
-    my int $len = length($http_response);
+    my int $len = core::byte_length($fcgi_payload);
 
     while ($pos < $len) {
         my int $chunk_size = $len - $pos;
@@ -256,7 +270,7 @@ func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
             $chunk_size = 65535;
         }
 
-        my str $chunk = substr($http_response, $pos, $chunk_size);
+        my str $chunk = core::byte_substr($fcgi_payload, $pos, $chunk_size);
 
         # Calculate padding
         my int $mod8 = fcgi_mod($chunk_size, 8);
@@ -272,7 +286,7 @@ func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
         # Padding
         my int $p = 0;
         while ($p < $padding) {
-            $output = $output . chr(0);
+            $output = $output . core::byte(0);
             $p = $p + 1;
         }
 
@@ -285,11 +299,11 @@ func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
     # FCGI_END_REQUEST
     my str $end_body = "";
     # App status (4 bytes, big-endian)
-    $end_body = $end_body . chr(0) . chr(0) . chr(0) . chr(0);
+    $end_body = $end_body . core::byte(0) . core::byte(0) . core::byte(0) . core::byte(0);
     # Protocol status
-    $end_body = $end_body . chr(FCGI_REQUEST_COMPLETE());
+    $end_body = $end_body . core::byte(FCGI_REQUEST_COMPLETE());
     # Reserved (3 bytes)
-    $end_body = $end_body . chr(0) . chr(0) . chr(0);
+    $end_body = $end_body . core::byte(0) . core::byte(0) . core::byte(0);
 
     $output = $output . ::make_header(FCGI_END_REQUEST(), $request_id, 8, 0);
     $output = $output . $end_body;
@@ -297,17 +311,33 @@ func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
     return $output;
 }
 
+func Cannoli_FastCGI_read_exact(int $fd, int $needed) str {
+    my str $buf = "";
+    while (core::byte_length($buf) < $needed) {
+        my int $rem = $needed - core::byte_length($buf);
+        my str $chunk = core::read_fd($fd, $rem);
+        if (core::byte_length($chunk) == 0) {
+            last;
+        }
+        $buf = $buf . $chunk;
+    }
+    return $buf;
+}
+
 # Handle a single FastCGI connection
+my int $g_fcgi_max_body = 10485760;
+
 func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
     my hash %params = ();
+    my str $params_stream = "";
     my str $stdin_data = "";
     my int $request_id = 0;
     my int $done = 0;
 
     while ($done == 0) {
         # Read header
-        my str $header_data = core::read_fd($fd, 8);
-        if (length($header_data) < 8) {
+        my str $header_data = ::read_exact($fd, 8);
+        if (core::byte_length($header_data) < 8) {
             last;
         }
 
@@ -323,12 +353,15 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
         # Read content
         my str $content = "";
         if ($content_len > 0) {
-            $content = core::read_fd($fd, $content_len);
+            $content = ::read_exact($fd, $content_len);
+            if (core::byte_length($content) < $content_len) {
+                last;
+            }
         }
 
         # Skip padding bytes
         if ($padding_len > 0) {
-            core::read_fd($fd, $padding_len);
+            ::read_exact($fd, $padding_len);
         }
 
         # Handle record type
@@ -337,19 +370,18 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
         if ($rec_type == FCGI_BEGIN_REQUEST()) {
             # New request
         } elsif ($rec_type == FCGI_PARAMS()) {
+            # PARAMS is a stream: one name/value pair may span records, so
+            # collect it all and parse once the empty record ends it.
             if ($content_len > 0) {
-                my hash %new_params = ::parse_params($content);
-                my array @k = keys(%new_params);
-                my int $i = 0;
-                while ($i < scalar(@k)) {
-                    my str $key = $k[$i];
-                    $params{$key} = $new_params{$key};
-                    $i = $i + 1;
-                }
+                $params_stream = $params_stream . $content;
+                if (core::byte_length($params_stream) > 1048576) { last; }
+            } else {
+                %params = ::parse_params($params_stream);
             }
         } elsif ($rec_type == FCGI_STDIN()) {
             if ($content_len > 0) {
                 $stdin_data = $stdin_data . $content;
+                if (core::byte_length($stdin_data) > $g_fcgi_max_body) { last; }
             } else {
                 # Empty STDIN means end of request
                 $done = 1;
@@ -359,9 +391,46 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
         }
     }
 
+    if ($done == 0) {
+        core::close_fd($fd);
+        return;
+    }
+    if (scalar(keys(%params)) == 0 && core::byte_length($params_stream) > 0) {
+        %params = ::parse_params($params_stream);
+    }
+
     # Build request from params
     my hash %req = ::params_to_request(%params);
     $req{"body"} = $stdin_data;
+
+    # Parse form/multipart body just like Cannoli::Request::parse
+    my str $method = $req{"method"};
+    if (($method eq "POST" || $method eq "PUT" || $method eq "PATCH") && core::byte_length($stdin_data) > 0) {
+        my str $ct = $req{"content_type"};
+        if (index(lc($ct), "multipart/form-data") >= 0) {
+            my str $boundary = Cannoli::Request::extract_boundary($ct);
+            if (length($boundary) > 0) {
+                my hash %multipart = Cannoli::Request::parse_multipart($stdin_data, $boundary);
+                $req{"files"} = $multipart{"files"};
+                my hash %merged = %{$req{"params"}};
+                my scalar $mp_params = $multipart{"params"};
+                foreach my str $mk (keys(%{$mp_params})) {
+                    $merged{$mk} = $mp_params->{$mk};
+                }
+                $req{"params"} = \%merged;
+            }
+        } elsif (index($ct, "application/x-www-form-urlencoded") >= 0) {
+            my scalar $body_params = Cannoli::Request::parse_query($stdin_data);
+            my hash %merged = %{$req{"params"}};
+            foreach my str $bk (keys(%{$body_params})) {
+                $merged{$bk} = $body_params->{$bk};
+            }
+            $req{"params"} = \%merged;
+        }
+    }
+    if (!exists(%req, "files")) {
+        $req{"files"} = {};
+    }
 
     # Dispatch to router
     my hash %res = ();
@@ -379,39 +448,68 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
 }
 
 # FastCGI worker loop
-func Cannoli_FastCGI_worker_loop(int $listen_fd, scalar $router, int $max_requests) void {
+func Cannoli_FastCGI_worker_loop(scalar $listener, scalar $router, int $max_requests) void {
     my int $requests_handled = 0;
 
     while ($requests_handled < $max_requests) {
-        my int $fd = core::socket_accept($listen_fd);
-
-        if ($fd < 0) {
+        my scalar $client = core::socket_accept($listener);
+        if (!defined($client)) {
             core::usleep(10000);
             next;
         }
-
-        ::handle_connection($fd, $router);
+        # handle_connection owns (and closes) a duplicate of the fd; the
+        # socket object closes its own.
+        my int $fd = core::dup(core::socket_fd($client));
+        if ($fd >= 0) {
+            ::handle_connection($fd, $router);
+        }
+        core::socket_close($client);
         $requests_handled = $requests_handled + 1;
     }
 }
 
-# Run FastCGI server (TCP mode - nginx connects via TCP)
-# Note: Unix sockets would require additional runtime support
-func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int {
-    # For now, use TCP port 9000 (standard FastCGI port)
-    # socket_path is ignored - would need Unix socket support in runtime
-    length($socket_path);
+func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int $max_body = 10485760, scalar $server_ref = undef) int {
+    $g_fcgi_max_body = $max_body;
+    # fastcgi.socket = host:port (TCP). The runtime has no Unix-domain
+    # sockets, so a path falls back to 127.0.0.1:9000. Bind loopback by
+    # default: FastCGI params (REMOTE_ADDR, HTTPS, ...) are trusted, so the
+    # port must not be reachable from the network.
+    my str $host = "127.0.0.1";
     my int $port = 9000;
-
-    my int $fd = core::socket_server($port, 128);
-
-    if ($fd < 0) {
-        say("Error: Could not create FastCGI socket on port " . $port);
+    my int $colon = -1;
+    my int $k = length($socket_path) - 1;
+    while ($k >= 0) {
+        if (substr($socket_path, $k, 1) eq ":") { $colon = $k; last; }
+        $k = $k - 1;
+    }
+    if ($colon >= 0 && substr($socket_path, 0, 1) ne "/") {
+        my str $h = substr($socket_path, 0, $colon);
+        if (length($h) > 1 && substr($h, 0, 1) eq "[" && substr($h, length($h) - 1, 1) eq "]") {
+            $h = substr($h, 1, length($h) - 2);
+        }
+        if (length($h) > 0) { $host = $h; }
+        $port = substr($socket_path, $colon + 1, length($socket_path) - $colon - 1) + 0;
+    } elsif (length($socket_path) > 0) {
+        say("Note: Unix-domain FastCGI sockets are not supported; using TCP " . $host . ":" . $port . " (set fastcgi.socket = host:port)");
+    }
+    if ($port <= 0 || $port > 65535) {
+        say("Error: invalid FastCGI port in '" . $socket_path . "'");
         return 1;
     }
 
-    say("FastCGI listening on TCP port " . $port);
-    say("Note: Configure nginx with 'fastcgi_pass 127.0.0.1:9000;'");
+    my scalar $listener = core::socket_server_host($host, $port, 128);
+    if (!defined($listener)) {
+        say("Error: Could not create FastCGI socket on " . $host . ":" . $port);
+        return 1;
+    }
+
+    # pid file + server.user/group, as in HTTP mode
+    if (defined($server_ref) && Cannoli::Server::prepare_master($server_ref) == 0) {
+        return 1;
+    }
+
+    say("FastCGI listening on " . $host . ":" . $port);
+    say("Note: Configure nginx with 'fastcgi_pass " . $host . ":" . $port . ";'");
     say("Starting " . $num_workers . " worker processes...");
 
     # Fork workers
@@ -421,7 +519,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
 
         if ($pid == 0) {
             # Child
-            ::worker_loop($fd, $router, 1000);
+            ::worker_loop($listener, $router, 1000);
             exit(0);
         } elsif ($pid > 0) {
             say("Spawned FastCGI worker " . ($i + 1) . " with PID " . $pid);
@@ -440,7 +538,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers) int
 
             my int $new_pid = core::fork();
             if ($new_pid == 0) {
-                ::worker_loop($fd, $router, 1000);
+                ::worker_loop($listener, $router, 1000);
                 exit(0);
             } elsif ($new_pid > 0) {
                 say("Respawned FastCGI worker with PID " . $new_pid);

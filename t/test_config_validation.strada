@@ -1,0 +1,71 @@
+/* Configuration validation regressions. */
+
+func expect_error(hash %config, str $part) int {
+    my scalar $errors = Cannoli::Config::validate(%config);
+    foreach my str $error (@{$errors}) {
+        if (index($error, $part) >= 0) { return 0; }
+    }
+    say("  FAIL: expected an error containing: " . $part);
+    return 1;
+}
+
+func test_valid_defaults() int {
+    my hash %config = Cannoli::Config::defaults();
+    my scalar $errors = Cannoli::Config::validate(%config);
+    if (scalar(@{$errors}) != 0) {
+        say("  FAIL: defaults should be valid");
+        return 1;
+    }
+    return 0;
+}
+
+func test_numeric_validation() int {
+    my int $failed = 0;
+    my hash %bad_port = Cannoli::Config::defaults();
+    $bad_port{"server.port"} = "abc";
+    $failed = $failed + expect_error(%bad_port, "server.port must be an integer");
+
+    my hash %bad_workers = Cannoli::Config::defaults();
+    $bad_workers{"server.workers"} = "0";
+    $failed = $failed + expect_error(%bad_workers, "server.workers");
+
+    my hash %bad_timeout = Cannoli::Config::defaults();
+    $bad_timeout{"server.timeout"} = "-1";
+    $failed = $failed + expect_error(%bad_timeout, "server.timeout");
+    return $failed;
+}
+
+func test_boolean_and_log_validation() int {
+    my int $failed = 0;
+    my hash %bad_bool = Cannoli::Config::defaults();
+    $bad_bool{"server.keep_alive"} = "perhaps";
+    $failed = $failed + expect_error(%bad_bool, "server.keep_alive");
+
+    my hash %bad_log = Cannoli::Config::defaults();
+    $bad_log{"log.level"} = "verbose";
+    $failed = $failed + expect_error(%bad_log, "log.level");
+    return $failed;
+}
+
+func test_ssl_validation() int {
+    my hash %config = Cannoli::Config::defaults();
+    $config{"ssl.enabled"} = "1";
+    my scalar $errors = Cannoli::Config::validate(%config);
+    if (scalar(@{$errors}) < 2) {
+        say("  FAIL: enabled SSL should require certificate and key files");
+        return 1;
+    }
+    return 0;
+}
+
+func main() int {
+    say("=== Cannoli Configuration Validation Tests ===");
+    my int $failed = 0;
+    $failed = $failed + test_valid_defaults();
+    $failed = $failed + test_numeric_validation();
+    $failed = $failed + test_boolean_and_log_validation();
+    $failed = $failed + test_ssl_validation();
+    if ($failed == 0) { say("All configuration validation tests passed!"); return 0; }
+    say($failed . " configuration validation test(s) failed");
+    return 1;
+}

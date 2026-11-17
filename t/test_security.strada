@@ -1,0 +1,149 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+*/
+
+# t/test_security.strada - Regression tests for Cannoli hardening behavior
+
+func test_response_header_injection() int {
+    say("Testing response header validation...");
+
+    my hash %res = Cannoli::Response::text(200, "ok");
+    Cannoli::Response::header(%res, "X-Good", "yes");
+    Cannoli::Response::header(%res, "X-Bad", "ok\r\nX-Evil: yes");
+    Cannoli::Response::header(%res, "Bad:Name", "yes");
+
+    my str $raw = Cannoli::Response::build(%res);
+    if (index($raw, "X-Good: yes") < 0) {
+        say("  FAIL: valid header was not emitted");
+        return 1;
+    }
+    if (index($raw, "X-Evil") >= 0 || index($raw, "Bad:Name") >= 0) {
+        say("  FAIL: invalid header data reached response");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_content_length_validation() int {
+    say("Testing Content-Length validation...");
+
+    my str $valid = "POST / HTTP/1.1\r\nContent-Length: 12\r\n";
+    if (Cannoli::Server::parse_content_length($valid) != 12) {
+        say("  FAIL: valid Content-Length was rejected");
+        return 1;
+    }
+
+    my str $invalid = "POST / HTTP/1.1\r\nContent-Length: -1\r\n";
+    if (Cannoli::Server::parse_content_length($invalid) != -1) {
+        say("  FAIL: negative Content-Length should be invalid");
+        return 1;
+    }
+
+    my str $nonnumeric = "POST / HTTP/1.1\r\nContent-Length: nope\r\n";
+    if (Cannoli::Server::parse_content_length($nonnumeric) != -1) {
+        say("  FAIL: nonnumeric Content-Length should be invalid");
+        return 1;
+    }
+
+    my str $conflict = "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n";
+    if (Cannoli::Server::parse_content_length($conflict) != -1) {
+        say("  FAIL: conflicting Content-Length headers should be invalid");
+        return 1;
+    }
+
+    my str $te = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    if (Cannoli::Server::has_transfer_encoding($te) != 1) {
+        say("  FAIL: Transfer-Encoding was not detected");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_static_safety() int {
+    say("Testing static path and listing safety...");
+
+    my str $decoded = Cannoli::Static::percent_decode_path("/%2e%2e/etc/passwd");
+    if (Cannoli::Static::is_safe($decoded) != 0) {
+        say("  FAIL: encoded traversal path should be rejected");
+        return 1;
+    }
+
+    my str $dir = "/tmp/cannoli_security_listing";
+    core::mkdir($dir, 493);
+    spew($dir . "/<x>.txt", "x");
+
+    my str $listing = Cannoli::Static::dir_listing($dir, "/files/<script>");
+    if (index($listing, "Index of /files/<script>") >= 0 || index($listing, "><x>.txt</a>") >= 0) {
+        say("  FAIL: directory listing contains unescaped HTML");
+        return 1;
+    }
+    if (index($listing, "%3Cx%3E.txt") < 0) {
+        say("  FAIL: directory listing href was not URL-encoded");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_session_ids() int {
+    say("Testing session ID generation...");
+
+    my str $id = Cannoli::Session::generate_id();
+    if (Cannoli::Session::is_valid_id($id) != 1) {
+        say("  FAIL: generated session ID is not valid hex");
+        return 1;
+    }
+    if (Cannoli::Session::is_valid_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz") != 0) {
+        say("  FAIL: invalid session ID was accepted");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func test_template_escaping() int {
+    say("Testing template escaping defaults...");
+
+    my scalar $vars = {"name" => "<b>Alice</b>", "raw" => "<i>ok</i>"};
+    my str $html = Cannoli::Template::render_string("<p>{{name}}</p><div>{{{raw}}}</div>", $vars);
+
+    if (index($html, "&lt;b&gt;Alice&lt;/b&gt;") < 0) {
+        say("  FAIL: normal template variable was not escaped");
+        return 1;
+    }
+    if (index($html, "<i>ok</i>") < 0) {
+        say("  FAIL: raw template variable was not preserved");
+        return 1;
+    }
+
+    say("  PASS");
+    return 0;
+}
+
+func main() int {
+    say("=== Cannoli Security Regression Tests ===");
+    say("");
+
+    my int $failures = 0;
+    $failures = $failures + test_response_header_injection();
+    $failures = $failures + test_content_length_validation();
+    $failures = $failures + test_static_safety();
+    $failures = $failures + test_session_ids();
+    $failures = $failures + test_template_escaping();
+
+    say("");
+    if ($failures == 0) {
+        say("All security regression tests passed!");
+        return 0;
+    }
+
+    say($failures . " security regression test(s) failed");
+    return 1;
+}

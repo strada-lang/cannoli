@@ -49,7 +49,7 @@ for test in t/test_*.sh; do
     [ -e "$test" ] || continue
     name=$(basename "$test" .sh)
     echo "Running $name..."
-    if "$test" > /tmp/cannoli_test_output.log 2>&1; then
+    if bash "$test" > /tmp/cannoli_test_output.log 2>&1; then
         echo "  PASS"
         PASSED=$((PASSED + 1))
     else

@@ -58,6 +58,10 @@ func Cannoli_new(hash %req) scalar {
     my str $accept_enc = Cannoli::Request::get_header(%req, "Accept-Encoding");
     $self{"_req_accept_encoding"} = $accept_enc;
 
+    # Effective scheme / client info (honors trusted proxies; see server)
+    $self{"_scheme"} = exists(%req, "scheme") ? $req{"scheme"} : (exists(%req, "_ssl") ? "https" : "http");
+    if (exists(%req, "request_id")) { $self{"_request_id"} = $req{"request_id"}; }
+
     # Socket/connection info for chunked responses
     if (exists(%req, "_fd")) {
         $self{"_fd"} = $req{"_fd"};
@@ -147,7 +151,7 @@ func Cannoli_json_param(scalar $self, str $key) scalar {
     if (!defined($json)) {
         return undef;
     }
-    if (ref($json) ne "HASH") {
+    if (reftype($json) ne "HASH") {
         return undef;
     }
     if (exists(%{$json}, $key)) {
@@ -164,6 +168,20 @@ func Cannoli_is_json(scalar $self) int {
 
 func Cannoli_remote_addr(scalar $self) str {
     return $self->{"_remote_addr"};
+}
+
+# "https" when the request arrived over TLS, directly or via a trusted proxy
+func Cannoli_scheme(scalar $self) str {
+    return $self->{"_scheme"};
+}
+
+func Cannoli_is_secure(scalar $self) int {
+    return $self->{"_scheme"} eq "https" ? 1 : 0;
+}
+
+# Per-request ID (also sent as X-Request-Id and usable in logs)
+func Cannoli_request_id(scalar $self) str {
+    return exists(%{$self}, "_request_id") ? $self->{"_request_id"} : "";
 }
 
 func Cannoli_request_content_type(scalar $self) str {
@@ -399,10 +417,10 @@ func Cannoli_unescape(scalar $self, str $text) str {
     return Cannoli_url_decode($text);
 }
 
-# $r->variable(name, value) - get/set request variable
-func Cannoli_variable(scalar $self, str $name, str $value) scalar {
+# $r->variable(name[, value]) - get/set request variable
+func Cannoli_variable(scalar $self, str $name, scalar $value = undef) scalar {
     my scalar $vars = $self->{"_variables"};
-    if (length($value) > 0) {
+    if (defined($value)) {
         $vars->{$name} = $value;
         return $self;
     }
@@ -413,7 +431,7 @@ func Cannoli_variable(scalar $self, str $name, str $value) scalar {
 }
 
 # Alias: stash
-func Cannoli_stash(scalar $self, str $name, str $value) scalar {
+func Cannoli_stash(scalar $self, str $name, scalar $value = undef) scalar {
     return $self->variable($name, $value);
 }
 
@@ -578,12 +596,19 @@ func Cannoli_bad_request(scalar $self, str $message) scalar {
 }
 
 # Set cookie
-func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max_age, int $httponly, int $secure) scalar {
+func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max_age = -1, int $httponly = 0, int $secure = 0, str $samesite = "") scalar {
+    # Reject what would inject cookie attributes or break the header
+    if (Cannoli::Response::valid_header_name($name) == 0 || index($name, "=") >= 0
+        || $value =~ /[;,\x00-\x1f\x7f]/ || $path =~ /[;\x00-\x1f\x7f]/
+        || ($samesite ne "" && $samesite !~ /^(Strict|Lax|None)$/)) {
+        Cannoli::Log::warn("set_cookie: refusing invalid cookie '" . $name . "'");
+        return $self;
+    }
     my str $cookie = $name . "=" . $value;
     if (length($path) > 0) {
         $cookie = $cookie . "; Path=" . $path;
     }
-    if ($max_age > 0) {
+    if ($max_age >= 0) {
         $cookie = $cookie . "; Max-Age=" . $max_age;
     }
     if ($httponly == 1) {
@@ -592,7 +617,28 @@ func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max
     if ($secure == 1) {
         $cookie = $cookie . "; Secure";
     }
-    $self->set_header("Set-Cookie", $cookie);
+    if (length($samesite) > 0) {
+        $cookie = $cookie . "; SameSite=" . $samesite;
+    }
+
+    # One Set-Cookie line per cookie name: a later cookie with the same
+    # name replaces the earlier one, different names accumulate.
+    my scalar $hdrs = $self->{"_res_headers"};
+    my array @kept = ();
+    my scalar $cur = $hdrs->{"Set-Cookie"};
+    if (defined($cur)) {
+        my array @existing = ();
+        if (ref($cur) eq "ARRAY") { @existing = @{$cur}; } else { push(@existing, $cur); }
+        foreach my str $old (@existing) {
+            if (substr($old, 0, length($name) + 1) ne $name . "=") { push(@kept, $old); }
+        }
+    }
+    push(@kept, $cookie);
+    if (scalar(@kept) == 1) {
+        $hdrs->{"Set-Cookie"} = $kept[0];
+    } else {
+        $hdrs->{"Set-Cookie"} = \@kept;
+    }
     return $self;
 }
 
@@ -655,8 +701,7 @@ func Cannoli_start_chunked(scalar $self) scalar {
     my int $i = 0;
     while ($i < scalar(@hdr_names)) {
         my str $name = $hdr_names[$i];
-        my str $value = $custom_hdrs->{$name};
-        Cannoli::Response::header(%res, $name, $value);
+        ::copy_res_header(%res, $name, $custom_hdrs->{$name});
         $i = $i + 1;
     }
 
@@ -687,12 +732,13 @@ func Cannoli_start_chunked(scalar $self) scalar {
 # Write a chunk of data
 # Returns bytes written, or -1 on error
 func Cannoli_write_chunk(scalar $self, str $data) int {
-    if (length($data) == 0) {
+    my int $byte_len = core::byte_length($data);
+    if ($byte_len == 0) {
         return 0;
     }
 
     # Format chunk: hex_length\r\n data \r\n
-    my str $hex_len = Cannoli::Response::to_hex(length($data));
+    my str $hex_len = Cannoli::Response::to_hex($byte_len);
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
 
     if (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
@@ -800,7 +846,7 @@ func Cannoli_build_response(scalar $self) hash {
         my scalar $rd_hdrs = $self->{"_res_headers"};
         my array @rd_names = keys(%{$rd_hdrs});
         foreach my str $rd_name (@rd_names) {
-            Cannoli::Response::header(%rd, $rd_name, $rd_hdrs->{$rd_name});
+            ::copy_res_header(%rd, $rd_name, $rd_hdrs->{$rd_name});
         }
         return %rd;
     }
@@ -822,8 +868,7 @@ func Cannoli_build_response(scalar $self) hash {
     my int $i = 0;
     while ($i < scalar(@hdr_names)) {
         my str $name = $hdr_names[$i];
-        my str $value = $custom_hdrs->{$name};
-        Cannoli::Response::header(%res, $name, $value);
+        ::copy_res_header(%res, $name, $custom_hdrs->{$name});
         $i = $i + 1;
     }
 
@@ -842,6 +887,19 @@ func Cannoli_build_response(scalar $self) hash {
     return %res;
 }
 
+# Copy one response header (a string, or an array ref for repeated
+# headers such as Set-Cookie) into a response hash.
+func Cannoli_copy_res_header(hash %res, str $name, scalar $value) void {
+    if (defined($value) && ref($value) eq "ARRAY") {
+        Cannoli::Response::remove_header(%res, $name);
+        foreach my scalar $v (@{$value}) {
+            Cannoli::Response::add_header(%res, $name, "" . $v);
+        }
+        return;
+    }
+    Cannoli::Response::header(%res, $name, defined($value) ? ("" . $value) : "");
+}
+
 # end package Cannoli
 
 #
@@ -850,27 +908,7 @@ func Cannoli_build_response(scalar $self) hash {
 
 # URL decode helper
 func Cannoli_url_decode(str $s) str {
-    my str $result = "";
-    my int $i = 0;
-    my int $len = length($s);
-
-    while ($i < $len) {
-        my str $ch = substr($s, $i, 1);
-        if ($ch eq "+") {
-            $result = $result . " ";
-            $i = $i + 1;
-        } elsif ($ch eq "%" && $i + 2 < $len) {
-            my str $hex = substr($s, $i + 1, 2);
-            my int $code = Cannoli_hex_to_int($hex);
-            $result = $result . chr($code);
-            $i = $i + 3;
-        } else {
-            $result = $result . $ch;
-            $i = $i + 1;
-        }
-    }
-
-    return $result;
+    return Cannoli::Request::url_decode($s);
 }
 
 # Hex to int helper
@@ -909,9 +947,9 @@ func Cannoli_to_json(scalar $data) str {
         return "null";
     }
 
-    my str $type = ref($data);
+    my str $rtype = reftype($data);
 
-    if ($type eq "HASH") {
+    if ($rtype eq "HASH") {
         my array @keys = keys(%{$data});
         my int $num = scalar(@keys);
         my str $result = "{";
@@ -930,8 +968,7 @@ func Cannoli_to_json(scalar $data) str {
         return $result . "}";
     }
 
-    # Array (both anonymous arrays and named array refs)
-    if ($type eq "ARRAY" || $type eq "REF") {
+    if ($rtype eq "ARRAY") {
         my int $num = scalar(@{$data});
         my str $result = "[";
         my int $i = 0;
@@ -946,21 +983,21 @@ func Cannoli_to_json(scalar $data) str {
         return $result . "]";
     }
 
-    # Scalar value (ref() returns empty string for non-references)
-    # Stringify and check if it's a number
+    my str $vtype = typeof($data);
     my str $s = "" . $data;
-    if ($s =~ /^-?\d+$/) {
-        return $s;
-    }
-    if ($s =~ /^-?\d+\.\d+$/) {
+    if ($vtype eq "int" || $vtype eq "num") {
+        if ($s eq "nan" || $s eq "-nan" || $s eq "inf" || $s eq "-inf") {
+            return "null";
+        }
         return $s;
     }
 
     return "\"" . Cannoli_json_escape($s) . "\"";
 }
 
-# JSON string escape helper
+# JSON string escape helper (RFC 8259 compliant)
 func Cannoli_json_escape(str $s) str {
+    my str $hex = "0123456789abcdef";
     my str $result = "";
     my int $len = length($s);
     my int $i = 0;
@@ -973,12 +1010,20 @@ func Cannoli_json_escape(str $s) str {
             $result = $result . "\\\"";
         } elsif ($ch eq "\\") {
             $result = $result . "\\\\";
+        } elsif ($code == 8) {
+            $result = $result . "\\b";
+        } elsif ($code == 12) {
+            $result = $result . "\\f";
         } elsif ($code == 10) {
             $result = $result . "\\n";
         } elsif ($code == 13) {
             $result = $result . "\\r";
         } elsif ($code == 9) {
             $result = $result . "\\t";
+        } elsif ($code >= 0 && $code < 32) {
+            my int $hi = $code / 16;
+            my int $lo = $code % 16;
+            $result = $result . "\\u00" . substr($hex, $hi, 1) . substr($hex, $lo, 1);
         } else {
             $result = $result . $ch;
         }
@@ -1065,7 +1110,7 @@ func Cannoli_is_compress_enabled(scalar $self) int {
 # Get or create Cannoli_session(lazy loading from cookie)
 func Cannoli_session(scalar $self) scalar {
     # Return cached session if already loaded
-    if (exists(%{$self}, "_session")) {
+    if (exists(%{$self}, "_session") && defined($self->{"_session"})) {
         return $self->{"_session"};
     }
 
@@ -1075,13 +1120,13 @@ func Cannoli_session(scalar $self) scalar {
 
     # Get cookies from request headers
     my scalar $hdrs = $self->{"_headers"};
-    if (exists(%{$hdrs}, "cookie")) {
+    if (defined($hdrs) && exists(%{$hdrs}, "cookie")) {
         my str $cookie_header = $hdrs->{"cookie"};
-        # Parse cookies (format: name=value; name2=value2)
-        my array @cookies = split("; ", $cookie_header);
+        # Parse cookies (format: name=value; name2=value2 or name=value;name2=value2)
+        my array @cookies = split(";", $cookie_header);
         my int $i = 0;
         while ($i < scalar(@cookies)) {
-            my str $cookie = $cookies[$i];
+            my str $cookie = trim($cookies[$i]);
             my int $eq_pos = index($cookie, "=");
             if ($eq_pos > 0) {
                 my str $name = substr($cookie, 0, $eq_pos);
@@ -1152,11 +1197,7 @@ func Cannoli_session_save(scalar $self) scalar {
         my str $cookie_name = Cannoli::Session::cookie_name();
         my str $session_id = Cannoli::Session::id($session);
         my int $ttl = Cannoli::Session::ttl();
-        my int $secure = 0;
-        if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
-            $secure = 1;
-        }
-        $self->set_cookie($cookie_name, $session_id, "/", $ttl, 1, $secure);
+        $self->set_cookie($cookie_name, $session_id, "/", $ttl, 1, $self->is_secure(), "Lax");
         $self->{"_session_new"} = 0;
     }
 
@@ -1165,17 +1206,33 @@ func Cannoli_session_save(scalar $self) scalar {
 
 # Destroy session and clear cookie
 func Cannoli_session_destroy(scalar $self) scalar {
-    if (exists(%{$self}, "_session")) {
+    my str $cookie_name = Cannoli::Session::cookie_name();
+    my str $session_id = "";
+
+    if (exists(%{$self}, "_session") && defined($self->{"_session"})) {
         my scalar $session = $self->{"_session"};
-        my str $session_id = Cannoli::Session::id($session);
-        Cannoli::Session::destroy($session_id);
-
-        # Clear cookie by setting max-age to 0
-        my str $cookie_name = Cannoli::Session::cookie_name();
-        $self->set_cookie($cookie_name, "", "/", 0, 1, 0);
-
-        $self->{"_session"} = undef;
+        $session_id = Cannoli::Session::id($session);
+        delete($self->{"_session"});
+        $self->{"_session_new"} = 0;
+    } else {
+        my scalar $hdrs = $self->{"_headers"};
+        if (defined($hdrs) && exists(%{$hdrs}, "cookie")) {
+            foreach my str $pair (split(";", $hdrs->{"cookie"})) {
+                my str $trimmed = trim($pair);
+                my int $eq_pos = index($trimmed, "=");
+                if ($eq_pos > 0 && substr($trimmed, 0, $eq_pos) eq $cookie_name) {
+                    $session_id = substr($trimmed, $eq_pos + 1, length($trimmed) - $eq_pos - 1);
+                    last;
+                }
+            }
+        }
     }
+
+    if (length($session_id) > 0) {
+        Cannoli::Session::destroy($session_id);
+    }
+
+    $self->set_cookie($cookie_name, "", "/", 0, 1, $self->is_secure(), "Lax");
 
     return $self;
 }
@@ -1238,7 +1295,7 @@ func Cannoli_validate(scalar $self, scalar $rules) scalar {
     # Also include JSON body params if available
     if ($self->is_json() == 1) {
         my scalar $json_body = $self->json_body();
-        if (defined($json_body) && ref($json_body) eq "HASH") {
+        if (defined($json_body) && reftype($json_body) eq "HASH") {
             # Merge JSON body into Cannoli_params(JSON takes precedence)
             my array @json_keys = keys(%{$json_body});
             my int $i = 0;
@@ -1461,17 +1518,17 @@ func Cannoli_base64_decode(str $encoded) str {
         if (exists(%g_b64_decode, $c3)) { $v3 = $g_b64_decode{$c3}; }
         if (exists(%g_b64_decode, $c4)) { $v4 = $g_b64_decode{$c4}; }
 
-        # Decode 4 chars into 3 bytes
+        # Decode 4 chars into up to 3 raw bytes
         my int $b1 = ($v1 * 4) + ($v2 / 16);
         my int $b2 = (($v2 % 16) * 16) + ($v3 / 4);
         my int $b3 = (($v3 % 4) * 64) + $v4;
 
-        $result = $result . chr($b1);
-        if ($c3 ne "=") {
-            $result = $result . chr($b2);
+        $result = $result . core::byte($b1);
+        if (length($c3) > 0 && $c3 ne "=") {
+            $result = $result . core::byte($b2);
         }
-        if ($c4 ne "=") {
-            $result = $result . chr($b3);
+        if (length($c4) > 0 && $c4 ne "=") {
+            $result = $result . core::byte($b3);
         }
 
         $i = $i + 4;

@@ -379,13 +379,58 @@ func Cannoli_Router_match(scalar $router, hash %req) scalar {
 # $c: Cannoli object
 # $idx: current index in middleware array
 # $final_handler: the route handler to call after all middleware
-func Cannoli_Router_run_middleware_chain(scalar $middlewares, scalar $c, int $idx, scalar $final_handler) hash {
+# $after_mw: array of after-middleware functions to run before building response
+func Cannoli_Router_invoke_cannoli_handler(scalar $handler, scalar $c, scalar $after_mw) hash {
+    defined($after_mw);   # after-middleware runs in dispatch, once, on every path
+    my scalar $ret = $handler->($c);
+
+    # A handler may return a response hash directly instead of filling $c;
+    # honor it when $c itself was left untouched.
+    if (defined($ret) && reftype($ret) eq "HASH" && exists(%{$ret}, "status")
+        && length($c->{"_res_body"}) == 0 && length($c->{"_res_redirect"}) == 0
+        && $c->{"_res_status"} == 200 && scalar(keys(%{$c->{"_res_headers"}})) == 0
+        && $c->is_chunked() == 0) {
+        return %{$ret};
+    }
+    return $c->build_response();
+}
+
+# Run after-middleware once the response is decided -- including when a
+# middleware short-circuited the chain -- and carry any response headers it
+# set on $c into the response that won.
+func Cannoli_Router_run_after_middleware(scalar $after_mw, scalar $c, hash %res) hash {
+    if (!defined($after_mw) || scalar(@{$after_mw}) == 0) { return %res; }
+    my hash %before = ();
+    my scalar $hdrs = $c->{"_res_headers"};
+    if (defined($hdrs)) {
+        foreach my str $k (keys(%{$hdrs})) { $before{$k} = $hdrs->{$k}; }
+    }
+    foreach my scalar $mw (@{$after_mw}) {
+        $mw->($c);
+    }
+    $hdrs = $c->{"_res_headers"};
+    if (defined($hdrs) && $res{"sent"} != 1) {
+        foreach my str $k (keys(%{$hdrs})) {
+            my scalar $v = $hdrs->{$k};
+            if (!exists(%before, $k) || $before{$k} ne $v) {
+                if (ref($v) eq "ARRAY") {
+                    if (!defined($res{"headers"})) { $res{"headers"} = {}; }
+                    $res{"headers"}->{$k} = $v;
+                } else {
+                    Cannoli::Response::header(%res, $k, "" . $v);
+                }
+            }
+        }
+    }
+    return %res;
+}
+
+func Cannoli_Router_run_middleware_chain(scalar $middlewares, scalar $c, int $idx, scalar $final_handler, scalar $after_mw = undef) hash {
     my int $num_middleware = scalar(@{$middlewares});
 
-    # If we've run all middleware, call the final handler
+    # If we've run all middleware, call the final handler and after-middleware
     if ($idx >= $num_middleware) {
-        $final_handler->($c);
-        return $c->build_response();
+        return ::invoke_cannoli_handler($final_handler, $c, $after_mw);
     }
 
     # Get current middleware
@@ -393,7 +438,7 @@ func Cannoli_Router_run_middleware_chain(scalar $middlewares, scalar $c, int $id
 
     # Create the next function that continues the chain
     my scalar $next_fn = func (scalar $ctx) {
-        return ::run_middleware_chain($middlewares, $ctx, $idx + 1, $final_handler);
+        return ::run_middleware_chain($middlewares, $ctx, $idx + 1, $final_handler, $after_mw);
     };
 
     # Call middleware with context and next function
@@ -485,36 +530,14 @@ func Cannoli_Router_dispatch(scalar $router, hash %req) hash {
                 }
             }
 
-            # If there's middleware, run the chain
+            # Run the chain (or the bare handler), then after-middleware
+            my hash %chain_res = ();
             if (scalar(@all_middleware) > 0) {
-                my hash %result = ::run_middleware_chain(\@all_middleware, $c, 0, $handler);
-
-                # Run after-middleware (doesn't affect response, just for cleanup/logging)
-                my scalar $after_mw = $router->{"after_middleware"};
-                $i = 0;
-                while ($i < scalar(@{$after_mw})) {
-                    my scalar $mw = $after_mw->[$i];
-                    # After middleware just receives $c, no next
-                    $mw->($c);
-                    $i = $i + 1;
-                }
-
-                return %result;
+                %chain_res = ::run_middleware_chain(\@all_middleware, $c, 0, $handler, undef);
             } else {
-                # No middleware, call handler directly
-                $handler->($c);
-
-                # Run after-middleware
-                my scalar $after_mw = $router->{"after_middleware"};
-                $i = 0;
-                while ($i < scalar(@{$after_mw})) {
-                    my scalar $mw = $after_mw->[$i];
-                    $mw->($c);
-                    $i = $i + 1;
-                }
-
-                return $c->build_response();
+                %chain_res = ::invoke_cannoli_handler($handler, $c, undef);
             }
+            return ::run_after_middleware($router->{"after_middleware"}, $c, %chain_res);
         } else {
             # Classic handler: receives hash, returns hash (no middleware support)
             my hash %result = $handler->(%req);
@@ -539,8 +562,9 @@ func Cannoli_Router_dispatch(scalar $router, hash %req) hash {
             return $err_handler->(%req);
         }
 
-        # Default 500 response
-        return Cannoli::Response::internal_error($error);
+        # Default 500 response: log the details, don't show them to clients
+        Cannoli::Log::error("handler for " . $req{"method"} . " " . $req{"path"} . " died: " . $error);
+        return Cannoli::Response::internal_error("");
     }
 }
 
@@ -606,8 +630,9 @@ func Cannoli_Router_group(scalar $router, str $prefix, scalar $setup_func) void 
 
     while ($i < $num) {
         my scalar $route = $sub_routes->[$i];
-        my str $pattern = $prefix . $route->{"pattern"};
-        ::add_route($router, $route->{"method"}, $pattern, $route->{"handler"});
+        my str $orig = exists(%{$route}, "original_pattern") ? $route->{"original_pattern"} : $route->{"pattern"};
+        my str $pattern = $prefix . $orig;
+        ::add_route_full($router, $route->{"method"}, $pattern, $route->{"handler"}, $route->{"use_cannoli"}, $route->{"middleware"});
         $i = $i + 1;
     }
 }

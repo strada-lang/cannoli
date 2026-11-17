@@ -30,6 +30,16 @@ func Cannoli_Static_new() scalar {
     return \%s;
 }
 
+func Cannoli_Static_prefix_matches(str $url, str $prefix) int {
+    my int $plen = length($prefix);
+    my int $ulen = length($url);
+    if ($plen == 0 || $ulen < $plen) { return 0; }
+    if (substr($url, 0, $plen) ne $prefix) { return 0; }
+    if ($prefix eq "/" || substr($prefix, $plen - 1, 1) eq "/") { return 1; }
+    if ($ulen == $plen || substr($url, $plen, 1) eq "/") { return 1; }
+    return 0;
+}
+
 func Cannoli_Static_base_path(scalar $srv, str $url) str {
     my scalar $aliases = $srv->{"aliases"};
     my array @keys = keys(%{$aliases});
@@ -38,16 +48,10 @@ func Cannoli_Static_base_path(scalar $srv, str $url) str {
     my int $i = 0;
     while ($i < scalar(@keys)) {
         my str $prefix = $keys[$i];
-        my int $plen = length($prefix);
-        my int $ulen = length($url);
-        if ($ulen >= $plen) {
-            my str $url_prefix = substr($url, 0, $plen);
-            if ($url_prefix eq $prefix) {
-                my int $blen = length($best);
-                if ($plen > $blen) {
-                    $best = $prefix;
-                    $target = $aliases->{$prefix};
-                }
+        if (::prefix_matches($url, $prefix) == 1) {
+            if (length($prefix) > length($best)) {
+                $best = $prefix;
+                $target = $aliases->{$prefix};
             }
         }
         $i = $i + 1;
@@ -64,16 +68,10 @@ func Cannoli_Static_resolve_path(scalar $srv, str $url) str {
     my int $i = 0;
     while ($i < scalar(@keys)) {
         my str $prefix = $keys[$i];
-        my int $plen = length($prefix);
-        my int $ulen = length($url);
-        if ($ulen >= $plen) {
-            my str $url_prefix = substr($url, 0, $plen);
-            if ($url_prefix eq $prefix) {
-                my int $blen = length($best);
-                if ($plen > $blen) {
-                    $best = $prefix;
-                    $target = $aliases->{$prefix};
-                }
+        if (::prefix_matches($url, $prefix) == 1) {
+            if (length($prefix) > length($best)) {
+                $best = $prefix;
+                $target = $aliases->{$prefix};
             }
         }
         $i = $i + 1;
@@ -119,7 +117,7 @@ func Cannoli_Static_percent_decode_path(str $s) str {
             my str $hex = substr($s, $i + 1, 2);
             my int $code = Cannoli::Request::hex_to_int($hex);
             if ($code >= 0) {
-                $result = $result . chr($code);
+                $result = $result . core::byte($code);
                 $i = $i + 3;
                 next;
             }
@@ -151,15 +149,15 @@ func Cannoli_Static_url_encode_component(str $s) str {
     my str $hex = "0123456789ABCDEF";
     my str $result = "";
     my int $i = 0;
-    while ($i < length($s)) {
-        my str $ch = substr($s, $i, 1);
-        my int $code = ord($ch);
+    my int $blen = core::byte_length($s);
+    while ($i < $blen) {
+        my int $code = core::get_byte($s, $i);
         my int $unreserved = 0;
-        if (($ch ge "A" && $ch le "Z") || ($ch ge "a" && $ch le "z") || ($ch ge "0" && $ch le "9")) { $unreserved = 1; }
-        if ($ch eq "-" || $ch eq "_" || $ch eq "." || $ch eq "~") { $unreserved = 1; }
+        if (($code >= 65 && $code <= 90) || ($code >= 97 && $code <= 122) || ($code >= 48 && $code <= 57)) { $unreserved = 1; }
+        if ($code == 45 || $code == 95 || $code == 46 || $code == 126) { $unreserved = 1; }
 
         if ($unreserved == 1) {
-            $result = $result . $ch;
+            $result = $result . core::byte($code);
         } else {
             my int $hi = $code / 16;
             my int $lo = $code - ($hi * 16);
@@ -258,9 +256,76 @@ func Cannoli_Static_dir_listing(str $dir, str $url) str {
     return $html;
 }
 
-func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
+func Cannoli_Static_header(scalar $headers, str $name) str {
+    if (!defined($headers)) { return ""; }
+    my str $key = lc($name);
+    if (exists($headers->{$key})) { return "" . $headers->{$key}; }
+    return "";
+}
+
+func Cannoli_Static_http_date(int $epoch) str {
+    my hash %tm = core::gmtime($epoch);
+    return core::strftime("%a, %d %b %Y %H:%M:%S GMT", %tm);
+}
+
+func Cannoli_Static_etag(int $size, int $mtime) str {
+    return "\"" . $size . "-" . $mtime . "\"";
+}
+
+func Cannoli_Static_etag_matches(str $request_value, str $etag) int {
+    if (trim($request_value) eq "*") { return 1; }
+    foreach my str $candidate (split(",", $request_value)) {
+        my str $tag = trim($candidate);
+        if (substr($tag, 0, 2) eq "W/") { $tag = substr($tag, 2, length($tag) - 2); }
+        if ($tag eq $etag) { return 1; }
+    }
+    return 0;
+}
+
+# Parse a Range header for a file of $size bytes. Returns {ok, start, end}
+# where ok is 1 (serve 206), 0 (unsatisfiable: 416) or -1 (ignore the header
+# and serve the whole file: another unit, several ranges, or bad syntax --
+# RFC 9110 14.2 lets a server ignore any Range it does not support).
+func Cannoli_Static_parse_range(str $value, int $size) scalar {
+    my hash %out = {"ok" => -1, "start" => 0, "end" => 0};
+    my str $raw = trim($value);
+    if ($raw !~ /^bytes=([^,]+)$/i) { return \%out; }
+    my str $spec = trim($1);
+    my int $dash = index($spec, "-");
+    if ($dash < 0) { return \%out; }
+    my str $left = trim(substr($spec, 0, $dash));
+    my str $right = trim(substr($spec, $dash + 1, length($spec) - $dash - 1));
+    my int $start = 0;
+    my int $end = $size - 1;
+
+    if (length($left) == 0) {
+        if ($right !~ /^[0-9]+$/ || length($right) > 18) { return \%out; }
+        my int $suffix = int($right);
+        if ($suffix <= 0 || $size <= 0) { $out{"ok"} = 0; return \%out; }
+        if ($suffix > $size) { $suffix = $size; }
+        $start = $size - $suffix;
+    } else {
+        if ($left !~ /^[0-9]+$/ || length($left) > 18) { return \%out; }
+        $start = int($left);
+        if (length($right) > 0) {
+            if ($right !~ /^[0-9]+$/ || length($right) > 18) { return \%out; }
+            $end = int($right);
+            if ($end < $start) { return \%out; }
+        }
+    }
+    if ($start >= $size) { $out{"ok"} = 0; return \%out; }
+    if ($end >= $size) { $end = $size - 1; }
+    $out{"ok"} = 1;
+    $out{"start"} = $start;
+    $out{"end"} = $end;
+    return \%out;
+}
+
+func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $request_headers = undef) hash {
     my hash %res = ();
-    if ($method ne "GET" && $method ne "HEAD") { return %res; }
+    if ($method ne "GET" && $method ne "HEAD") {
+        return Cannoli::Response::method_not_allowed("GET, HEAD");
+    }
 
     my str $decoded_url = ::percent_decode_path($url);
     my int $safe = ::is_safe($decoded_url);
@@ -271,6 +336,15 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
 
     if (core::is_dir($fs)) {
         if (::is_under_root($fs, $root) == 0) { return Cannoli::Response::error_page(403, "Forbidden"); }
+        # /dir -> /dir/ so relative links in the index or listing resolve
+        if (substr($url, length($url) - 1, 1) ne "/") {
+            # collapse leading slashes: "//host" would be a scheme-relative
+            # redirect to another site
+            my str $target = $url;
+            while (substr($target, 0, 2) eq "//") { $target = substr($target, 1, length($target) - 1); }
+            if (index($target, "\\") >= 0) { return Cannoli::Response::error_page(400, "Bad Request"); }
+            return Cannoli::Response::redirect($target . "/", 1);
+        }
         my str $idx = ::find_index($srv, $fs);
         my int $idx_len = length($idx);
         if ($idx_len > 0) {
@@ -281,8 +355,9 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
             if ($listing_enabled == 1) {
                 my str $listing = ::dir_listing($fs, $decoded_url);
                 $res{"status"} = 200;
-                $res{"content_type"} = "text/html";
-                $res{"body"} = $listing;
+                $res{"content_type"} = "text/html; charset=utf-8";
+                $res{"headers"} = {"Content-Length" => "" . core::byte_length($listing)};
+                $res{"body"} = $method eq "HEAD" ? "" : $listing;
                 return %res;
             }
             return Cannoli::Response::error_page(403, "Directory listing disabled");
@@ -298,10 +373,67 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url) hash {
         return Cannoli::Response::payload_too_large($max_file_size);
     }
 
-    my str $content = slurp($fs);
+    my int $mtime = core::file_mtime($fs);
+    my str $etag = ::etag($size, $mtime);
+    my str $modified = ::http_date($mtime);
     my str $mime = Cannoli::Mime::type($fs);
+    my scalar $headers = {
+        "Accept-Ranges" => "bytes",
+        "ETag" => $etag,
+        "Last-Modified" => $modified
+    };
+
+    my str $if_none_match = ::header($request_headers, "if-none-match");
+    my str $if_modified = ::header($request_headers, "if-modified-since");
+    if ((length($if_none_match) > 0 && ::etag_matches($if_none_match, $etag) == 1)
+        || (length($if_none_match) == 0 && length($if_modified) > 0 && trim($if_modified) eq $modified)) {
+        # No Content-Length on a 304: it would have to be the full length,
+        # and caches may update the stored entry from it.
+        $res{"status"} = 304;
+        $res{"content_type"} = $mime;
+        $res{"headers"} = $headers;
+        $res{"body"} = "";
+        return %res;
+    }
+
+    my int $start = 0;
+    my int $end = $size > 0 ? $size - 1 : 0;
+    my int $partial = 0;
+    my str $range_value = ::header($request_headers, "range");
+    my str $if_range = ::header($request_headers, "if-range");
+    if (length($range_value) > 0 && (length($if_range) == 0 || trim($if_range) eq $etag || trim($if_range) eq $modified)) {
+        my scalar $range = ::parse_range($range_value, $size);
+        if ($range->{"ok"} == 0) {
+            $res{"status"} = 416;
+            $headers->{"Content-Range"} = "bytes */" . $size;
+            $headers->{"Content-Length"} = "0";
+            $res{"headers"} = $headers;
+            $res{"body"} = "";
+            return %res;
+        }
+        if ($range->{"ok"} == 1) {
+            $start = $range->{"start"};
+            $end = $range->{"end"};
+            $partial = 1;
+        }
+    }
+
+    my int $length = $size;
+    if ($partial == 1) { $length = $end - $start + 1; }
     $res{"status"} = 200;
+    if ($partial == 1) {
+        $res{"status"} = 206;
+        $headers->{"Content-Range"} = "bytes " . $start . "-" . $end . "/" . $size;
+    }
+    $headers->{"Content-Length"} = "" . $length;
+    $res{"headers"} = $headers;
     $res{"content_type"} = $mime;
-    $res{"body"} = $content;
+    if ($method eq "HEAD") {
+        $res{"body"} = "";
+    } else {
+        my str $content = slurp($fs);
+        if ($partial == 1) { $content = core::byte_substr($content, $start, $length); }
+        $res{"body"} = $content;
+    }
     return %res;
 }

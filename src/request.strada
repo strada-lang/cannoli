@@ -89,17 +89,20 @@ func Cannoli_Request_parse(str $data) hash {
         my int $colon = index($line, ":");
 
         if ($colon > 0) {
-            my str $name = substr($line, 0, $colon);
-            my str $value = substr($line, $colon + 1, length($line) - $colon - 1);
-
-            # Trim leading space from value
-            if (length($value) > 0 && substr($value, 0, 1) eq " ") {
-                $value = substr($value, 1, length($value) - 1);
-            }
+            my str $name = trim(substr($line, 0, $colon));
+            my str $value = trim(substr($line, $colon + 1, length($line) - $colon - 1));
 
             # Normalize header name to lowercase
             $name = ::header_normalize($name);
-            $headers{$name} = $value;
+            if (exists(%headers, $name)) {
+                if ($name eq "cookie") {
+                    $headers{$name} = $headers{$name} . "; " . $value;
+                } else {
+                    $headers{$name} = $headers{$name} . ", " . $value;
+                }
+            } else {
+                $headers{$name} = $value;
+            }
         }
 
         $i = $i + 1;
@@ -126,7 +129,7 @@ func Cannoli_Request_parse(str $data) hash {
     if (($method eq "POST" || $method eq "PUT" || $method eq "PATCH") && length($body) > 0) {
         my str $ct = $req{"content_type"};
 
-        if (index($ct, "multipart/form-data") >= 0) {
+        if (index(lc($ct), "multipart/form-data") >= 0) {
             # Parse multipart form data (file uploads)
             my str $boundary = ::extract_boundary($ct);
             if (length($boundary) > 0) {
@@ -215,7 +218,7 @@ func Cannoli_Request_url_decode(str $s) str {
             my str $hex = substr($s, $i + 1, 2);
             my int $code = ::hex_to_int($hex);
             if ($code >= 0) {
-                $result = $result . chr($code);
+                $result = $result . core::byte($code);
                 $i = $i + 2;
             } else {
                 $result = $result . $ch;
@@ -432,36 +435,32 @@ func Cannoli_Request_has_param(hash %req, str $name) int {
 # Extract boundary from Content-Type header
 # Content-Type: multipart/form-data; boundary=----WebKitFormBoundary...
 func Cannoli_Request_extract_boundary(str $content_type) str {
-    # Check if multipart
-    if (index($content_type, "multipart/form-data") < 0) {
+    my array @parts = split(";", $content_type);
+    if (scalar(@parts) < 2 || lc(trim($parts[0])) ne "multipart/form-data") {
         return "";
     }
-
-    # Find boundary parameter
-    my int $bound_pos = index($content_type, "boundary=");
-    if ($bound_pos < 0) {
-        return "";
-    }
-
-    # Extract boundary value (after "boundary=")
-    my str $boundary = substr($content_type, $bound_pos + 9, length($content_type) - $bound_pos - 9);
-
-    # Remove quotes if present
-    if (length($boundary) > 0 && substr($boundary, 0, 1) eq "\"") {
-        $boundary = substr($boundary, 1, length($boundary) - 1);
-        my int $quote_end = index($boundary, "\"");
-        if ($quote_end >= 0) {
-            $boundary = substr($boundary, 0, $quote_end);
+    # The boundary parameter, matched by exact (case-insensitive) name --
+    # "xboundary=..." is a different parameter.
+    my int $i = 1;
+    while ($i < scalar(@parts)) {
+        my str $param = trim($parts[$i]);
+        my int $eq = index($param, "=");
+        if ($eq > 0 && lc(trim(substr($param, 0, $eq))) eq "boundary") {
+            my str $boundary = trim(substr($param, $eq + 1, length($param) - $eq - 1));
+            if (length($boundary) >= 2 && substr($boundary, 0, 1) eq "\"") {
+                $boundary = substr($boundary, 1, length($boundary) - 1);
+                my int $quote_end = index($boundary, "\"");
+                if ($quote_end >= 0) {
+                    $boundary = substr($boundary, 0, $quote_end);
+                }
+            }
+            # RFC 2046: 1-70 characters
+            if (length($boundary) == 0 || length($boundary) > 70) { return ""; }
+            return $boundary;
         }
+        $i = $i + 1;
     }
-
-    # Remove trailing semicolon or whitespace
-    my int $semi_pos = index($boundary, ";");
-    if ($semi_pos >= 0) {
-        $boundary = substr($boundary, 0, $semi_pos);
-    }
-
-    return $boundary;
+    return "";
 }
 
 # Extract a parameter value from Content-Disposition header
@@ -505,106 +504,115 @@ func Cannoli_Request_parse_multipart_part(str $part) hash {
     $result{"size"} = 0;
 
     # Split headers from content (blank line separator)
+    my int $part_len = core::byte_length($part);
     my int $split_pos = index($part, "\r\n\r\n");
+    my int $sep_len = 4;
     if ($split_pos < 0) {
-        # Try just \n\n
         $split_pos = index($part, "\n\n");
-        if ($split_pos < 0) {
-            return %result;
-        }
-        my str $content = substr($part, $split_pos + 2, length($part) - $split_pos - 2);
-        $result{"content"} = $content;
-        $result{"size"} = length($content);
-        # Note: headers not parsed in \n\n case (simplified handling)
-    } else {
-        my str $headers_section = substr($part, 0, $split_pos);
-        my str $content = substr($part, $split_pos + 4, length($part) - $split_pos - 4);
-        $result{"content"} = $content;
-        $result{"size"} = length($content);
+        $sep_len = 2;
+    }
+    if ($split_pos < 0) {
+        return %result;
+    }
 
-        # Parse headers
-        my array @header_lines = split("\r\n", $headers_section);
-        my int $i = 0;
-        while ($i < scalar(@header_lines)) {
-            my str $line = $header_lines[$i];
-            my str $line_lower = ::header_normalize($line);
+    my str $headers_section = core::byte_substr($part, 0, $split_pos);
+    my str $content = core::byte_substr($part, $split_pos + $sep_len, $part_len - $split_pos - $sep_len);
+    $result{"content"} = $content;
+    $result{"size"} = core::byte_length($content);
 
-            if (index($line_lower, "content-disposition:") == 0) {
-                # Extract name and filename from Content-Disposition
-                $result{"name"} = ::extract_disposition_param($line, "name");
-                $result{"filename"} = ::extract_disposition_param($line, "filename");
-            } elsif (index($line_lower, "content-type:") == 0) {
-                # Extract content type (after "Content-Type: ")
-                my int $colon_pos = index($line, ":");
-                if ($colon_pos >= 0) {
-                    my str $ct = substr($line, $colon_pos + 1, length($line) - $colon_pos - 1);
-                    # Trim leading space
-                    if (length($ct) > 0 && substr($ct, 0, 1) eq " ") {
-                        $ct = substr($ct, 1, length($ct) - 1);
-                    }
-                    $result{"content_type"} = $ct;
-                }
+    # Parse headers
+    my str $line_sep = ($sep_len == 4) ? "\r\n" : "\n";
+    my array @header_lines = split($line_sep, $headers_section);
+    my int $i = 0;
+    while ($i < scalar(@header_lines)) {
+        my str $line = $header_lines[$i];
+        my str $line_lower = ::header_normalize($line);
+
+        if (index($line_lower, "content-disposition:") == 0) {
+            # Extract name and filename from Content-Disposition
+            $result{"name"} = ::extract_disposition_param($line, "name");
+            $result{"filename"} = ::extract_disposition_param($line, "filename");
+        } elsif (index($line_lower, "content-type:") == 0) {
+            # Extract content type (after "Content-Type:")
+            my int $colon_pos = index($line, ":");
+            if ($colon_pos >= 0) {
+                my str $ct = trim(substr($line, $colon_pos + 1, length($line) - $colon_pos - 1));
+                $result{"content_type"} = $ct;
             }
-            $i = $i + 1;
         }
+        $i = $i + 1;
     }
 
     return %result;
 }
 
-# Parse multipart form data body
+# Parse multipart form data body (binary-safe, literal boundary matching)
 # Returns hash with: params (hash ref), Cannoli::Request::files(hash ref)
 func Cannoli_Request_parse_multipart(str $body, str $boundary) hash {
     my hash %result = ();
     my hash %params = ();
     my hash %files = ();
 
-    # Parts are separated by --boundary
-    my str $delim = "--" . $boundary;
-    my str $end_delim = "--" . $boundary . "--";
-
-    # Remove trailing boundary marker if present
-    my int $end_pos = index($body, $end_delim);
-    if ($end_pos >= 0) {
-        $body = substr($body, 0, $end_pos);
+    if (length($boundary) == 0) {
+        $result{"params"} = \%params;
+        $result{"files"} = \%files;
+        return %result;
     }
 
-    # Split on delimiter
-    my array @parts = split($delim, $body);
-    my int $i = 0;
+    # Parts are separated by --boundary; match literally (never regex split, as
+    # RFC 2046 boundaries frequently contain '+', '.', '(', ')', '?').
+    my str $delim = "--" . $boundary;
+    my int $delim_len = core::byte_length($delim);
+    my int $body_len = core::byte_length($body);
 
-    while ($i < scalar(@parts)) {
-        my str $part = $parts[$i];
+    my int $first_pos = index($body, $delim);
+    if ($first_pos < 0) {
+        $result{"params"} = \%params;
+        $result{"files"} = \%files;
+        return %result;
+    }
 
-        # Skip empty parts and preamble
-        if (length($part) > 2) {
-            # Remove leading \r\n if present
-            if (substr($part, 0, 2) eq "\r\n") {
-                $part = substr($part, 2, length($part) - 2);
-            }
-            # Remove trailing \r\n if present
-            if (length($part) >= 2 && substr($part, length($part) - 2, 2) eq "\r\n") {
-                $part = substr($part, 0, length($part) - 2);
-            }
+    my int $pos = $first_pos + $delim_len;
+    while ($pos < $body_len) {
+        # Closing "--" marks the final boundary
+        if ($pos + 2 <= $body_len && core::byte_substr($body, $pos, 2) eq "--") {
+            last;
+        }
+        # Strip CRLF (or LF) after boundary line
+        if ($pos + 2 <= $body_len && core::byte_substr($body, $pos, 2) eq "\r\n") {
+            $pos = $pos + 2;
+        } elsif ($pos + 1 <= $body_len && core::byte_substr($body, $pos, 1) eq "\n") {
+            $pos = $pos + 1;
+        }
 
-            if (length($part) > 0) {
-                my hash %parsed = ::parse_multipart_part($part);
-                my str $name = $parsed{"name"};
-                my str $filename = $parsed{"filename"};
+        my int $next_pos = index($body, $delim, $pos);
+        if ($next_pos < 0) {
+            last;
+        }
 
-                if (length($name) > 0) {
-                    if (length($filename) > 0) {
-                        # This is a file upload
-                        $files{$name} = \%parsed;
-                    } else {
-                        # This is a regular form field
-                        $params{$name} = $parsed{"content"};
-                    }
+        my int $part_end = $next_pos;
+        if ($part_end >= $pos + 2 && core::byte_substr($body, $part_end - 2, 2) eq "\r\n") {
+            $part_end = $part_end - 2;
+        } elsif ($part_end >= $pos + 1 && core::byte_substr($body, $part_end - 1, 1) eq "\n") {
+            $part_end = $part_end - 1;
+        }
+
+        if ($part_end > $pos) {
+            my str $part = core::byte_substr($body, $pos, $part_end - $pos);
+            my hash %parsed = ::parse_multipart_part($part);
+            my str $name = $parsed{"name"};
+            my str $filename = $parsed{"filename"};
+
+            if (length($name) > 0) {
+                if (length($filename) > 0) {
+                    $files{$name} = \%parsed;
+                } else {
+                    $params{$name} = $parsed{"content"};
                 }
             }
         }
 
-        $i = $i + 1;
+        $pos = $next_pos + $delim_len;
     }
 
     $result{"params"} = \%params;
@@ -644,7 +652,7 @@ func Cannoli_Request_files(hash %req) scalar {
 
 # Get file content from a file hash
 func Cannoli_Request_file_content(scalar $file) str {
-    if (length($file) == 0) {
+    if (!defined($file) || reftype($file) ne "HASH") {
         return "";
     }
     return $file->{"content"};
@@ -652,7 +660,7 @@ func Cannoli_Request_file_content(scalar $file) str {
 
 # Get original filename from a file hash
 func Cannoli_Request_file_name(scalar $file) str {
-    if (length($file) == 0) {
+    if (!defined($file) || reftype($file) ne "HASH") {
         return "";
     }
     return $file->{"filename"};
@@ -660,7 +668,7 @@ func Cannoli_Request_file_name(scalar $file) str {
 
 # Get file size from a file hash
 func Cannoli_Request_file_size(scalar $file) int {
-    if (length($file) == 0) {
+    if (!defined($file) || reftype($file) ne "HASH") {
         return 0;
     }
     return $file->{"size"};
@@ -668,7 +676,7 @@ func Cannoli_Request_file_size(scalar $file) int {
 
 # Get content type from a file hash
 func Cannoli_Request_file_type(scalar $file) str {
-    if (length($file) == 0) {
+    if (!defined($file) || reftype($file) ne "HASH") {
         return "";
     }
     return $file->{"content_type"};
@@ -702,11 +710,8 @@ func Cannoli_Request_parse_json_body(hash %req) scalar {
 
 # Simple JSON parser
 # Handles: objects, arrays, strings, numbers, true, false, null
-func Cannoli_Request_json_parse(str $json) scalar {
-    my int $pos = 0;
+func Cannoli_Request_json_skip_ws(str $json, int $pos) int {
     my int $len = length($json);
-
-    # Skip whitespace
     while ($pos < $len) {
         my str $ch = substr($json, $pos, 1);
         if ($ch ne " " && $ch ne "\t" && $ch ne "\n" && $ch ne "\r") {
@@ -714,179 +719,193 @@ func Cannoli_Request_json_parse(str $json) scalar {
         }
         $pos = $pos + 1;
     }
-
-    if ($pos >= $len) {
-        return undef;
-    }
-
-    my str $ch = substr($json, $pos, 1);
-
-    # Object
-    if ($ch eq "{") {
-        return ::json_parse_object($json, $pos);
-    }
-
-    # Array
-    if ($ch eq "[") {
-        return ::json_parse_array($json, $pos);
-    }
-
-    # String
-    if ($ch eq "\"") {
-        my scalar $result = ::json_parse_string($json, $pos);
-        return $result->{"value"};
-    }
-
-    # Number, true, false, null
-    return ::json_parse_value($json, $pos);
+    return $pos;
 }
 
-# Parse JSON object starting at pos, returns {value, end_pos}
+func Cannoli_Request_json_utf8_encode(int $cp) str {
+    if ($cp < 0 || $cp > 1114111) {
+        return "";
+    }
+    if ($cp <= 127) {
+        return core::byte($cp);
+    }
+    if ($cp <= 2047) {
+        my int $b1 = 192 + ($cp / 64);
+        my int $b2 = 128 + ($cp % 64);
+        return core::byte($b1) . core::byte($b2);
+    }
+    if ($cp <= 65535) {
+        my int $b1 = 224 + ($cp / 4096);
+        my int $b2 = 128 + (($cp / 64) % 64);
+        my int $b3 = 128 + ($cp % 64);
+        return core::byte($b1) . core::byte($b2) . core::byte($b3);
+    }
+    my int $b1 = 240 + ($cp / 262144);
+    my int $b2 = 128 + (($cp / 4096) % 64);
+    my int $b3 = 128 + (($cp / 64) % 64);
+    my int $b4 = 128 + ($cp % 64);
+    return core::byte($b1) . core::byte($b2) . core::byte($b3) . core::byte($b4);
+}
+
+# Maximum nesting of arrays/objects accepted from a request body. The parser
+# is recursive; without a bound ~500 "[" characters exhaust the recursion
+# limit and kill the worker.
+func Cannoli_Request_json_too_deep(str $json, int $max_depth) int {
+    my int $depth = 0;
+    my int $in_str = 0;
+    my int $i = 0;
+    my int $n = length($json);
+    while ($i < $n) {
+        my str $ch = substr($json, $i, 1);
+        if ($in_str == 1) {
+            if ($ch eq "\\") { $i = $i + 1; }
+            elsif ($ch eq "\"") { $in_str = 0; }
+        } elsif ($ch eq "\"") {
+            $in_str = 1;
+        } elsif ($ch eq "[" || $ch eq "{") {
+            $depth = $depth + 1;
+            if ($depth > $max_depth) { return 1; }
+        } elsif ($ch eq "]" || $ch eq "}") {
+            $depth = $depth - 1;
+        }
+        $i = $i + 1;
+    }
+    return 0;
+}
+
+func Cannoli_Request_json_parse(str $json) scalar {
+    if (::json_too_deep($json, 128) == 1) {
+        return undef;
+    }
+    my scalar $res = ::json_parse_any($json, 0);
+    if (!defined($res)) {
+        return undef;
+    }
+    my int $end_pos = ::json_skip_ws($json, $res->{"end_pos"});
+    if ($end_pos != length($json)) {
+        return undef;
+    }
+    return $res->{"value"};
+}
+
+# Parse JSON object starting at pos, returns object hashref (or undef on error)
 func Cannoli_Request_json_parse_object(str $json, int $start) scalar {
+    my scalar $res = ::json_parse_object_with_end($json, $start);
+    if (!defined($res)) {
+        return undef;
+    }
+    return $res->{"value"};
+}
+
+func Cannoli_Request_json_parse_object_with_end(str $json, int $start) scalar {
     my hash %obj = ();
-    my int $pos = $start + 1;  # Skip '{'
     my int $len = length($json);
+    if ($start >= $len || substr($json, $start, 1) ne "{") {
+        return undef;
+    }
+    my int $pos = ::json_skip_ws($json, $start + 1);
+    if ($pos < $len && substr($json, $pos, 1) eq "}") {
+        my hash %empty_ret = ("value" => \%obj, "end_pos" => $pos + 1);
+        return \%empty_ret;
+    }
 
     while ($pos < $len) {
-        # Skip whitespace
-        while ($pos < $len) {
-            my str $ch = substr($json, $pos, 1);
-            if ($ch ne " " && $ch ne "\t" && $ch ne "\n" && $ch ne "\r") {
-                last;
-            }
-            $pos = $pos + 1;
-        }
-
-        if ($pos >= $len) { last; }
-
-        my str $ch = substr($json, $pos, 1);
-
-        # End of object
-        if ($ch eq "}") {
-            return \%obj;
-        }
-
-        # Expect string key
-        if ($ch ne "\"") {
+        $pos = ::json_skip_ws($json, $pos);
+        if ($pos >= $len || substr($json, $pos, 1) ne "\"") {
             return undef;
         }
 
         my scalar $key_result = ::json_parse_string($json, $pos);
         if (!defined($key_result)) { return undef; }
         my str $key = $key_result->{"value"};
-        $pos = $key_result->{"end_pos"};
-
-        # Skip whitespace and colon
-        while ($pos < $len) {
-            my str $c = substr($json, $pos, 1);
-            if ($c ne " " && $c ne "\t" && $c ne "\n" && $c ne "\r") {
-                last;
-            }
-            $pos = $pos + 1;
-        }
+        $pos = ::json_skip_ws($json, $key_result->{"end_pos"});
 
         if ($pos >= $len || substr($json, $pos, 1) ne ":") {
             return undef;
         }
-        $pos = $pos + 1;
+        $pos = ::json_skip_ws($json, $pos + 1);
 
-        # Skip whitespace
-        while ($pos < $len) {
-            my str $c = substr($json, $pos, 1);
-            if ($c ne " " && $c ne "\t" && $c ne "\n" && $c ne "\r") {
-                last;
-            }
-            $pos = $pos + 1;
-        }
-
-        # Parse value
         my scalar $val_result = ::json_parse_any($json, $pos);
         if (!defined($val_result)) { return undef; }
         $obj{$key} = $val_result->{"value"};
-        $pos = $val_result->{"end_pos"};
+        $pos = ::json_skip_ws($json, $val_result->{"end_pos"});
 
-        # Skip whitespace
-        while ($pos < $len) {
-            my str $c = substr($json, $pos, 1);
-            if ($c ne " " && $c ne "\t" && $c ne "\n" && $c ne "\r") {
-                last;
-            }
-            $pos = $pos + 1;
+        if ($pos >= $len) {
+            return undef;
         }
-
-        if ($pos >= $len) { last; }
-
-        $ch = substr($json, $pos, 1);
-        if ($ch eq "}") {
-            return \%obj;
-        }
-        if ($ch eq ",") {
-            $pos = $pos + 1;
-        }
-    }
-
-    return \%obj;
-}
-
-# Parse JSON array starting at pos
-func Cannoli_Request_json_parse_array(str $json, int $start) scalar {
-    my array @arr = ();
-    my int $pos = $start + 1;  # Skip '['
-    my int $len = length($json);
-
-    while ($pos < $len) {
-        # Skip whitespace
-        while ($pos < $len) {
-            my str $ch = substr($json, $pos, 1);
-            if ($ch ne " " && $ch ne "\t" && $ch ne "\n" && $ch ne "\r") {
-                last;
-            }
-            $pos = $pos + 1;
-        }
-
-        if ($pos >= $len) { last; }
 
         my str $ch = substr($json, $pos, 1);
+        if ($ch eq "}") {
+            my hash %ret = ("value" => \%obj, "end_pos" => $pos + 1);
+            return \%ret;
+        }
+        if ($ch ne ",") {
+            return undef;
+        }
+        $pos = $pos + 1;
+    }
 
-        # End of array
-        if ($ch eq "]") {
-            return \@arr;
+    return undef;
+}
+
+# Parse JSON array starting at pos, returns arrayref (or undef on error)
+func Cannoli_Request_json_parse_array(str $json, int $start) scalar {
+    my scalar $res = ::json_parse_array_with_end($json, $start);
+    if (!defined($res)) {
+        return undef;
+    }
+    return $res->{"value"};
+}
+
+func Cannoli_Request_json_parse_array_with_end(str $json, int $start) scalar {
+    my array @arr = ();
+    my int $len = length($json);
+    if ($start >= $len || substr($json, $start, 1) ne "[") {
+        return undef;
+    }
+    my int $pos = ::json_skip_ws($json, $start + 1);
+    if ($pos < $len && substr($json, $pos, 1) eq "]") {
+        my hash %empty_ret = ("value" => \@arr, "end_pos" => $pos + 1);
+        return \%empty_ret;
+    }
+
+    while ($pos < $len) {
+        $pos = ::json_skip_ws($json, $pos);
+        if ($pos >= $len) {
+            return undef;
         }
 
-        # Parse value
         my scalar $val_result = ::json_parse_any($json, $pos);
         if (!defined($val_result)) { return undef; }
         push(@arr, $val_result->{"value"});
-        $pos = $val_result->{"end_pos"};
+        $pos = ::json_skip_ws($json, $val_result->{"end_pos"});
 
-        # Skip whitespace
-        while ($pos < $len) {
-            my str $c = substr($json, $pos, 1);
-            if ($c ne " " && $c ne "\t" && $c ne "\n" && $c ne "\r") {
-                last;
-            }
-            $pos = $pos + 1;
+        if ($pos >= $len) {
+            return undef;
         }
 
-        if ($pos >= $len) { last; }
-
-        $ch = substr($json, $pos, 1);
+        my str $ch = substr($json, $pos, 1);
         if ($ch eq "]") {
-            return \@arr;
+            my hash %ret = ("value" => \@arr, "end_pos" => $pos + 1);
+            return \%ret;
         }
-        if ($ch eq ",") {
-            $pos = $pos + 1;
+        if ($ch ne ",") {
+            return undef;
         }
+        $pos = $pos + 1;
     }
 
-    return \@arr;
+    return undef;
 }
 
-# Parse JSON string starting at pos, returns {value, end_pos}
+# Parse JSON string starting at pos, returns {value, end_pos} or undef on error
 func Cannoli_Request_json_parse_string(str $json, int $start) scalar {
+    my int $len = length($json);
+    if ($start >= $len || substr($json, $start, 1) ne "\"") {
+        return undef;
+    }
     my str $result = "";
     my int $pos = $start + 1;  # Skip opening quote
-    my int $len = length($json);
 
     while ($pos < $len) {
         my str $ch = substr($json, $pos, 1);
@@ -900,15 +919,33 @@ func Cannoli_Request_json_parse_string(str $json, int $start) scalar {
 
         if ($ch eq "\\") {
             $pos = $pos + 1;
-            if ($pos >= $len) { last; }
+            if ($pos >= $len) { return undef; }
             my str $esc = substr($json, $pos, 1);
             if ($esc eq "n") { $result = $result . "\n"; }
             elsif ($esc eq "r") { $result = $result . "\r"; }
             elsif ($esc eq "t") { $result = $result . "\t"; }
+            elsif ($esc eq "b") { $result = $result . core::byte(8); }
+            elsif ($esc eq "f") { $result = $result . core::byte(12); }
             elsif ($esc eq "\"") { $result = $result . "\""; }
             elsif ($esc eq "\\") { $result = $result . "\\"; }
             elsif ($esc eq "/") { $result = $result . "/"; }
-            else { $result = $result . $esc; }
+            elsif ($esc eq "u") {
+                if ($pos + 4 >= $len) { return undef; }
+                my int $cp = ::hex_to_int(substr($json, $pos + 1, 4));
+                if ($cp < 0) { return undef; }
+                $pos = $pos + 4;
+                # Surrogate pair handling (U+D800..U+DBFF followed by \uDC00..\uDFFF)
+                if ($cp >= 55296 && $cp <= 56319 && $pos + 6 < $len && substr($json, $pos + 1, 2) eq "\\u") {
+                    my int $low = ::hex_to_int(substr($json, $pos + 3, 4));
+                    if ($low >= 56320 && $low <= 57343) {
+                        $cp = 65536 + (($cp - 55296) * 1024) + ($low - 56320);
+                        $pos = $pos + 6;
+                    }
+                }
+                $result = $result . ::json_utf8_encode($cp);
+            } else {
+                return undef;
+            }
         } else {
             $result = $result . $ch;
         }
@@ -916,25 +953,13 @@ func Cannoli_Request_json_parse_string(str $json, int $start) scalar {
         $pos = $pos + 1;
     }
 
-    my hash %ret = ();
-    $ret{"value"} = $result;
-    $ret{"end_pos"} = $pos;
-    return \%ret;
+    return undef;
 }
 
-# Parse any JSON value, returns {value, end_pos}
+# Parse any JSON value, returns {value, end_pos} or undef on error
 func Cannoli_Request_json_parse_any(str $json, int $start) scalar {
-    my int $pos = $start;
     my int $len = length($json);
-
-    # Skip whitespace
-    while ($pos < $len) {
-        my str $ch = substr($json, $pos, 1);
-        if ($ch ne " " && $ch ne "\t" && $ch ne "\n" && $ch ne "\r") {
-            last;
-        }
-        $pos = $pos + 1;
-    }
+    my int $pos = ::json_skip_ws($json, $start);
 
     if ($pos >= $len) {
         return undef;
@@ -942,69 +967,94 @@ func Cannoli_Request_json_parse_any(str $json, int $start) scalar {
 
     my str $ch = substr($json, $pos, 1);
 
-    # Object
     if ($ch eq "{") {
-        my scalar $obj = ::json_parse_object($json, $pos);
-        # Find end position by scanning past the object
-        my int $end = ::json_find_end($json, $pos, "{", "}");
-        my hash %ret = ();
-        $ret{"value"} = $obj;
-        $ret{"end_pos"} = $end;
-        return \%ret;
+        return ::json_parse_object_with_end($json, $pos);
     }
 
-    # Array
     if ($ch eq "[") {
-        my scalar $arr = ::json_parse_array($json, $pos);
-        my int $end = ::json_find_end($json, $pos, "[", "]");
-        my hash %ret = ();
-        $ret{"value"} = $arr;
-        $ret{"end_pos"} = $end;
-        return \%ret;
+        return ::json_parse_array_with_end($json, $pos);
     }
 
-    # String
     if ($ch eq "\"") {
         return ::json_parse_string($json, $pos);
     }
 
-    # true, false, null, or number
-    if (substr($json, $pos, 4) eq "true") {
-        my hash %ret = ();
-        $ret{"value"} = 1;
-        $ret{"end_pos"} = $pos + 4;
+    # true, false, null
+    if ($pos + 4 <= $len && substr($json, $pos, 4) eq "true") {
+        my hash %ret = ("value" => 1, "end_pos" => $pos + 4);
         return \%ret;
     }
-    if (substr($json, $pos, 5) eq "false") {
-        my hash %ret = ();
-        $ret{"value"} = 0;
-        $ret{"end_pos"} = $pos + 5;
+    if ($pos + 5 <= $len && substr($json, $pos, 5) eq "false") {
+        my hash %ret = ("value" => 0, "end_pos" => $pos + 5);
         return \%ret;
     }
-    if (substr($json, $pos, 4) eq "null") {
-        my hash %ret = ();
-        $ret{"value"} = undef;
-        $ret{"end_pos"} = $pos + 4;
+    if ($pos + 4 <= $len && substr($json, $pos, 4) eq "null") {
+        my hash %ret = ("value" => undef, "end_pos" => $pos + 4);
         return \%ret;
     }
 
-    # Number
-    my str $num_str = "";
+    # Number: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+    my int $num_start = $pos;
+    if ($pos < $len && substr($json, $pos, 1) eq "-") {
+        $pos = $pos + 1;
+    }
+    my int $digits_start = $pos;
     while ($pos < $len) {
-        $ch = substr($json, $pos, 1);
-        if ($ch eq "-" || $ch eq "+" || $ch eq "." || ($ch ge "0" && $ch le "9") || $ch eq "e" || $ch eq "E") {
-            $num_str = $num_str . $ch;
+        my str $d = substr($json, $pos, 1);
+        if ($d ge "0" && $d le "9") {
             $pos = $pos + 1;
         } else {
             last;
         }
     }
+    if ($pos == $digits_start) {
+        return undef;
+    }
 
+    my int $is_float = 0;
+    if ($pos < $len && substr($json, $pos, 1) eq ".") {
+        $is_float = 1;
+        $pos = $pos + 1;
+        my int $frac_start = $pos;
+        while ($pos < $len) {
+            my str $d = substr($json, $pos, 1);
+            if ($d ge "0" && $d le "9") {
+                $pos = $pos + 1;
+            } else {
+                last;
+            }
+        }
+        if ($pos == $frac_start) {
+            return undef;
+        }
+    }
+
+    if ($pos < $len && (substr($json, $pos, 1) eq "e" || substr($json, $pos, 1) eq "E")) {
+        $is_float = 1;
+        $pos = $pos + 1;
+        if ($pos < $len && (substr($json, $pos, 1) eq "+" || substr($json, $pos, 1) eq "-")) {
+            $pos = $pos + 1;
+        }
+        my int $exp_start = $pos;
+        while ($pos < $len) {
+            my str $d = substr($json, $pos, 1);
+            if ($d ge "0" && $d le "9") {
+                $pos = $pos + 1;
+            } else {
+                last;
+            }
+        }
+        if ($pos == $exp_start) {
+            return undef;
+        }
+    }
+
+    my str $num_str = substr($json, $num_start, $pos - $num_start);
     my hash %ret = ();
-    if (index($num_str, ".") >= 0) {
-        $ret{"value"} = 0.0 + $num_str;  # Convert to float
+    if ($is_float == 1) {
+        $ret{"value"} = 0.0 + $num_str;
     } else {
-        $ret{"value"} = 0 + $num_str;  # Convert to int
+        $ret{"value"} = 0 + $num_str;
     }
     $ret{"end_pos"} = $pos;
     return \%ret;
@@ -1049,6 +1099,9 @@ func Cannoli_Request_json_find_end(str $json, int $start, str $open, str $close)
 
 # Parse JSON value (for top-level primitives)
 func Cannoli_Request_json_parse_value(str $json, int $pos) scalar {
+    if (::json_too_deep($json, 128) == 1) {
+        return undef;
+    }
     my scalar $result = ::json_parse_any($json, $pos);
     if (defined($result)) {
         return $result->{"value"};

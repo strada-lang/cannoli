@@ -6,8 +6,11 @@
 #
 # Requires Strada to be installed (run 'make install' in strada directory)
 
-# Overridable: make STRADA=/path/to/strada (or set in the environment)
+# Overridable: make STRADA=/path/to/strada (or set in the environment).
+# STRADA_FLAGS defaults to the compiler's optimized build; for quick
+# development builds use:  make STRADA_FLAGS="-O0 --no-lto"
 STRADA ?= strada
+STRADA_FLAGS ?=
 
 SRC_DIR := src
 LIB_DIR := lib
@@ -65,7 +68,7 @@ $(COMBINED): $(SOURCES) | $(BUILD_DIR)
 # Build the binary using strada wrapper
 $(TARGET): $(COMBINED)
 	@echo "Compiling..."
-	@$(STRADA)  -lffi -lz $(COMBINED) -o $(TARGET)
+	@$(STRADA) $(STRADA_FLAGS) -lffi -lz $(COMBINED) -o $(TARGET)
 
 # Run tests
 test: $(TARGET)
@@ -79,7 +82,7 @@ tools: $(TOOLS)
 
 $(TOOLS_DIR)/cannoli-status: $(TOOLS_DIR)/cannoli-status.strada
 	@echo "Building cannoli-status..."
-	@$(STRADA) $< -o $@
+	@$(STRADA) $(STRADA_FLAGS) $< -o $@
 
 # Clean build artifacts
 clean:

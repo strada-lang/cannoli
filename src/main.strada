@@ -26,6 +26,7 @@ package Cannoli::Main;
 #
 # Options:
 #   -c, --config FILE   Load configuration from file
+#   -t, --test-config   Validate configuration and exit
 #   -p, --port PORT     Listen on port (default: 8080)
 #   -h, --host HOST     Bind to host (default: :: dual-stack)
 #   -w, --workers N     Number of worker processes (default: 5)
@@ -43,6 +44,7 @@ func Cannoli_Main_print_help() void {
     say("");
     say("Options:");
     say("  -c, --config FILE    Load configuration from file");
+    say("  -t, --test-config    Validate configuration and exit");
     say("  -p, --port PORT      Listen on port (default: 8080)");
     say("  -h, --host HOST      Bind to host (default: :: = dual-stack)");
     say("  -w, --workers N      Number of worker processes (default: 5)");
@@ -62,7 +64,10 @@ func Cannoli_Main_print_help() void {
     say("  --ssl-cert FILE      SSL certificate file");
     say("  --ssl-key FILE       SSL private key file");
     say("  --fastcgi            Run in FastCGI mode");
-    say("  --socket PATH        FastCGI socket path");
+    say("  --socket HOST:PORT   FastCGI listen address (default: 127.0.0.1:9000)");
+    say("  --pid-file FILE      Write the master PID to FILE (removed on exit)");
+    say("  --user USER          Run as USER after binding (when started as root)");
+    say("  --group GROUP        Run as GROUP after binding (default: USER's group)");
     say("  --dev                Run in single-process development mode");
     say("  --demo               Run with demo routes (/, /hello, /json, etc.)");
     say("  --debug              Enable debug logging to stdout/stderr");
@@ -89,6 +94,18 @@ func Cannoli_Main_print_help() void {
     say("  [server]");
     say("  port = 8080");
     say("  workers = 5");
+    say("");
+    say("  header_timeout = 20       # whole header block / TLS handshake (s)");
+    say("  timeout = 30              # max silence while reading a request (s)");
+    say("  body_min_rate = 1024      # body bytes/s floor after timeout (0 = off)");
+    say("  write_timeout = 30        # response write stall limit (s)");
+    say("  shutdown_timeout = 10     # stop/SIGHUP grace before SIGKILL (s)");
+    say("  trusted_proxies = 127.0.0.1, 10.0.0.0/8");
+    say("  pid_file = /run/cannoli.pid");
+    say("  user = www-data");
+    say("");
+    say("  [headers]                 # added to every response");
+    say("  X-Content-Type-Options = nosniff");
     say("");
     say("  [ssl]");
     say("  enabled = true");
@@ -161,7 +178,7 @@ my scalar $g_static_server = undef;
 func Cannoli_Main_handle_static_request(hash %req) hash {
     my str $method = $req{"method"};
     my str $path = $req{"path"};
-    return Cannoli::Static::handle_request($g_static_server, $method, $path);
+    return Cannoli::Static::handle_request($g_static_server, $method, $path, $req{"headers"});
 }
 
 func Cannoli_Main_handle_json(hash %req) hash {
@@ -290,6 +307,23 @@ func Cannoli_Main_main(int $argc, array @argv) int {
     my int $demo_mode = 0;
     my int $show_help = 0;
     my int $show_version = 0;
+    my int $test_config = 0;
+    my str $config_file = "";
+    my scalar $cli_errors = [];
+
+    # Load the config file first, so command-line options override it
+    # whatever their order ("-p 9000 -c app.conf" keeps port 9000).
+    my int $ci = 1;
+    while ($ci < $argc - 1) {
+        if ($argv[$ci] eq "-c" || $argv[$ci] eq "--config") {
+            $config_file = $argv[$ci + 1];
+            if (core::is_file($config_file)) {
+                %config = Cannoli::Config::parse_file($config_file);
+            }
+            $ci = $ci + 1;
+        }
+        $ci = $ci + 1;
+    }
 
     # Parse command line arguments
     my int $i = 1;
@@ -300,29 +334,38 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             $show_help = 1;
         } elsif ($arg eq "--version") {
             $show_version = 1;
+        } elsif ($arg eq "-t" || $arg eq "--test-config") {
+            $test_config = 1;
         } elsif ($arg eq "--dev") {
             $dev_mode = 1;
         } elsif ($arg eq "--demo") {
             $demo_mode = 1;
         } elsif ($arg eq "-c" || $arg eq "--config") {
             if ($i + 1 < $argc) {
-                $i = $i + 1;
-                %config = Cannoli::Config::parse_file($argv[$i]);
+                $i = $i + 1;   # loaded above
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "-p" || $arg eq "--port") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"server.port"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "-h" || $arg eq "--host") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"server.host"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "-w" || $arg eq "--workers") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"server.workers"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--no-keep-alive") {
             $config{"server.keep_alive"} = "0";
@@ -332,16 +375,22 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"server.loop_acceptors"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--max-requests") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"server.max_requests"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "-l" || $arg eq "--library") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"app.library"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
@@ -350,6 +399,18 @@ func Cannoli_Main_main(int $argc, array @argv) int {
                 $i = $i + 1;
                 $config{"fastcgi.socket"} = $argv[$i];
                 $config{"fastcgi.enabled"} = "1";
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
+            }
+        } elsif ($arg eq "--pid-file" || $arg eq "--user" || $arg eq "--group") {
+            if ($i + 1 < $argc) {
+                $i = $i + 1;
+                my str $opt_key = "server.pid_file";
+                if ($arg eq "--user") { $opt_key = "server.user"; }
+                if ($arg eq "--group") { $opt_key = "server.group"; }
+                $config{$opt_key} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--ssl") {
             $config{"ssl.enabled"} = "1";
@@ -360,21 +421,29 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"ssl.port"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--ssl-cert") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"ssl.cert"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--ssl-key") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"ssl.key"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "-s" || $arg eq "--static") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"static.root"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--listing") {
             $config{"static.listing"} = "1";
@@ -385,23 +454,33 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"log.level"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--log-format") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"log.format"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--access-log") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"log.access_file"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
         } elsif ($arg eq "--error-log") {
             if ($i + 1 < $argc) {
                 $i = $i + 1;
                 $config{"log.error_file"} = $argv[$i];
+            } else {
+                push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
-        } elsif (substr($arg, 0, 1) ne "-") {
+        } elsif (substr($arg, 0, 1) eq "-") {
+            push(@{$cli_errors}, "unknown option: " . $arg);
+        } else {
             # Positional argument - treat as static directory
             $config{"static.root"} = $arg;
         }
@@ -416,6 +495,29 @@ func Cannoli_Main_main(int $argc, array @argv) int {
 
     if ($show_version == 1) {
         ::print_version();
+        return 0;
+    }
+
+    if (scalar(@{$cli_errors}) > 0) {
+        say(STDERR, "Cannoli command-line error:");
+        foreach my str $cli_err (@{$cli_errors}) { say(STDERR, "  - " . $cli_err); }
+        return 1;
+    }
+
+    my scalar $config_errors = [];
+    if (length($config_file) > 0 && !core::is_file($config_file)) {
+        push(@{$config_errors}, "configuration file does not exist: " . $config_file);
+    } else {
+        $config_errors = Cannoli::Config::validate(%config);
+    }
+    if (scalar(@{$config_errors}) > 0) {
+        say(STDERR, "Cannoli configuration is invalid:");
+        foreach my str $error (@{$config_errors}) { say(STDERR, "  - " . $error); }
+        return 1;
+    }
+    if ($test_config == 1) {
+        my str $which = length($config_file) > 0 ? $config_file : "built-in defaults";
+        say("Cannoli configuration is valid: " . $which);
         return 0;
     }
 
@@ -435,12 +537,12 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         $g_static_server = Cannoli::Static::new();
         $g_static_server->{"document_root"} = $static_root;
 
-        if (exists(%config, "static.listing") && $config{"static.listing"} eq "1") {
+        if (Cannoli::Config::get_bool(%config, "static.listing", 0) == 1) {
             $g_static_server->{"directory_listing"} = 1;
         }
 
-        # Register catch-all route for static files
-        Cannoli::App::get($app, "/.*", \&Cannoli_Main_handle_static_request);
+        # Register catch-all route for static files (GET/HEAD served, others 405)
+        Cannoli::App::any($app, "/.*", \&Cannoli_Main_handle_static_request);
 
         say("Static file server mode");
         say("Document root: " . $static_root);

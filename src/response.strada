@@ -23,22 +23,38 @@ package Cannoli::Response;
 
 # HTTP status code messages
 func Cannoli_Response_status_message(int $code) str {
+    if ($code == 100) { return "Continue"; }
+    if ($code == 101) { return "Switching Protocols"; }
     if ($code == 200) { return "OK"; }
     if ($code == 201) { return "Created"; }
+    if ($code == 202) { return "Accepted"; }
     if ($code == 204) { return "No Content"; }
+    if ($code == 206) { return "Partial Content"; }
     if ($code == 301) { return "Moved Permanently"; }
     if ($code == 302) { return "Found"; }
+    if ($code == 303) { return "See Other"; }
     if ($code == 304) { return "Not Modified"; }
+    if ($code == 307) { return "Temporary Redirect"; }
+    if ($code == 308) { return "Permanent Redirect"; }
     if ($code == 400) { return "Bad Request"; }
     if ($code == 401) { return "Unauthorized"; }
     if ($code == 403) { return "Forbidden"; }
     if ($code == 404) { return "Not Found"; }
     if ($code == 405) { return "Method Not Allowed"; }
+    if ($code == 408) { return "Request Timeout"; }
+    if ($code == 409) { return "Conflict"; }
+    if ($code == 410) { return "Gone"; }
     if ($code == 413) { return "Payload Too Large"; }
+    if ($code == 417) { return "Expectation Failed"; }
+    if ($code == 415) { return "Unsupported Media Type"; }
+    if ($code == 416) { return "Range Not Satisfiable"; }
+    if ($code == 422) { return "Unprocessable Content"; }
+    if ($code == 429) { return "Too Many Requests"; }
     if ($code == 431) { return "Request Header Fields Too Large"; }
     if ($code == 500) { return "Internal Server Error"; }
     if ($code == 502) { return "Bad Gateway"; }
     if ($code == 503) { return "Service Unavailable"; }
+    if ($code == 504) { return "Gateway Timeout"; }
     return "Unknown";
 }
 
@@ -68,31 +84,26 @@ func Cannoli_Response_status(hash %res, int $code) void {
 # Validate HTTP header names before they reach the wire.  RFC token chars are
 # deliberately narrow here; callers passing bad names get a skipped header.
 func Cannoli_Response_valid_header_name(str $name) int {
-    if (length($name) == 0) { return 0; }
-
-    my int $i = 0;
-    while ($i < length($name)) {
-        my str $ch = substr($name, $i, 1);
-        my int $code = ord($ch);
-        if ($code <= 32 || $code >= 127) { return 0; }
-        if ($ch eq "(" || $ch eq ")" || $ch eq "<" || $ch eq ">" || $ch eq "@") { return 0; }
-        if ($ch eq "," || $ch eq ";" || $ch eq ":" || $ch eq "\\" || $ch eq "\"") { return 0; }
-        if ($ch eq "/" || $ch eq "[" || $ch eq "]" || $ch eq "?" || $ch eq "=" || $ch eq "{" || $ch eq "}") { return 0; }
-        $i = $i + 1;
-    }
-
-    return 1;
+    # RFC 9110 token (one regex instead of a substr per character: this runs
+    # for every header of every response)
+    return ($name =~ /^[-!#\$%&'*+.^_`|~0-9A-Za-z]+$/) ? 1 : 0;
 }
 
 func Cannoli_Response_valid_header_value(str $value) int {
-    my int $i = 0;
-    while ($i < length($value)) {
-        my str $ch = substr($value, $i, 1);
-        my int $code = ord($ch);
-        if ($code == 0 || $code == 10 || $code == 13) { return 0; }
-        $i = $i + 1;
+    return ($value =~ /[\x00\r\n]/) ? 0 : 1;
+}
+
+# Find an existing key in a headers hash matching $name case-insensitively
+func Cannoli_Response_find_header_key(scalar $headers, str $name) str {
+    if (!defined($headers)) { return ""; }
+    if (exists(%{$headers}, $name)) { return $name; }
+    my str $target = lc($name);
+    foreach my str $k (keys(%{$headers})) {
+        if (lc($k) eq $target) {
+            return $k;
+        }
     }
-    return 1;
+    return "";
 }
 
 # Set a header
@@ -107,6 +118,10 @@ func Cannoli_Response_header(hash %res, str $name, str $value) void {
         $res{"headers"} = {};
     }
     my scalar $headers = $res{"headers"};
+    my str $existing = ::find_header_key($headers, $name);
+    if (length($existing) > 0 && $existing ne $name) {
+        delete($headers->{$existing});
+    }
     $headers->{$name} = $value;
 }
 
@@ -129,20 +144,37 @@ func Cannoli_Response_write(hash %res, str $content) void {
 func Cannoli_Response_build(hash %res) str {
     my int $status_code = $res{"status"};
     my str $status_msg = ::status_message($status_code);
-    my str $body_content = $res{"body"};
+    my str $body_content = defined($res{"body"}) ? ("" . $res{"body"}) : "";
     if (!defined($res{"headers"})) {
         $res{"headers"} = {};
     }
     my scalar $headers = $res{"headers"};
 
+    # RFC 9110: 1xx, 204, and 304 responses MUST NOT include a message body
+    if (($status_code >= 100 && $status_code < 200) || $status_code == 204 || $status_code == 304) {
+        $body_content = "";
+    }
+
     # Bare responses carry the MIME type as a content_type key
     # (e.g. the static file server) rather than a header.
-    if (defined($res{"content_type"}) && !defined($headers->{"Content-Type"})) {
+    if (defined($res{"content_type"}) && length(::find_header_key($headers, "Content-Type")) == 0) {
         $headers->{"Content-Type"} = $res{"content_type"};
     }
 
-    # Set content length
-    $headers->{"Content-Length"} = "" . length($body_content);
+    # Preserve an explicit representation length (notably for HEAD and range
+    # responses); otherwise derive octet length from the emitted body.
+    my str $cl_key = ::find_header_key($headers, "Content-Length");
+    if ($status_code == 204 || ($status_code >= 100 && $status_code < 200)) {
+        if (length($cl_key) > 0) {
+            delete($headers->{$cl_key});
+        }
+    } elsif ($status_code == 304) {
+        # 304: no body; a Content-Length is only meaningful if the handler
+        # set the real representation length, so never invent "0".
+    } elsif (length($cl_key) == 0 || length("" . $headers->{$cl_key}) == 0) {
+        if (length($cl_key) > 0) { delete($headers->{$cl_key}); }
+        $headers->{"Content-Length"} = "" . core::byte_length($body_content);
+    }
 
     # Build status line
     my str $response = "HTTP/1.1 " . $status_code . " " . $status_msg . "\r\n";
@@ -152,10 +184,7 @@ func Cannoli_Response_build(hash %res) str {
     my int $i = 0;
     while ($i < scalar(@header_names)) {
         my str $name = $header_names[$i];
-        my str $value = $headers->{$name};
-        if (length($value) > 0 && ::valid_header_name($name) == 1 && ::valid_header_value($value) == 1) {
-            $response = $response . $name . ": " . $value . "\r\n";
-        }
+        $response = $response . ::header_lines($name, $headers->{$name}, 0);
         $i = $i + 1;
     }
 
@@ -163,6 +192,50 @@ func Cannoli_Response_build(hash %res) str {
     $response = $response . "\r\n" . $body_content;
 
     return $response;
+}
+
+# Serialize one header. A value may be an array ref of values (e.g. several
+# Set-Cookie headers), emitted as one line each. Empty or invalid values
+# (CR/LF/NUL) are dropped.
+func Cannoli_Response_header_lines(str $name, scalar $value, int $unused) str {
+    if (::valid_header_name($name) == 0) { return ""; }
+    my str $out = "";
+    if (defined($value) && ref($value) eq "ARRAY") {
+        foreach my scalar $v (@{$value}) {
+            my str $sv = defined($v) ? ("" . $v) : "";
+            if (length($sv) > 0 && ::valid_header_value($sv) == 1) {
+                $out = $out . $name . ": " . $sv . "\r\n";
+            }
+        }
+        return $out;
+    }
+    my str $one = defined($value) ? ("" . $value) : "";
+    if (length($one) > 0 && ::valid_header_value($one) == 1) {
+        $out = $name . ": " . $one . "\r\n";
+    }
+    return $out;
+}
+
+# Append a value to a header instead of replacing it (Set-Cookie).
+func Cannoli_Response_add_header(hash %res, str $name, str $value) void {
+    if (::valid_header_name($name) == 0 || ::valid_header_value($value) == 0) {
+        return;
+    }
+    if (!defined($res{"headers"})) {
+        $res{"headers"} = {};
+    }
+    my scalar $headers = $res{"headers"};
+    my str $existing = ::find_header_key($headers, $name);
+    if (length($existing) == 0) {
+        $headers->{$name} = $value;
+        return;
+    }
+    my scalar $cur = $headers->{$existing};
+    if (defined($cur) && ref($cur) eq "ARRAY") {
+        push(@{$cur}, $value);
+    } else {
+        $headers->{$existing} = [$cur, $value];
+    }
 }
 
 # Send response to a file descriptor
@@ -317,28 +390,38 @@ func Cannoli_Response_get_headers(hash %res) scalar {
     return $res{"headers"};
 }
 
-# Check if a response header is set
+# Check if a response header is set (case-insensitive)
 func Cannoli_Response_has_header(hash %res, str $name) int {
     my scalar $headers = $res{"headers"};
-    return exists(%{$headers}, $name);
+    if (!defined($headers)) { return 0; }
+    my str $k = ::find_header_key($headers, $name);
+    if (length($k) == 0) { return 0; }
+    if (!defined($headers->{$k})) { return 0; }
+    if (ref($headers->{$k}) eq "ARRAY") { return scalar(@{$headers->{$k}}) > 0 ? 1 : 0; }
+    return length("" . $headers->{$k}) > 0;
 }
 
-# Get a response header value
+# Get a response header value (case-insensitive)
 func Cannoli_Response_get_header(hash %res, str $name) str {
     my scalar $headers = $res{"headers"};
-    if (exists(%{$headers}, $name)) {
-        return $headers->{$name};
+    if (!defined($headers)) { return ""; }
+    my str $k = ::find_header_key($headers, $name);
+    if (length($k) > 0 && defined($headers->{$k})) {
+        my scalar $v = $headers->{$k};
+        if (ref($v) eq "ARRAY") { return join(", ", @{$v}); }   # repeated header (Set-Cookie)
+        return "" . $v;
     }
     return "";
 }
 
-# Remove a response Cannoli::Response::header(sets to empty string)
-# Note: To fully remove, rebuild headers hash without the key
+# Remove a response header (case-insensitive)
 func Cannoli_Response_remove_header(hash %res, str $name) void {
     my scalar $headers = $res{"headers"};
-    # Since Strada doesn't have delete, we set to empty
-    # The build function will skip empty headers
-    $headers->{$name} = "";
+    if (!defined($headers)) { return; }
+    my str $k = ::find_header_key($headers, $name);
+    if (length($k) > 0) {
+        delete($headers->{$k});
+    }
 }
 
 # Convenience: Text response with custom headers
@@ -385,11 +468,16 @@ func Cannoli_Response_cors(hash %res, str $origin) void {
 
 # Set cookie header
 func Cannoli_Response_set_cookie(hash %res, str $name, str $value, str $options) void {
+    # ';' or ',' in the name/value would inject attributes or cookies
+    if (::valid_header_name($name) == 0 || index($name, "=") >= 0 || $value =~ /[;,\x00-\x1f\x7f]/) {
+        return;
+    }
     my str $cookie = $name . "=" . $value;
     if (length($options) > 0) {
         $cookie = $cookie . "; " . $options;
     }
-    ::header(%res, "Set-Cookie", $cookie);
+    # several cookies per response: append rather than replace
+    ::add_header(%res, "Set-Cookie", $cookie);
 }
 
 # ============================================================
@@ -443,10 +531,9 @@ func Cannoli_Response_build_headers(hash %res) str {
     my int $i = 0;
     while ($i < scalar(@header_names)) {
         my str $name = $header_names[$i];
-        my str $value = $headers->{$name};
         # Skip Content-Length for chunked (it's not allowed)
-        if (length($value) > 0 && $name ne "Content-Length" && ::valid_header_name($name) == 1 && ::valid_header_value($value) == 1) {
-            $response = $response . $name . ": " . $value . "\r\n";
+        if (lc($name) ne "content-length") {
+            $response = $response . ::header_lines($name, $headers->{$name}, 0);
         }
         $i = $i + 1;
     }
@@ -484,7 +571,8 @@ func Cannoli_Response_chunked_start(hash %res, int $fd) hash {
 # Format: hex_size\r\n data\r\n
 # Returns bytes written
 func Cannoli_Response_send_chunk(hash %res, str $data) int {
-    if (length($data) == 0) {
+    my int $byte_len = core::byte_length($data);
+    if ($byte_len == 0) {
         return 0;  # Skip empty chunks
     }
 
@@ -494,7 +582,7 @@ func Cannoli_Response_send_chunk(hash %res, str $data) int {
     }
 
     # Format: {hex_length}\r\n{data}\r\n
-    my str $hex_len = ::to_hex(length($data));
+    my str $hex_len = ::to_hex($byte_len);
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
 
     return core::write_fd($fd, $chunk);
@@ -554,7 +642,7 @@ func Cannoli_Response_compress_gzip(hash %res) int {
     my str $body = $res{"body"};
 
     # Don't compress if body is empty or too small
-    if (length($body) < 1024) {
+    if (core::byte_length($body) < 1024) {
         return 0;
     }
 
@@ -573,8 +661,9 @@ func Cannoli_Response_compress_gzip(hash %res) int {
     my str $compressed = compress::gzip($body);
 
     # Only use compressed if it's actually smaller
-    if (length($compressed) < length($body)) {
+    if (core::byte_length($compressed) < core::byte_length($body)) {
         $res{"body"} = $compressed;
+        ::remove_header(%res, "Content-Length");
         ::header(%res, "Content-Encoding", "gzip");
         ::header(%res, "Vary", "Accept-Encoding");
         return 1;
