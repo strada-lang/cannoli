@@ -149,6 +149,14 @@ print(("  PASS" if ok else "  FAIL") + ": concurrent request served after %.2fs 
 sys.exit(0 if ok else 1)
 PY
 [ $? -eq 0 ] || FAILS=$((FAILS+1))
+echo "large static files are streamed intact"
+head -c 3000000 /dev/urandom > www/rand.bin
+A=$(sha256sum < www/rand.bin | cut -c1-16); B=$(curl -s http://127.0.0.1:$SPORT/rand.bin | sha256sum | cut -c1-16)
+[ "$A" = "$B" ] && pass "3MB file" || fail "3MB file checksum"
+A=$(tail -c +1000001 www/rand.bin | head -c 1500000 | sha256sum | cut -c1-16); B=$(curl -s -r 1000000-2499999 http://127.0.0.1:$SPORT/rand.bin | sha256sum | cut -c1-16)
+[ "$A" = "$B" ] && pass "streamed range" || fail "streamed range checksum"
+C=$(curl -s -o /dev/null -w '%{http_code}' -H "If-Modified-Since: $(date -u -d '+1 day' '+%a, %d %b %Y %H:%M:%S GMT')" http://127.0.0.1:$SPORT/small.txt)
+[ "$C" = 304 ] && pass "If-Modified-Since compared as a date" || fail "IMS -> $C"
 kill -TERM $SPID 2>/dev/null; wait $SPID 2>/dev/null
 
 echo "a library that throws costs one 500, not the worker"

@@ -663,6 +663,52 @@ func Cannoli_Server_conn_send(scalar $server_ref, scalar $conn, str $data) int {
     return 1;
 }
 
+__C__ {
+#include <fcntl.h>
+#include <unistd.h>
+}
+
+# Read up to $len bytes of $path at $offset (binary-safe); "" on error/EOF.
+func Cannoli_Server_file_chunk(str $path, int $offset, int $len) str {
+    my str $out = "";
+    __C__ {
+        char *p = strada_to_str(path);
+        long long off = (long long)strada_to_int(offset);
+        long long n = (long long)strada_to_int(len);
+        out = strada_new_str("");
+        if (p && n > 0) {
+            int fd = open(p, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                char *buf = malloc((size_t)n);
+                if (buf) {
+                    ssize_t r = pread(fd, buf, (size_t)n, (off_t)off);
+                    if (r > 0) out = strada_new_str_len(buf, (size_t)r);
+                    free(buf);
+                }
+                close(fd);
+            }
+        }
+        free(p);
+    }
+    return $out;
+}
+
+# Stream $length bytes of a file (static responses) in 256KB pieces, so a
+# large download never sits in memory whole. Returns 1 on success.
+func Cannoli_Server_send_file_range(scalar $server_ref, scalar $conn, str $path, int $offset, int $length) int {
+    my int $sent = 0;
+    while ($sent < $length) {
+        my int $want = $length - $sent;
+        if ($want > 262144) { $want = 262144; }
+        my str $piece = ::file_chunk($path, $offset + $sent, $want);
+        my int $got = core::byte_length($piece);
+        if ($got == 0) { return 0; }   # file shrank or vanished: drop the connection
+        if (::conn_send($server_ref, $conn, $piece) == 0) { return 0; }
+        $sent = $sent + $got;
+    }
+    return 1;
+}
+
 func Cannoli_Server_conn_close(scalar $server_ref, scalar $conn) void {
     if ($conn->{"tls"} == 1) {
         core::dl_call_void_sv($server_ref->{"ssl_close_fn"}, [$conn->{"ssl"}]);
@@ -791,6 +837,7 @@ func Cannoli_Server_parse_head(str $header_section) scalar {
     $out->{"version"} = substr($lines[0], length($lines[0]) - 8, 8);
 
     my int $hosts = 0;
+    my hash %seen_single = ();
     my int $i = 1;
     my int $n = scalar(@lines);
     while ($i < $n) {
@@ -828,6 +875,12 @@ func Cannoli_Server_parse_head(str $header_section) scalar {
         } elsif ($lname eq "host") {
             $hosts = $hosts + 1;
             if ($hosts > 1) { return $out; }
+        } elsif ($lname eq "content-type" || $lname eq "authorization" || $lname eq "proxy-authorization"
+                 || $lname eq "upgrade" || $lname eq "sec-websocket-key" || $lname eq "origin") {
+            # single-valued fields: a repeat would be comma-joined into a
+            # value neither copy meant (RFC 9110 5.3)
+            if (exists(%seen_single, $lname)) { return $out; }
+            $seen_single{$lname} = 1;
         } elsif ($lname eq "expect") {
             $out->{"expect"} = lc($value);
         }
@@ -1614,7 +1667,15 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
         $req{"request_id"} = $request_id;
 
         # Raw connection handles for streaming (chunked) responses / websockets
+        # Bytes already read past this request (a WebSocket client may send
+        # frames right behind its upgrade request)
+        $req{"_conn_buffer"} = $buffer;
         if ($conn->{"tls"} == 1) {
+            if ($conn->{"nb"} == 1) {
+                $req{"_ssl_try_read_fn"} = $server_ref->{"ssl_try_read_fn"};
+                $req{"_ssl_want_fn"} = $server_ref->{"ssl_want_fn"};
+                $req{"_ssl_fd"} = $conn->{"fd"};
+            }
             $req{"_ssl"} = 1;
             $req{"_ssl_conn"} = $conn->{"ssl"};
             $req{"_ssl_read_fn"} = $server_ref->{"ssl_read_fn"};
@@ -1642,6 +1703,12 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
             %res = %{$d->{"res"}};
             $c = $d->{"c"};
             $after_func = $d->{"after"};
+            # A library handler that upgraded to a WebSocket has used the
+            # connection; never write an HTTP response after the 101.
+            if (defined($c) && exists(%{$c}, "_ws_active") && $c->{"_ws_active"} == 1) {
+                $res{"sent"} = 1;
+                $res{"status"} = 101;
+            }
         } catch ($dispatch_err) {
             Cannoli::Log::error("request " . $request_id . " " . $method . " " . $req{"path"} . " failed: " . $dispatch_err);
             %res = Cannoli::Response::error_page(500, "Internal Server Error");
@@ -1670,6 +1737,9 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
             }
             ::finish_headers($server_ref, %res, $request_id);
             $send_ok = ::conn_send($server_ref, $conn, Cannoli::Response::build(%res));
+            if ($send_ok == 1 && exists(%res, "_file") && $method ne "HEAD") {
+                $send_ok = ::send_file_range($server_ref, $conn, $res{"_file"}, $res{"_file_offset"}, $res{"_file_length"});
+            }
         }
 
         my hash %end_time = core::gettimeofday();
@@ -2697,6 +2767,10 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
     $server_ref->{"running"} = 1;
 
     while ($server_ref->{"running"} == 1) {
+        if ($_g_reload_requested == 1) {
+            $_g_reload_requested = 0;
+            say("SIGHUP ignored in single-process mode (restart the process to reload)");
+        }
         # Build array of file descriptors to monitor
         my array @fds = ();
         if ($http_fd >= 0) {

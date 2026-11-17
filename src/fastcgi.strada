@@ -244,6 +244,11 @@ func Cannoli_FastCGI_header_from_cgi(str $name) str {
 
 # Build FCGI_STDOUT response
 func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
+    # A static response the HTTP server would stream from disk: inline it
+    if (exists(%res, "_file")) {
+        $res{"body"} = Cannoli::Server::file_chunk($res{"_file"}, $res{"_file_offset"}, $res{"_file_length"});
+        delete($res{"_file"});
+    }
     # Build HTTP response
     my str $http_response = Cannoli::Response::build(%res);
 
@@ -327,7 +332,17 @@ func Cannoli_FastCGI_read_exact(int $fd, int $needed) str {
 # Handle a single FastCGI connection
 my int $g_fcgi_max_body = 10485760;
 
+# Serve FastCGI requests on one connection: several in a row when the web
+# server sets FCGI_KEEP_CONN (nginx: fastcgi_keep_conn on), then close.
 func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
+    while (::handle_request($fd, $router) == 1) { }
+    core::close_fd($fd);
+}
+
+# Read and answer one request. Returns 1 to keep the connection for the
+# next request, 0 to close it.
+func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
+    my int $keep_conn = 0;
     my hash %params = ();
     my str $params_stream = "";
     my str $stdin_data = "";
@@ -368,7 +383,10 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
         my int $rec_type = $header{"type"};
 
         if ($rec_type == FCGI_BEGIN_REQUEST()) {
-            # New request
+            # role (2 bytes), flags: bit 0 = FCGI_KEEP_CONN
+            if (core::byte_length($content) >= 3) {
+                $keep_conn = (core::get_byte($content, 2) % 256) % 2;
+            }
         } elsif ($rec_type == FCGI_PARAMS()) {
             # PARAMS is a stream: one name/value pair may span records, so
             # collect it all and parse once the empty record ends it.
@@ -392,9 +410,9 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
     }
 
     if ($done == 0) {
-        core::close_fd($fd);
-        return;
+        return 0;
     }
+    my int $t0 = core::mono_ms();
     if (scalar(keys(%params)) == 0 && core::byte_length($params_stream) > 0) {
         %params = ::parse_params($params_stream);
     }
@@ -434,17 +452,26 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
 
     # Dispatch to router
     my hash %res = ();
-    if (defined($router)) {
-        %res = Cannoli::Router::dispatch($router, %req);
-    } else {
-        %res = Cannoli::Response::text(200, "Cannoli FastCGI server running");
+    try {
+        if (defined($router)) {
+            %res = Cannoli::Router::dispatch($router, %req);
+        } else {
+            %res = Cannoli::Response::text(200, "Cannoli FastCGI server running");
+        }
+    } catch ($fcgi_err) {
+        Cannoli::Log::error("FastCGI " . $req{"method"} . " " . $req{"path"} . " failed: " . $fcgi_err);
+        %res = Cannoli::Response::error_page(500, "Internal Server Error");
+    }
+    if (!exists(%{$res{"headers"} // {}}, "Date")) {
+        Cannoli::Response::header(%res, "Date", Cannoli::Server::http_date());
     }
 
     # Send response
     my str $response = ::build_response(%res, $request_id);
-    core::write_fd($fd, $response);
+    if (core::write_fd($fd, $response) <= 0) { return 0; }
 
-    core::close_fd($fd);
+    Cannoli::Log::request_timed(%req, %res, core::mono_ms() - $t0);
+    return $keep_conn;
 }
 
 # FastCGI worker loop

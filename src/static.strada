@@ -24,7 +24,9 @@ func Cannoli_Static_new() scalar {
     $s{"document_root"} = ".";
     $s{"index_files"} = "index.html,index.htm";
     $s{"directory_listing"} = 0;
-    $s{"max_file_size"} = 67108864;  # 64MB guard for slurp-based responses
+    $s{"max_file_size"} = 0;          # 0 = no limit (large files are streamed from disk)
+    $s{"stream_threshold"} = 262144;  # files above this are not loaded into memory
+    $s{"cache_max_age"} = 0;          # > 0: Cache-Control: public, max-age=N
     my hash %aliases = ();
     $s{"aliases"} = \%aliases;
     return \%s;
@@ -268,6 +270,52 @@ func Cannoli_Static_http_date(int $epoch) str {
     return core::strftime("%a, %d %b %Y %H:%M:%S GMT", %tm);
 }
 
+__C__ {
+#include <sys/stat.h>
+#include <time.h>
+}
+
+# Strong validator from inode, size and the nanosecond mtime: an edit within
+# the same second that keeps the size still changes it.
+func Cannoli_Static_file_etag(str $path) str {
+    my str $tag = "";
+    __C__ {
+        char *p = strada_to_str(path);
+        struct stat st;
+        char buf[96];
+        buf[0] = '\0';
+        if (p && stat(p, &st) == 0) {
+            snprintf(buf, sizeof(buf), "\"%lx-%llx-%llx%09ld\"", (unsigned long)st.st_ino,
+                     (unsigned long long)st.st_size, (unsigned long long)st.st_mtim.tv_sec, (long)st.st_mtim.tv_nsec);
+        }
+        free(p);
+        tag = strada_new_str(buf);
+    }
+    return $tag;
+}
+
+# Parse an HTTP-date (IMF-fixdate, RFC 850 or asctime form) to epoch
+# seconds; -1 if invalid.
+func Cannoli_Static_parse_http_date(str $value) int {
+    my scalar $t = -1;
+    __C__ {
+        char *v = strada_to_str(value);
+        long long out = -1;
+        if (v) {
+            const char *fmts[] = {"%a, %d %b %Y %H:%M:%S GMT", "%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"};
+            for (int i = 0; i < 3 && out < 0; i++) {
+                struct tm tm;
+                memset(&tm, 0, sizeof(tm));
+                const char *end = strptime(v, fmts[i], &tm);
+                if (end && *end == '\0') out = (long long)timegm(&tm);
+            }
+        }
+        free(v);
+        t = strada_new_int(out);
+    }
+    return $t;
+}
+
 func Cannoli_Static_etag(int $size, int $mtime) str {
     return "\"" . $size . "-" . $mtime . "\"";
 }
@@ -374,7 +422,8 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
     }
 
     my int $mtime = core::file_mtime($fs);
-    my str $etag = ::etag($size, $mtime);
+    my str $etag = ::file_etag($fs);
+    if (length($etag) == 0) { $etag = ::etag($size, $mtime); }
     my str $modified = ::http_date($mtime);
     my str $mime = Cannoli::Mime::type($fs);
     my scalar $headers = {
@@ -383,10 +432,18 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
         "Last-Modified" => $modified
     };
 
+    if ($srv->{"cache_max_age"} > 0) {
+        $headers->{"Cache-Control"} = "public, max-age=" . $srv->{"cache_max_age"};
+    }
+
+    # Conditional GET (RFC 9110 13.1): If-None-Match wins; otherwise
+    # If-Modified-Since by date -- not modified since the given time.
     my str $if_none_match = ::header($request_headers, "if-none-match");
     my str $if_modified = ::header($request_headers, "if-modified-since");
+    my int $ims = -1;
+    if (length($if_none_match) == 0 && length($if_modified) > 0) { $ims = ::parse_http_date(trim($if_modified)); }
     if ((length($if_none_match) > 0 && ::etag_matches($if_none_match, $etag) == 1)
-        || (length($if_none_match) == 0 && length($if_modified) > 0 && trim($if_modified) eq $modified)) {
+        || ($ims >= 0 && $mtime <= $ims)) {
         # No Content-Length on a 304: it would have to be the full length,
         # and caches may update the stored entry from it.
         $res{"status"} = 304;
@@ -430,6 +487,12 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
     $res{"content_type"} = $mime;
     if ($method eq "HEAD") {
         $res{"body"} = "";
+    } elsif ($length > $srv->{"stream_threshold"}) {
+        # The server streams this range from disk after the headers.
+        $res{"body"} = "";
+        $res{"_file"} = $fs;
+        $res{"_file_offset"} = $start;
+        $res{"_file_length"} = $length;
     } else {
         my str $content = slurp($fs);
         if ($partial == 1) { $content = core::byte_substr($content, $start, $length); }

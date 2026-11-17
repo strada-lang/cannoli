@@ -291,39 +291,38 @@ Cannoli::Response::remove_header(%res, "X-Unwanted");
 
 ## WebSockets
 
-Cannoli provides a basic WebSocket upgrade helper and frame utilities.
-
 ```strada
 func ws_echo(scalar $c) hash {
-    my scalar $ws = $c->ws_accept();
+    # "" = same-origin browsers only (default), "*" = any origin,
+    # or a list: "https://app.example.com, https://admin.example.com"
+    my scalar $ws = $c->ws_accept("", "");
     if (!defined($ws)) {
-        $c->bad_request("Missing WebSocket headers");
+        if ($c->get_status() == 200) { $c->bad_request("Missing WebSocket headers"); }
         return $c->build_response();
     }
 
+    $c->ws_max_message(1048576);          # optional; 1MB is the default
     while (1) {
-        my scalar $frame = Cannoli::WebSocket::recv_frame($ws);
-        if (!defined($frame)) { last; }
-
-        my int $opcode = $frame->{"opcode"};
-        if ($opcode == 8) { last; }  # close
-        if ($opcode == 9) {
-            Cannoli::WebSocket::send_pong($ws, $frame->{"payload"});
-            next;
-        }
-
-        Cannoli::WebSocket::send_text($ws, $frame->{"payload"});
+        my scalar $msg = $c->ws_recv();   # {type => "text"|"binary", data => ...}
+        if (!defined($msg)) { last; }     # peer closed (or broke the protocol)
+        $c->ws_send("echo: " . $msg->{"data"});
     }
-
-    Cannoli::WebSocket::close($ws, 1000, "");
     return $c->build_response();
 }
 ```
 
-For hash-based handlers, call `Cannoli::WebSocket::accept(%req)` and return
-`Cannoli::Response::sent(101)` after the WebSocket loop completes.
+`ws_recv` answers pings, reassembles fragmented messages, validates UTF-8 in
+text messages, enforces the message size limit (close code 1009), rejects
+unmasked or malformed client frames (1002) and completes the close
+handshake. Other methods: `ws_send_binary`, `ws_ping`, `ws_close($code,
+$reason)`. Use these `$c->ws_*` methods from dynamically loaded libraries;
+direct `Cannoli::WebSocket::*` calls from a `.so` are not safe. Bytes a
+client sends right behind its upgrade request are delivered. Not supported:
+extensions such as permessage-deflate.
 
-Limitations: no fragmentation reassembly and no extension support (e.g. permessage-deflate).
+For hash-based handlers, call `Cannoli::WebSocket::accept(%req)`, loop on
+`Cannoli::WebSocket::recv_message($ws)`, and return
+`Cannoli::Response::sent(101)`.
 
 ## Complete Header Example
 
@@ -471,6 +470,16 @@ level = info
 ```
 
 Set `server.keep_alive = false` or pass `--no-keep-alive` to always close each response.
+`static.cache_max_age = N` adds `Cache-Control: public, max-age=N` to static
+files; files over 256KB are streamed from disk rather than loaded into memory.
+
+Sessions are stored under `/tmp/cannoli_sessions` (or the directory given to
+`Cannoli::Session::configure`) only if it is a private directory owned by the
+server user; otherwise a per-user `...-<uid>` directory is used. Call
+`$c->session_regenerate()` after a login to issue a new session ID.
+`$c->set_cookie(name, value, path, max_age)`: `max_age` > 0 persists the
+cookie, 0 or -1 makes it a browser-session cookie; `$c->expire_cookie(name)`
+deletes one.
 Command-line options override the config file regardless of their order.
 `cannoli -t -c FILE` validates a configuration without starting.
 

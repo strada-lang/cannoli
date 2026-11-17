@@ -165,7 +165,8 @@ func Cannoli_Template_render(str $name, scalar $vars) str {
     if (length($template) == 0) {
         return "";
     }
-    return ::render_string($template, $vars);
+    # a copy: {{#set}} must not change the caller's variables
+    return ::render_string($template, ::merge_scope($vars, undef));
 }
 
 # Render a template string with variables
@@ -276,7 +277,8 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
                         # Resolve the value
                         my scalar $value = ::resolve_value($value_expr, $vars);
 
-                        # Set in vars if scope is a hash
+                        # Set in this render's scope (the public entry points
+                        # hand render_string a copy of the caller's hash)
                         if (reftype($vars) eq "HASH") {
                             $vars->{$var_name} = $value;
                         }
@@ -850,7 +852,8 @@ func Cannoli_Template_render_safe(str $name, scalar $vars) str {
 
 # Render string with HTML escaping
 func Cannoli_Template_render_string_safe(str $template, scalar $vars) str {
-    return ::render_string($template, $vars);
+    # a copy: {{#set}} must not change the caller's variables
+    return ::render_string($template, ::merge_scope($vars, undef));
 }
 
 # Find triple closing }}}

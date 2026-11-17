@@ -35,18 +35,62 @@ my str $g_session_dir = "/tmp/cannoli_sessions";
 my str $g_session_cookie = "cannoli_session";
 my int $g_session_ttl = 3600;  # 1 hour default TTL
 
-# Initialize session system (creates directory if needed)
-func Cannoli_Session_init() void {
-    if (core::is_dir($g_session_dir) == 0) {
-        core::mkdir($g_session_dir, 448);  # 0700
+my int $g_session_dir_ok = 0;
+
+__C__ {
+#include <sys/stat.h>
+#include <unistd.h>
+/* 1 if path is a real directory (not a symlink) owned by us with no
+ * group/other access -- creating it 0700 when missing; 0 otherwise. A
+ * directory in /tmp that another local user created first (or a symlink they
+ * planted) would let them read or forge sessions. */
+static int cannoli_private_dir(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        if (mkdir(path, 0700) != 0) return 0;
+        if (lstat(path, &st) != 0) return 0;
     }
-    core::chmod($g_session_dir, 448);
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return 0;
+    if ((st.st_mode & 077) != 0 && chmod(path, 0700) != 0) return 0;
+    return 1;
+}
+}
+
+func Cannoli_Session_private_dir(str $path) int {
+    my scalar $ok = 0;
+    __C__ {
+        char *p = strada_to_str(path);
+        ok = strada_new_int(p ? cannoli_private_dir(p) : 0);
+        free(p);
+    }
+    return $ok;
+}
+
+# Initialize session system: make sure the directory is ours alone. If the
+# configured one is not (e.g. pre-created by another user), fall back to a
+# per-user directory; if that fails too, sessions are not stored at all.
+func Cannoli_Session_init() void {
+    if ($g_session_dir_ok == 1) { return; }
+    if (::private_dir($g_session_dir) == 1) {
+        $g_session_dir_ok = 1;
+        return;
+    }
+    my str $fallback = $g_session_dir . "-" . core::geteuid();
+    if (::private_dir($fallback) == 1) {
+        Cannoli::Log::warn("session directory " . $g_session_dir . " is not a private directory owned by this user; using " . $fallback);
+        $g_session_dir = $fallback;
+        $g_session_dir_ok = 1;
+        return;
+    }
+    Cannoli::Log::error("no usable private session directory (" . $g_session_dir . "); sessions are disabled");
+    $g_session_dir_ok = -1;
 }
 
 # Configure session settings
 func Cannoli_Session_configure(str $dir, str $cookie_name, int $ttl) void {
     if (length($dir) > 0) {
         $g_session_dir = $dir;
+        $g_session_dir_ok = 0;
     }
     if (length($cookie_name) > 0) {
         $g_session_cookie = $cookie_name;
@@ -106,6 +150,8 @@ func Cannoli_Session_load(str $id) scalar {
     if (::is_valid_id($id) == 0) {
         return undef;
     }
+    ::init();
+    if ($g_session_dir_ok != 1) { return undef; }
 
     my str $path = ::file_path($id);
 
@@ -172,6 +218,7 @@ func Cannoli_Session_load(str $id) scalar {
 # Save a session to file
 func Cannoli_Session_save(scalar $session) int {
     ::init();
+    if ($g_session_dir_ok != 1) { return 0; }
 
     my str $id = $session->{"id"};
     if (::is_valid_id($id) == 0) {
@@ -209,6 +256,17 @@ func Cannoli_Session_save(scalar $session) int {
     core::chmod($tmp_path, 384);  # 0600
     core::rename($tmp_path, $path);
     return 1;
+}
+
+# Give a session a new ID (data kept), removing the stored copy under the
+# old one. Defends against session fixation when called at login.
+func Cannoli_Session_regenerate(scalar $session) void {
+    my str $old = $session->{"id"};
+    $session->{"id"} = ::generate_id();
+    if (length($old) > 0 && ::is_valid_id($old) == 1) {
+        ::destroy($old);
+    }
+    ::save($session);
 }
 
 # Destroy a session

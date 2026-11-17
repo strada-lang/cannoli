@@ -69,6 +69,12 @@ func Cannoli_new(hash %req) scalar {
     if (exists(%req, "_client")) {
         $self{"_client"} = $req{"_client"};
     }
+    if (exists(%req, "_conn_buffer")) { $self{"_conn_buffer"} = $req{"_conn_buffer"}; }
+    if (exists(%req, "_ssl_try_read_fn")) {
+        $self{"_ssl_try_read_fn"} = $req{"_ssl_try_read_fn"};
+        $self{"_ssl_want_fn"} = $req{"_ssl_want_fn"};
+        $self{"_ssl_fd"} = $req{"_ssl_fd"};
+    }
     if (exists(%req, "_ssl")) {
         $self{"_ssl"} = $req{"_ssl"};
         $self{"_ssl_conn"} = $req{"_ssl_conn"};
@@ -420,7 +426,10 @@ func Cannoli_unescape(scalar $self, str $text) str {
 # $r->variable(name[, value]) - get/set request variable
 func Cannoli_variable(scalar $self, str $name, scalar $value = undef) scalar {
     my scalar $vars = $self->{"_variables"};
-    if (defined($value)) {
+    # An empty string reads, like the original API ($c->variable("foo", "")
+    # is the established getter idiom); any other value -- including a
+    # reference -- sets. Use unset_variable() to remove one.
+    if (defined($value) && (ref($value) ne "" || length("" . $value) > 0)) {
         $vars->{$name} = $value;
         return $self;
     }
@@ -431,6 +440,11 @@ func Cannoli_variable(scalar $self, str $name, scalar $value = undef) scalar {
 }
 
 # Alias: stash
+func Cannoli_unset_variable(scalar $self, str $name) scalar {
+    delete($self->{"_variables"}->{$name});
+    return $self;
+}
+
 func Cannoli_stash(scalar $self, str $name, scalar $value = undef) scalar {
     return $self->variable($name, $value);
 }
@@ -608,8 +622,12 @@ func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max
     if (length($path) > 0) {
         $cookie = $cookie . "; Path=" . $path;
     }
-    if ($max_age >= 0) {
+    # max_age > 0: persistent; 0 or -1: browser-session cookie (the
+    # original meaning of 0); -2: expire now (see expire_cookie)
+    if ($max_age > 0) {
         $cookie = $cookie . "; Max-Age=" . $max_age;
+    } elsif ($max_age == -2) {
+        $cookie = $cookie . "; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
     }
     if ($httponly == 1) {
         $cookie = $cookie . "; HttpOnly";
@@ -640,6 +658,11 @@ func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max
         $hdrs->{"Set-Cookie"} = \@kept;
     }
     return $self;
+}
+
+# Tell the browser to delete a cookie (same name and path it was set with)
+func Cannoli_expire_cookie(scalar $self, str $name, str $path = "/") scalar {
+    return $self->set_cookie($name, "", $path, -2, 1, $self->is_secure());
 }
 
 # Send file content
@@ -783,10 +806,28 @@ func Cannoli_is_chunked(scalar $self) int {
 # WebSocket Methods
 #
 
-func Cannoli_ws_accept(scalar $self, str $protocol = "") scalar {
+# Upgrade to a WebSocket. $allowed_origins: "" = same origin only (the
+# Origin header, when a browser sends one, must match Host -- blocks
+# cross-site WebSocket hijacking), "*" = any, or a comma-separated list of
+# origins ("https://app.example.com").
+func Cannoli_ws_accept(scalar $self, str $protocol = "", str $allowed_origins = "") scalar {
     my hash %req = ();
     $req{"method"} = $self->{"_method"};
     $req{"headers"} = $self->{"_headers"};
+    if (exists(%{$self}, "_conn_buffer")) { $req{"_conn_buffer"} = $self->{"_conn_buffer"}; }
+    if (exists(%{$self}, "_ssl_try_read_fn")) {
+        $req{"_ssl_try_read_fn"} = $self->{"_ssl_try_read_fn"};
+        $req{"_ssl_want_fn"} = $self->{"_ssl_want_fn"};
+        $req{"_ssl_fd"} = $self->{"_ssl_fd"};
+    }
+
+    my scalar $hdrs = $self->{"_headers"};
+    my str $origin = (defined($hdrs) && exists(%{$hdrs}, "origin")) ? $hdrs->{"origin"} : "";
+    if (Cannoli::WebSocket::origin_allowed($origin, defined($hdrs) && exists(%{$hdrs}, "host") ? $hdrs->{"host"} : "", $allowed_origins) == 0) {
+        $self->status(403);
+        $self->render_text("WebSocket origin not allowed");
+        return undef;
+    }
 
     if (exists(%{$self}, "_client")) {
         $req{"_client"} = $self->{"_client"};
@@ -809,8 +850,47 @@ func Cannoli_ws_accept(scalar $self, str $protocol = "") scalar {
     if (defined($ws)) {
         $self->{"_ws_active"} = 1;
         $self->{"_ws_status"} = 101;
+        $self->{"_ws"} = $ws;
     }
     return $ws;
+}
+
+# WebSocket methods for the connection accepted by ws_accept(). Use these
+# from dynamically loaded libraries: method calls cross the library
+# boundary safely, direct Cannoli::WebSocket::* calls from a .so do not.
+
+# Next complete message: {type => "text"|"binary", data => ...}, or undef
+# once the peer closed (or broke the protocol). Pings are answered and
+# fragments reassembled automatically.
+func Cannoli_ws_recv(scalar $self) scalar {
+    if (!exists(%{$self}, "_ws")) { return undef; }
+    return Cannoli::WebSocket::recv_message($self->{"_ws"});
+}
+
+func Cannoli_ws_send(scalar $self, str $text) int {
+    if (!exists(%{$self}, "_ws")) { return -1; }
+    return Cannoli::WebSocket::send_text($self->{"_ws"}, $text);
+}
+
+func Cannoli_ws_send_binary(scalar $self, str $data) int {
+    if (!exists(%{$self}, "_ws")) { return -1; }
+    return Cannoli::WebSocket::send_binary($self->{"_ws"}, $data);
+}
+
+func Cannoli_ws_ping(scalar $self, str $data = "") int {
+    if (!exists(%{$self}, "_ws")) { return -1; }
+    return Cannoli::WebSocket::send_ping($self->{"_ws"}, $data);
+}
+
+func Cannoli_ws_close(scalar $self, int $code = 1000, str $reason = "") scalar {
+    if (exists(%{$self}, "_ws")) { Cannoli::WebSocket::close($self->{"_ws"}, $code, $reason); }
+    return $self;
+}
+
+# Limit for one incoming message (default 1MB)
+func Cannoli_ws_max_message(scalar $self, int $bytes) scalar {
+    if (exists(%{$self}, "_ws")) { $self->{"_ws"}->{"max_message"} = $bytes; }
+    return $self;
 }
 
 #
@@ -989,6 +1069,13 @@ func Cannoli_to_json(scalar $data) str {
         if ($s eq "nan" || $s eq "-nan" || $s eq "inf" || $s eq "-inf") {
             return "null";
         }
+        return $s;
+    }
+    # Numeric strings (request params, DB columns) are emitted as numbers,
+    # as before -- but only canonical ones: "007", "1e5", "+1" or numbers
+    # too long to round-trip stay strings (the old code emitted 007, which
+    # is not valid JSON).
+    if (length($s) <= 15 && $s =~ /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/) {
         return $s;
     }
 
@@ -1205,6 +1292,16 @@ func Cannoli_session_save(scalar $self) scalar {
 }
 
 # Destroy session and clear cookie
+# Give the session a new ID, keeping its data (call after login or any
+# privilege change, against session fixation). The old ID stops working.
+func Cannoli_session_regenerate(scalar $self) scalar {
+    my scalar $session = $self->session();
+    if (!defined($session)) { return $self; }
+    Cannoli::Session::regenerate($session);
+    $self->{"_session_new"} = 1;   # session_save() sends the new cookie
+    return $self;
+}
+
 func Cannoli_session_destroy(scalar $self) scalar {
     my str $cookie_name = Cannoli::Session::cookie_name();
     my str $session_id = "";
@@ -1232,7 +1329,7 @@ func Cannoli_session_destroy(scalar $self) scalar {
         Cannoli::Session::destroy($session_id);
     }
 
-    $self->set_cookie($cookie_name, "", "/", 0, 1, $self->is_secure(), "Lax");
+    $self->set_cookie($cookie_name, "", "/", -2, 1, $self->is_secure(), "Lax");
 
     return $self;
 }
@@ -1277,7 +1374,7 @@ func Cannoli_render_with_layout(scalar $self, str $template_name, str $layout_na
 
 # Render a template string directly
 func Cannoli_render_string(scalar $self, str $template, scalar $vars) scalar {
-    my str $html = Cannoli::Template::render_string($template, $vars);
+    my str $html = Cannoli::Template::render_string_safe($template, $vars);
     if (length($self->{"_res_content_type"}) == 0) {
         $self->content_type("text/html; charset=utf-8");
     }

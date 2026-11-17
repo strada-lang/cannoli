@@ -63,7 +63,7 @@ func Cannoli_Validation_email(scalar $value) int {
     my int $k = 0;
     while ($k < length($s)) {
         my str $ch = substr($s, $k, 1);
-        if (ord($ch) <= 32) {
+        if (ord($ch) <= 32 || ord($ch) == 127) {
             return 0;
         }
         $k = $k + 1;
@@ -86,6 +86,16 @@ func Cannoli_Validation_email(scalar $value) int {
         return 0;
     }
     if (substr($domain, length($domain) - 1, 1) eq ".") {
+        return 0;
+    }
+    # every domain label non-empty, letters/digits/hyphens, no edge hyphen;
+    # local part without empty dot-separated pieces
+    foreach my str $label (split("\\.", $domain)) {
+        if (length($label) == 0 || length($label) > 63) { return 0; }
+        if ($label !~ /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/ && $label !~ /[^\x00-\x7f]/) { return 0; }
+    }
+    my str $local = substr($s, 0, $at);
+    if (substr($local, 0, 1) eq "." || substr($local, length($local) - 1, 1) eq "." || index($local, "..") >= 0) {
         return 0;
     }
 

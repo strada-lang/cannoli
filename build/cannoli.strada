@@ -510,18 +510,62 @@ my str $g_session_dir = "/tmp/cannoli_sessions";
 my str $g_session_cookie = "cannoli_session";
 my int $g_session_ttl = 3600;  # 1 hour default TTL
 
-# Initialize session system (creates directory if needed)
-func Cannoli_Session_init() void {
-    if (core::is_dir($g_session_dir) == 0) {
-        core::mkdir($g_session_dir, 448);  # 0700
+my int $g_session_dir_ok = 0;
+
+__C__ {
+#include <sys/stat.h>
+#include <unistd.h>
+/* 1 if path is a real directory (not a symlink) owned by us with no
+ * group/other access -- creating it 0700 when missing; 0 otherwise. A
+ * directory in /tmp that another local user created first (or a symlink they
+ * planted) would let them read or forge sessions. */
+static int cannoli_private_dir(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        if (mkdir(path, 0700) != 0) return 0;
+        if (lstat(path, &st) != 0) return 0;
     }
-    core::chmod($g_session_dir, 448);
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return 0;
+    if ((st.st_mode & 077) != 0 && chmod(path, 0700) != 0) return 0;
+    return 1;
+}
+}
+
+func Cannoli_Session_private_dir(str $path) int {
+    my scalar $ok = 0;
+    __C__ {
+        char *p = strada_to_str(path);
+        ok = strada_new_int(p ? cannoli_private_dir(p) : 0);
+        free(p);
+    }
+    return $ok;
+}
+
+# Initialize session system: make sure the directory is ours alone. If the
+# configured one is not (e.g. pre-created by another user), fall back to a
+# per-user directory; if that fails too, sessions are not stored at all.
+func Cannoli_Session_init() void {
+    if ($g_session_dir_ok == 1) { return; }
+    if (::private_dir($g_session_dir) == 1) {
+        $g_session_dir_ok = 1;
+        return;
+    }
+    my str $fallback = $g_session_dir . "-" . core::geteuid();
+    if (::private_dir($fallback) == 1) {
+        Cannoli::Log::warn("session directory " . $g_session_dir . " is not a private directory owned by this user; using " . $fallback);
+        $g_session_dir = $fallback;
+        $g_session_dir_ok = 1;
+        return;
+    }
+    Cannoli::Log::error("no usable private session directory (" . $g_session_dir . "); sessions are disabled");
+    $g_session_dir_ok = -1;
 }
 
 # Configure session settings
 func Cannoli_Session_configure(str $dir, str $cookie_name, int $ttl) void {
     if (length($dir) > 0) {
         $g_session_dir = $dir;
+        $g_session_dir_ok = 0;
     }
     if (length($cookie_name) > 0) {
         $g_session_cookie = $cookie_name;
@@ -581,6 +625,8 @@ func Cannoli_Session_load(str $id) scalar {
     if (::is_valid_id($id) == 0) {
         return undef;
     }
+    ::init();
+    if ($g_session_dir_ok != 1) { return undef; }
 
     my str $path = ::file_path($id);
 
@@ -647,6 +693,7 @@ func Cannoli_Session_load(str $id) scalar {
 # Save a session to file
 func Cannoli_Session_save(scalar $session) int {
     ::init();
+    if ($g_session_dir_ok != 1) { return 0; }
 
     my str $id = $session->{"id"};
     if (::is_valid_id($id) == 0) {
@@ -684,6 +731,17 @@ func Cannoli_Session_save(scalar $session) int {
     core::chmod($tmp_path, 384);  # 0600
     core::rename($tmp_path, $path);
     return 1;
+}
+
+# Give a session a new ID (data kept), removing the stored copy under the
+# old one. Defends against session fixation when called at login.
+func Cannoli_Session_regenerate(scalar $session) void {
+    my str $old = $session->{"id"};
+    $session->{"id"} = ::generate_id();
+    if (length($old) > 0 && ::is_valid_id($old) == 1) {
+        ::destroy($old);
+    }
+    ::save($session);
 }
 
 # Destroy a session
@@ -1028,7 +1086,8 @@ func Cannoli_Template_render(str $name, scalar $vars) str {
     if (length($template) == 0) {
         return "";
     }
-    return ::render_string($template, $vars);
+    # a copy: {{#set}} must not change the caller's variables
+    return ::render_string($template, ::merge_scope($vars, undef));
 }
 
 # Render a template string with variables
@@ -1139,7 +1198,8 @@ func Cannoli_Template_render_string(str $template, scalar $vars) str {
                         # Resolve the value
                         my scalar $value = ::resolve_value($value_expr, $vars);
 
-                        # Set in vars if scope is a hash
+                        # Set in this render's scope (the public entry points
+                        # hand render_string a copy of the caller's hash)
                         if (reftype($vars) eq "HASH") {
                             $vars->{$var_name} = $value;
                         }
@@ -1713,7 +1773,8 @@ func Cannoli_Template_render_safe(str $name, scalar $vars) str {
 
 # Render string with HTML escaping
 func Cannoli_Template_render_string_safe(str $template, scalar $vars) str {
-    return ::render_string($template, $vars);
+    # a copy: {{#set}} must not change the caller's variables
+    return ::render_string($template, ::merge_scope($vars, undef));
 }
 
 # Find triple closing }}}
@@ -1849,7 +1910,7 @@ func Cannoli_Validation_email(scalar $value) int {
     my int $k = 0;
     while ($k < length($s)) {
         my str $ch = substr($s, $k, 1);
-        if (ord($ch) <= 32) {
+        if (ord($ch) <= 32 || ord($ch) == 127) {
             return 0;
         }
         $k = $k + 1;
@@ -1872,6 +1933,16 @@ func Cannoli_Validation_email(scalar $value) int {
         return 0;
     }
     if (substr($domain, length($domain) - 1, 1) eq ".") {
+        return 0;
+    }
+    # every domain label non-empty, letters/digits/hyphens, no edge hyphen;
+    # local part without empty dot-separated pieces
+    foreach my str $label (split("\\.", $domain)) {
+        if (length($label) == 0 || length($label) > 63) { return 0; }
+        if ($label !~ /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/ && $label !~ /[^\x00-\x7f]/) { return 0; }
+    }
+    my str $local = substr($s, 0, $at);
+    if (substr($local, 0, 1) eq "." || substr($local, length($local) - 1, 1) eq "." || index($local, "..") >= 0) {
         return 0;
     }
 
@@ -3221,6 +3292,9 @@ func Cannoli_Request_json_parse_string(str $json, int $start) scalar {
                         $pos = $pos + 6;
                     }
                 }
+                # A lone surrogate has no UTF-8 encoding: emit U+FFFD
+                # rather than invalid UTF-8.
+                if ($cp >= 55296 && $cp <= 57343) { $cp = 65533; }
                 $result = $result . ::json_utf8_encode($cp);
             } else {
                 return undef;
@@ -3287,6 +3361,10 @@ func Cannoli_Request_json_parse_any(str $json, int $start) scalar {
         }
     }
     if ($pos == $digits_start) {
+        return undef;
+    }
+    # no leading zeros ("01" is not JSON)
+    if ($pos - $digits_start > 1 && substr($json, $digits_start, 1) eq "0") {
         return undef;
     }
 
@@ -3701,6 +3779,7 @@ func Cannoli_Log_request_timed(hash %req, hash %res, int $time_ms) void {
     my int $status = $res{"status"};
     my str $body = defined($res{"body"}) ? ("" . $res{"body"}) : "";
     my int $size = core::byte_length($body);
+    if (exists(%res, "_file_length")) { $size = $res{"_file_length"}; }   # streamed static file
     my str $referer = Cannoli::Request::get_header(%req, "Referer");
     my str $user_agent = Cannoli::Request::get_header(%req, "User-Agent");
 
@@ -4215,6 +4294,12 @@ func Cannoli_Response_json(int $status, str $content) hash {
 
 # Convenience: Redirect response
 func Cannoli_Response_redirect(str $url, int $permanent) hash {
+    # A URL with CR/LF/NUL cannot be sent (header injection); fail loudly
+    # instead of a redirect without a Location.
+    if (length($url) == 0 || ::valid_header_value($url) == 0) {
+        Cannoli::Log::error("redirect: refusing invalid Location URL");
+        return ::error_page(500, "Internal Server Error");
+    }
     my hash %res = ::new();
 
     if ($permanent == 1) {
@@ -4673,13 +4758,109 @@ func Cannoli_WebSocket_is_upgrade_request(hash %req) int {
     return 1;
 }
 
+# Byte helpers in C: unmasking and UTF-8 validation are per-byte loops that
+# are quadratic or very slow when written with string concatenation.
+__C__ {
+static StradaValue *cannoli_ws_unmask(StradaValue *data, int64_t m0, int64_t m1, int64_t m2, int64_t m3) {
+    size_t n = 0;
+    const char *p = "";
+    if (data && !STRADA_IS_TAGGED_INT(data) && data->type == STRADA_STR && data->value.pv) {
+        p = data->value.pv;
+        n = STRADA_STR_BYTELEN(data);
+        if (n == 0 && p[0] != '\0') n = strlen(p);
+    }
+    if (n == 0) return strada_new_str("");
+    unsigned char mask[4] = {(unsigned char)m0, (unsigned char)m1, (unsigned char)m2, (unsigned char)m3};
+    char *out = malloc(n);
+    if (!out) return strada_new_str("");
+    for (size_t i = 0; i < n; i++) out[i] = (char)((unsigned char)p[i] ^ mask[i & 3]);
+    StradaValue *r = strada_new_str_len(out, n);
+    free(out);
+    return r;
+}
+
+/* RFC 3629 UTF-8 (no overlongs, surrogates or > U+10FFFF) */
+static int cannoli_ws_utf8_ok(const unsigned char *s, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = s[i];
+        if (c < 0x80) { i++; continue; }
+        size_t len; unsigned int cp;
+        if (c >= 0xC2 && c <= 0xDF) { len = 2; cp = c & 0x1F; }
+        else if (c >= 0xE0 && c <= 0xEF) { len = 3; cp = c & 0x0F; }
+        else if (c >= 0xF0 && c <= 0xF4) { len = 4; cp = c & 0x07; }
+        else return 0;
+        if (i + len > n) return 0;
+        for (size_t k = 1; k < len; k++) {
+            if ((s[i + k] & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (s[i + k] & 0x3F);
+        }
+        if ((len == 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) || (len == 4 && (cp < 0x10000 || cp > 0x10FFFF))) return 0;
+        i += len;
+    }
+    return 1;
+}
+}
+
+func Cannoli_WebSocket_unmask(str $data, int $m0, int $m1, int $m2, int $m3) str {
+    my str $out = "";
+    __C__ {
+        out = cannoli_ws_unmask(data, strada_to_int(m0), strada_to_int(m1), strada_to_int(m2), strada_to_int(m3));
+    }
+    return $out;
+}
+
+func Cannoli_WebSocket_valid_utf8(str $data) int {
+    my scalar $ok = 0;
+    __C__ {
+        size_t n = 0;
+        const char *p = "";
+        if (data && !STRADA_IS_TAGGED_INT(data) && data->type == STRADA_STR && data->value.pv) {
+            p = data->value.pv;
+            n = STRADA_STR_BYTELEN(data);
+            if (n == 0 && p[0] != '\0') n = strlen(p);
+        }
+        ok = strada_new_int(cannoli_ws_utf8_ok((const unsigned char *)p, n));
+    }
+    return $ok;
+}
+
+# Origin check for the upgrade request. $allowed: "" = same origin as the
+# Host header (requests without Origin -- non-browser clients -- pass),
+# "*" = any, else a comma-separated list of exact origins.
+func Cannoli_WebSocket_origin_allowed(str $origin, str $host, str $allowed) int {
+    if (length($origin) == 0 || $allowed eq "*") { return 1; }
+    if (length($allowed) == 0) {
+        my int $sep = index($origin, "://");
+        if ($sep < 0) { return 0; }
+        my str $ohost = lc(substr($origin, $sep + 3, length($origin) - $sep - 3));
+        my int $slash = index($ohost, "/");
+        if ($slash >= 0) { $ohost = substr($ohost, 0, $slash); }
+        my str $h = lc($host);
+        if ($ohost eq $h) { return 1; }
+        # default ports may be implicit on either side
+        if ($ohost . ":80" eq $h || $ohost . ":443" eq $h || $h . ":80" eq $ohost || $h . ":443" eq $ohost) { return 1; }
+        return 0;
+    }
+    foreach my str $raw (split(",", $allowed)) {
+        my str $o = trim($raw);
+        if (lc($o) eq lc($origin)) { return 1; }
+    }
+    return 0;
+}
+
 # Create a WebSocket connection from a request hash
 func Cannoli_WebSocket_from_request(hash %req) scalar {
     my hash %ws = ();
 
-    $ws{"_buffer"} = "";
+    # bytes the client sent right after the upgrade request
+    $ws{"_buffer"} = exists(%req, "_conn_buffer") ? $req{"_conn_buffer"} : "";
     $ws{"_ssl"} = 0;
     $ws{"_client"} = undef;
+    $ws{"closed"} = 0;
+    $ws{"close_sent"} = 0;
+    $ws{"max_message"} = 1048576;
+    $ws{"close_code"} = 0;
 
     if (exists(%req, "_ssl") && $req{"_ssl"} == 1) {
         $ws{"_ssl"} = 1;
@@ -4687,6 +4868,11 @@ func Cannoli_WebSocket_from_request(hash %req) scalar {
         $ws{"_ssl_read_fn"} = $req{"_ssl_read_fn"};
         $ws{"_ssl_write_fn"} = $req{"_ssl_write_fn"};
         $ws{"_ssl_close_fn"} = $req{"_ssl_close_fn"};
+        if (exists(%req, "_ssl_try_read_fn")) {
+            $ws{"_ssl_try_read_fn"} = $req{"_ssl_try_read_fn"};
+            $ws{"_ssl_want_fn"} = $req{"_ssl_want_fn"};
+            $ws{"_ssl_fd"} = $req{"_ssl_fd"};
+        }
     } else {
         $ws{"_client"} = $req{"_client"};
         $ws{"_fd"} = $req{"_fd"};
@@ -4702,12 +4888,16 @@ func Cannoli_WebSocket_accept(hash %req, str $protocol = "") scalar {
     }
 
     my str $version = Cannoli::Request::get_header(%req, "Sec-WebSocket-Version");
-    if (length($version) > 0 && $version ne "13") {
+    if ($version ne "13") {
         return undef;
     }
 
-    my str $key = Cannoli::Request::get_header(%req, "Sec-WebSocket-Key");
-    if (length($key) == 0) {
+    my str $key = trim(Cannoli::Request::get_header(%req, "Sec-WebSocket-Key"));
+    # 16 random bytes, base64: 24 characters ending in "=="
+    if (length($key) != 24 || $key !~ /^[A-Za-z0-9+\/]{22}==$/) {
+        return undef;
+    }
+    if (length($protocol) > 0 && $protocol =~ /[\x00-\x20\x7f,;]/) {
         return undef;
     }
 
@@ -4741,93 +4931,118 @@ func Cannoli_WebSocket_send_binary(scalar $ws, str $payload) int {
     return ::send_frame($ws, 2, $payload);
 }
 
-# Send ping (opcode 9)
+# Send ping (opcode 9); control payloads are limited to 125 bytes
 func Cannoli_WebSocket_send_ping(scalar $ws, str $payload) int {
+    if (core::byte_length($payload) > 125) { return -1; }
     return ::send_frame($ws, 9, $payload);
 }
 
 # Send pong (opcode 10)
 func Cannoli_WebSocket_send_pong(scalar $ws, str $payload) int {
+    if (core::byte_length($payload) > 125) { return -1; }
     return ::send_frame($ws, 10, $payload);
 }
 
-# Send close frame (opcode 8)
+# Cut $s to at most $max bytes without splitting a UTF-8 character.
+func Cannoli_WebSocket_utf8_truncate(str $s, int $max) str {
+    if (core::byte_length($s) <= $max) { return $s; }
+    my int $n = $max;
+    # step back over continuation bytes (10xxxxxx) to a character start
+    while ($n > 0 && (core::get_byte($s, $n) % 256) >= 128 && (core::get_byte($s, $n) % 256) < 192) {
+        $n = $n - 1;
+    }
+    return core::byte_substr($s, 0, $n);
+}
+
+# Send close frame (opcode 8), once
 func Cannoli_WebSocket_send_close(scalar $ws, int $code, str $reason) int {
+    if ($ws->{"close_sent"} == 1) { return 0; }
     my str $payload = "";
     if ($code > 0) {
         # Control frames must not exceed 125 bytes total (2-byte code + 123-byte reason)
-        my str $safe_reason = $reason;
-        if (core::byte_length($safe_reason) > 123) {
-            $safe_reason = core::byte_substr($safe_reason, 0, 123);
-        }
-        $payload = ::pack_u16($code) . $safe_reason;
+        $payload = ::pack_u16($code) . ::utf8_truncate($reason, 123);
     }
+    $ws->{"close_sent"} = 1;
     return ::send_frame($ws, 8, $payload);
 }
 
-# Close connection (sends close frame then closes socket)
+# Close the WebSocket: send a close frame and stop using the connection.
+# The server closes the socket itself once the handler returns (closing it
+# here as well would close -- for TLS, free -- it twice).
 func Cannoli_WebSocket_close(scalar $ws, int $code, str $reason) void {
     ::send_close($ws, $code, $reason);
     ::close_socket($ws);
 }
 
-# Receive a single frame, returns hash {fin, opcode, payload} or undef on EOF
+# Protocol violation: close with $code (1002 protocol error, 1007 bad
+# UTF-8, 1009 too big) and report end of stream.
+func Cannoli_WebSocket_fail(scalar $ws, int $code) scalar {
+    $ws->{"close_code"} = $code;
+    ::close($ws, $code, "");
+    return undef;
+}
+
+# Receive a single frame, returns hash {fin, opcode, payload} or undef on
+# EOF or a protocol violation (RFC 6455 5.2-5.5: client frames must be
+# masked, RSV bits clear, control frames short and unfragmented, lengths
+# within max_message).
 func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
-    # Ensure at least 2 bytes for header
+    if ($ws->{"closed"} == 1) { return undef; }
+    if (!defined($ws->{"max_message"}) || $ws->{"max_message"} <= 0) { $ws->{"max_message"} = 1048576; }
     if (::ensure_bytes($ws, 2) == 0) {
         return undef;
     }
 
     my str $buffer = $ws->{"_buffer"};
-    my int $b1 = core::get_byte($buffer, 0);
-    my int $b2 = core::get_byte($buffer, 1);
+    my int $b1 = core::get_byte($buffer, 0) % 256;
+    my int $b2 = core::get_byte($buffer, 1) % 256;
 
     my int $fin = $b1 / 128;
+    my int $rsv = ($b1 / 16) % 8;
     my int $opcode = $b1 % 16;
     my int $masked = $b2 / 128;
     my int $payload_len = $b2 % 128;
     my int $offset = 2;
+
+    if ($rsv != 0) { return ::fail($ws, 1002); }
+    if (($opcode >= 3 && $opcode <= 7) || $opcode >= 11) { return ::fail($ws, 1002); }
+    if ($masked != 1) { return ::fail($ws, 1002); }
+    if ($opcode >= 8 && ($fin != 1 || $payload_len > 125)) { return ::fail($ws, 1002); }
 
     if ($payload_len == 126) {
         if (::ensure_bytes($ws, $offset + 2) == 0) {
             return undef;
         }
         $buffer = $ws->{"_buffer"};
-        my int $b3 = core::get_byte($buffer, $offset);
-        my int $b4 = core::get_byte($buffer, $offset + 1);
-        $payload_len = ($b3 * 256) + $b4;
+        $payload_len = (core::get_byte($buffer, $offset) % 256) * 256 + (core::get_byte($buffer, $offset + 1) % 256);
         $offset = $offset + 2;
     } elsif ($payload_len == 127) {
         if (::ensure_bytes($ws, $offset + 8) == 0) {
             return undef;
         }
         $buffer = $ws->{"_buffer"};
-        my num $len = 0;
+        if ((core::get_byte($buffer, $offset) % 256) >= 128) { return ::fail($ws, 1002); }
+        my int $len = 0;
         my int $i = 0;
         while ($i < 8) {
-            my int $b = core::get_byte($buffer, $offset + $i);
-            $len = ($len * 256) + $b;
+            if ($len > $ws->{"max_message"}) { return ::fail($ws, 1009); }
+            $len = ($len * 256) + (core::get_byte($buffer, $offset + $i) % 256);
             $i = $i + 1;
         }
         $payload_len = $len;
         $offset = $offset + 8;
     }
+    if ($payload_len > $ws->{"max_message"}) { return ::fail($ws, 1009); }
 
-    my int $mask0 = 0;
-    my int $mask1 = 0;
-    my int $mask2 = 0;
-    my int $mask3 = 0;
-    if ($masked == 1) {
-        if (::ensure_bytes($ws, $offset + 4) == 0) {
-            return undef;
-        }
-        $buffer = $ws->{"_buffer"};
-        $mask0 = core::get_byte($buffer, $offset);
-        $mask1 = core::get_byte($buffer, $offset + 1);
-        $mask2 = core::get_byte($buffer, $offset + 2);
-        $mask3 = core::get_byte($buffer, $offset + 3);
-        $offset = $offset + 4;
+    if (::ensure_bytes($ws, $offset + 4) == 0) {
+        return undef;
     }
+    $buffer = $ws->{"_buffer"};
+    my int $mask0 = core::get_byte($buffer, $offset) % 256;
+    my int $mask1 = core::get_byte($buffer, $offset + 1) % 256;
+    my int $mask2 = core::get_byte($buffer, $offset + 2) % 256;
+    my int $mask3 = core::get_byte($buffer, $offset + 3) % 256;
+    $offset = $offset + 4;
 
     if (::ensure_bytes($ws, $offset + $payload_len) == 0) {
         return undef;
@@ -4836,7 +5051,7 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
 
     my str $payload = "";
     if ($payload_len > 0) {
-        $payload = core::byte_substr($buffer, $offset, $payload_len);
+        $payload = ::unmask(core::byte_substr($buffer, $offset, $payload_len), $mask0, $mask1, $mask2, $mask3);
     }
 
     my int $remaining_start = $offset + $payload_len;
@@ -4847,24 +5062,6 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
         $ws->{"_buffer"} = "";
     }
 
-    if ($masked == 1 && $payload_len > 0) {
-        my str $decoded = "";
-        my int $i = 0;
-        while ($i < $payload_len) {
-            my int $byte = core::get_byte($payload, $i);
-            my int $mask = 0;
-            my int $m = $i % 4;
-            if ($m == 0) { $mask = $mask0; }
-            elsif ($m == 1) { $mask = $mask1; }
-            elsif ($m == 2) { $mask = $mask2; }
-            else { $mask = $mask3; }
-            my int $out = ::xor8($byte, $mask);
-            $decoded = $decoded . core::byte($out);
-            $i = $i + 1;
-        }
-        $payload = $decoded;
-    }
-
     my hash %frame = ();
     $frame{"fin"} = $fin;
     $frame{"opcode"} = $opcode;
@@ -4872,11 +5069,62 @@ func Cannoli_WebSocket_recv_frame(scalar $ws) scalar {
     return \%frame;
 }
 
+# Receive one complete message: {type => "text"|"binary", data => ...}.
+# Answers pings, ignores pongs, reassembles fragments, validates UTF-8 in
+# text, and completes the close handshake. Returns undef once the
+# connection is closed ($ws->{"close_code"} holds the peer's/our code).
+func Cannoli_WebSocket_recv_message(scalar $ws) scalar {
+    my str $data = "";
+    my int $msg_opcode = 0;
+    while (1) {
+        my scalar $f = ::recv_frame($ws);
+        if (!defined($f)) {
+            if ($ws->{"closed"} == 0) { ::close_socket($ws); }
+            return undef;
+        }
+        my int $op = $f->{"opcode"};
+        if ($op == 9) {
+            ::send_pong($ws, $f->{"payload"});
+            next;
+        }
+        if ($op == 10) { next; }
+        if ($op == 8) {
+            my str $cp = $f->{"payload"};
+            my int $code = 1005;
+            if (core::byte_length($cp) == 1) { return ::fail($ws, 1002); }
+            if (core::byte_length($cp) >= 2) {
+                $code = (core::get_byte($cp, 0) % 256) * 256 + (core::get_byte($cp, 1) % 256);
+                if (::valid_utf8(core::byte_substr($cp, 2, core::byte_length($cp) - 2)) == 0) { return ::fail($ws, 1007); }
+            }
+            $ws->{"close_code"} = $code;
+            ::send_close($ws, ($code == 1005 ? 1000 : $code), "");
+            ::close_socket($ws);
+            return undef;
+        }
+        if ($op == 0) {
+            if ($msg_opcode == 0) { return ::fail($ws, 1002); }   # continuation without a start
+        } else {
+            if ($msg_opcode != 0) { return ::fail($ws, 1002); }   # new message inside a fragmented one
+            $msg_opcode = $op;
+        }
+        if (core::byte_length($data) + core::byte_length($f->{"payload"}) > $ws->{"max_message"}) {
+            return ::fail($ws, 1009);
+        }
+        $data = $data . $f->{"payload"};
+        if ($f->{"fin"} == 1) {
+            if ($msg_opcode == 1 && ::valid_utf8($data) == 0) { return ::fail($ws, 1007); }
+            return {"type" => ($msg_opcode == 1 ? "text" : "binary"), "data" => $data};
+        }
+    }
+    return undef;
+}
+
 # ============================================================
 # Internal helpers (binary/frame building)
 # ============================================================
 
 func Cannoli_WebSocket_send_frame(scalar $ws, int $opcode, str $payload) int {
+    if ($ws->{"closed"} == 1) { return -1; }
     my int $len = core::byte_length($payload);
     my int $byte1 = 128 + ($opcode % 16);
     my str $header = core::byte($byte1);
@@ -4903,23 +5151,26 @@ func Cannoli_WebSocket_pack_u64(num $value) str {
     return core::pack("N2", $high, $low);
 }
 
+# Write all of $data (parks the task in loop workers).
 func Cannoli_WebSocket_write_ws(scalar $ws, str $data) int {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
         my scalar $ssl_write_fn = $ws->{"_ssl_write_fn"};
         return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
     }
-    my int $fd = $ws->{"_fd"};
-    return core::write_fd($fd, $data);
+    if (defined($ws->{"_client"})) {
+        return Async::Task::send($ws->{"_client"}, $data);
+    }
+    return core::write_fd($ws->{"_fd"}, $data);   # handle built around a bare fd
 }
 
+# Stop reading/writing. Plain sockets are shut down so the peer sees EOF
+# right away; the server closes (and frees) the connection afterwards.
 func Cannoli_WebSocket_close_socket(scalar $ws) void {
-    if ($ws->{"_ssl"} == 1) {
-        my scalar $ssl_conn = $ws->{"_ssl_conn"};
-        my scalar $ssl_close_fn = $ws->{"_ssl_close_fn"};
-        core::dl_call_void_sv($ssl_close_fn, [$ssl_conn]);
-    } else {
-        core::socket_close($ws->{"_client"});
+    if ($ws->{"closed"} == 1) { return; }
+    $ws->{"closed"} = 1;
+    if ($ws->{"_ssl"} != 1 && defined($ws->{"_client"})) {
+        core::shutdown($ws->{"_client"}, 2);
     }
 }
 
@@ -4929,23 +5180,36 @@ func Cannoli_WebSocket_write_response(hash %req, str $data) int {
         my scalar $ssl_write_fn = $req{"_ssl_write_fn"};
         return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
     }
-    my int $fd = $req{"_fd"};
-    return core::write_fd($fd, $data);
+    return Async::Task::send($req{"_client"}, $data);
 }
 
+# Read up to $len bytes, waiting as long as it takes (WebSockets idle).
 func Cannoli_WebSocket_read_ws(scalar $ws, int $len) str {
     if ($ws->{"_ssl"} == 1) {
         my scalar $ssl_conn = $ws->{"_ssl_conn"};
+        if (exists(%{$ws}, "_ssl_try_read_fn") && defined($ws->{"_ssl_try_read_fn"})) {
+            while (1) {
+                my scalar $chunk = core::dl_call_sv($ws->{"_ssl_try_read_fn"}, [$ssl_conn, $len]);
+                if (defined($chunk)) { return $chunk; }
+                my int $want = core::dl_call_int_sv($ws->{"_ssl_want_fn"}, [$ssl_conn]);
+                Cannoli::Server::wait_fd($ws->{"_ssl_fd"}, $want == 2 ? "w" : "r", 60000);
+            }
+        }
         my scalar $ssl_read_fn = $ws->{"_ssl_read_fn"};
         return core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, $len]);
     }
-    return core::socket_recv($ws->{"_client"}, $len);
+    if (!defined($ws->{"_client"})) {
+        my scalar $raw = core::read_fd($ws->{"_fd"}, $len);
+        return defined($raw) ? $raw : "";
+    }
+    my scalar $d = Async::Task::recv($ws->{"_client"}, $len);
+    return defined($d) ? $d : "";
 }
 
 func Cannoli_WebSocket_ensure_bytes(scalar $ws, int $needed) int {
     my str $buffer = $ws->{"_buffer"};
     while (core::byte_length($buffer) < $needed) {
-        my str $chunk = ::read_ws($ws, 4096);
+        my str $chunk = ::read_ws($ws, 65536);
         if (core::byte_length($chunk) == 0) {
             $ws->{"_buffer"} = $buffer;
             return 0;
@@ -5277,6 +5541,12 @@ func Cannoli_new(hash %req) scalar {
     }
     if (exists(%req, "_client")) {
         $self{"_client"} = $req{"_client"};
+    }
+    if (exists(%req, "_conn_buffer")) { $self{"_conn_buffer"} = $req{"_conn_buffer"}; }
+    if (exists(%req, "_ssl_try_read_fn")) {
+        $self{"_ssl_try_read_fn"} = $req{"_ssl_try_read_fn"};
+        $self{"_ssl_want_fn"} = $req{"_ssl_want_fn"};
+        $self{"_ssl_fd"} = $req{"_ssl_fd"};
     }
     if (exists(%req, "_ssl")) {
         $self{"_ssl"} = $req{"_ssl"};
@@ -5629,7 +5899,10 @@ func Cannoli_unescape(scalar $self, str $text) str {
 # $r->variable(name[, value]) - get/set request variable
 func Cannoli_variable(scalar $self, str $name, scalar $value = undef) scalar {
     my scalar $vars = $self->{"_variables"};
-    if (defined($value)) {
+    # An empty string reads, like the original API ($c->variable("foo", "")
+    # is the established getter idiom); any other value -- including a
+    # reference -- sets. Use unset_variable() to remove one.
+    if (defined($value) && (ref($value) ne "" || length("" . $value) > 0)) {
         $vars->{$name} = $value;
         return $self;
     }
@@ -5640,6 +5913,11 @@ func Cannoli_variable(scalar $self, str $name, scalar $value = undef) scalar {
 }
 
 # Alias: stash
+func Cannoli_unset_variable(scalar $self, str $name) scalar {
+    delete($self->{"_variables"}->{$name});
+    return $self;
+}
+
 func Cannoli_stash(scalar $self, str $name, scalar $value = undef) scalar {
     return $self->variable($name, $value);
 }
@@ -5817,8 +6095,12 @@ func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max
     if (length($path) > 0) {
         $cookie = $cookie . "; Path=" . $path;
     }
-    if ($max_age >= 0) {
+    # max_age > 0: persistent; 0 or -1: browser-session cookie (the
+    # original meaning of 0); -2: expire now (see expire_cookie)
+    if ($max_age > 0) {
         $cookie = $cookie . "; Max-Age=" . $max_age;
+    } elsif ($max_age == -2) {
+        $cookie = $cookie . "; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
     }
     if ($httponly == 1) {
         $cookie = $cookie . "; HttpOnly";
@@ -5849,6 +6131,11 @@ func Cannoli_set_cookie(scalar $self, str $name, str $value, str $path, int $max
         $hdrs->{"Set-Cookie"} = \@kept;
     }
     return $self;
+}
+
+# Tell the browser to delete a cookie (same name and path it was set with)
+func Cannoli_expire_cookie(scalar $self, str $name, str $path = "/") scalar {
+    return $self->set_cookie($name, "", $path, -2, 1, $self->is_secure());
 }
 
 # Send file content
@@ -5992,10 +6279,28 @@ func Cannoli_is_chunked(scalar $self) int {
 # WebSocket Methods
 #
 
-func Cannoli_ws_accept(scalar $self, str $protocol = "") scalar {
+# Upgrade to a WebSocket. $allowed_origins: "" = same origin only (the
+# Origin header, when a browser sends one, must match Host -- blocks
+# cross-site WebSocket hijacking), "*" = any, or a comma-separated list of
+# origins ("https://app.example.com").
+func Cannoli_ws_accept(scalar $self, str $protocol = "", str $allowed_origins = "") scalar {
     my hash %req = ();
     $req{"method"} = $self->{"_method"};
     $req{"headers"} = $self->{"_headers"};
+    if (exists(%{$self}, "_conn_buffer")) { $req{"_conn_buffer"} = $self->{"_conn_buffer"}; }
+    if (exists(%{$self}, "_ssl_try_read_fn")) {
+        $req{"_ssl_try_read_fn"} = $self->{"_ssl_try_read_fn"};
+        $req{"_ssl_want_fn"} = $self->{"_ssl_want_fn"};
+        $req{"_ssl_fd"} = $self->{"_ssl_fd"};
+    }
+
+    my scalar $hdrs = $self->{"_headers"};
+    my str $origin = (defined($hdrs) && exists(%{$hdrs}, "origin")) ? $hdrs->{"origin"} : "";
+    if (Cannoli::WebSocket::origin_allowed($origin, defined($hdrs) && exists(%{$hdrs}, "host") ? $hdrs->{"host"} : "", $allowed_origins) == 0) {
+        $self->status(403);
+        $self->render_text("WebSocket origin not allowed");
+        return undef;
+    }
 
     if (exists(%{$self}, "_client")) {
         $req{"_client"} = $self->{"_client"};
@@ -6018,8 +6323,47 @@ func Cannoli_ws_accept(scalar $self, str $protocol = "") scalar {
     if (defined($ws)) {
         $self->{"_ws_active"} = 1;
         $self->{"_ws_status"} = 101;
+        $self->{"_ws"} = $ws;
     }
     return $ws;
+}
+
+# WebSocket methods for the connection accepted by ws_accept(). Use these
+# from dynamically loaded libraries: method calls cross the library
+# boundary safely, direct Cannoli::WebSocket::* calls from a .so do not.
+
+# Next complete message: {type => "text"|"binary", data => ...}, or undef
+# once the peer closed (or broke the protocol). Pings are answered and
+# fragments reassembled automatically.
+func Cannoli_ws_recv(scalar $self) scalar {
+    if (!exists(%{$self}, "_ws")) { return undef; }
+    return Cannoli::WebSocket::recv_message($self->{"_ws"});
+}
+
+func Cannoli_ws_send(scalar $self, str $text) int {
+    if (!exists(%{$self}, "_ws")) { return -1; }
+    return Cannoli::WebSocket::send_text($self->{"_ws"}, $text);
+}
+
+func Cannoli_ws_send_binary(scalar $self, str $data) int {
+    if (!exists(%{$self}, "_ws")) { return -1; }
+    return Cannoli::WebSocket::send_binary($self->{"_ws"}, $data);
+}
+
+func Cannoli_ws_ping(scalar $self, str $data = "") int {
+    if (!exists(%{$self}, "_ws")) { return -1; }
+    return Cannoli::WebSocket::send_ping($self->{"_ws"}, $data);
+}
+
+func Cannoli_ws_close(scalar $self, int $code = 1000, str $reason = "") scalar {
+    if (exists(%{$self}, "_ws")) { Cannoli::WebSocket::close($self->{"_ws"}, $code, $reason); }
+    return $self;
+}
+
+# Limit for one incoming message (default 1MB)
+func Cannoli_ws_max_message(scalar $self, int $bytes) scalar {
+    if (exists(%{$self}, "_ws")) { $self->{"_ws"}->{"max_message"} = $bytes; }
+    return $self;
 }
 
 #
@@ -6198,6 +6542,13 @@ func Cannoli_to_json(scalar $data) str {
         if ($s eq "nan" || $s eq "-nan" || $s eq "inf" || $s eq "-inf") {
             return "null";
         }
+        return $s;
+    }
+    # Numeric strings (request params, DB columns) are emitted as numbers,
+    # as before -- but only canonical ones: "007", "1e5", "+1" or numbers
+    # too long to round-trip stay strings (the old code emitted 007, which
+    # is not valid JSON).
+    if (length($s) <= 15 && $s =~ /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/) {
         return $s;
     }
 
@@ -6414,6 +6765,16 @@ func Cannoli_session_save(scalar $self) scalar {
 }
 
 # Destroy session and clear cookie
+# Give the session a new ID, keeping its data (call after login or any
+# privilege change, against session fixation). The old ID stops working.
+func Cannoli_session_regenerate(scalar $self) scalar {
+    my scalar $session = $self->session();
+    if (!defined($session)) { return $self; }
+    Cannoli::Session::regenerate($session);
+    $self->{"_session_new"} = 1;   # session_save() sends the new cookie
+    return $self;
+}
+
 func Cannoli_session_destroy(scalar $self) scalar {
     my str $cookie_name = Cannoli::Session::cookie_name();
     my str $session_id = "";
@@ -6441,7 +6802,7 @@ func Cannoli_session_destroy(scalar $self) scalar {
         Cannoli::Session::destroy($session_id);
     }
 
-    $self->set_cookie($cookie_name, "", "/", 0, 1, $self->is_secure(), "Lax");
+    $self->set_cookie($cookie_name, "", "/", -2, 1, $self->is_secure(), "Lax");
 
     return $self;
 }
@@ -6486,7 +6847,7 @@ func Cannoli_render_with_layout(scalar $self, str $template_name, str $layout_na
 
 # Render a template string directly
 func Cannoli_render_string(scalar $self, str $template, scalar $vars) scalar {
-    my str $html = Cannoli::Template::render_string($template, $vars);
+    my str $html = Cannoli::Template::render_string_safe($template, $vars);
     if (length($self->{"_res_content_type"}) == 0) {
         $self->content_type("text/html; charset=utf-8");
     }
@@ -7776,7 +8137,9 @@ func Cannoli_Static_new() scalar {
     $s{"document_root"} = ".";
     $s{"index_files"} = "index.html,index.htm";
     $s{"directory_listing"} = 0;
-    $s{"max_file_size"} = 67108864;  # 64MB guard for slurp-based responses
+    $s{"max_file_size"} = 0;          # 0 = no limit (large files are streamed from disk)
+    $s{"stream_threshold"} = 262144;  # files above this are not loaded into memory
+    $s{"cache_max_age"} = 0;          # > 0: Cache-Control: public, max-age=N
     my hash %aliases = ();
     $s{"aliases"} = \%aliases;
     return \%s;
@@ -8020,6 +8383,52 @@ func Cannoli_Static_http_date(int $epoch) str {
     return core::strftime("%a, %d %b %Y %H:%M:%S GMT", %tm);
 }
 
+__C__ {
+#include <sys/stat.h>
+#include <time.h>
+}
+
+# Strong validator from inode, size and the nanosecond mtime: an edit within
+# the same second that keeps the size still changes it.
+func Cannoli_Static_file_etag(str $path) str {
+    my str $tag = "";
+    __C__ {
+        char *p = strada_to_str(path);
+        struct stat st;
+        char buf[96];
+        buf[0] = '\0';
+        if (p && stat(p, &st) == 0) {
+            snprintf(buf, sizeof(buf), "\"%lx-%llx-%llx%09ld\"", (unsigned long)st.st_ino,
+                     (unsigned long long)st.st_size, (unsigned long long)st.st_mtim.tv_sec, (long)st.st_mtim.tv_nsec);
+        }
+        free(p);
+        tag = strada_new_str(buf);
+    }
+    return $tag;
+}
+
+# Parse an HTTP-date (IMF-fixdate, RFC 850 or asctime form) to epoch
+# seconds; -1 if invalid.
+func Cannoli_Static_parse_http_date(str $value) int {
+    my scalar $t = -1;
+    __C__ {
+        char *v = strada_to_str(value);
+        long long out = -1;
+        if (v) {
+            const char *fmts[] = {"%a, %d %b %Y %H:%M:%S GMT", "%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"};
+            for (int i = 0; i < 3 && out < 0; i++) {
+                struct tm tm;
+                memset(&tm, 0, sizeof(tm));
+                const char *end = strptime(v, fmts[i], &tm);
+                if (end && *end == '\0') out = (long long)timegm(&tm);
+            }
+        }
+        free(v);
+        t = strada_new_int(out);
+    }
+    return $t;
+}
+
 func Cannoli_Static_etag(int $size, int $mtime) str {
     return "\"" . $size . "-" . $mtime . "\"";
 }
@@ -8126,7 +8535,8 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
     }
 
     my int $mtime = core::file_mtime($fs);
-    my str $etag = ::etag($size, $mtime);
+    my str $etag = ::file_etag($fs);
+    if (length($etag) == 0) { $etag = ::etag($size, $mtime); }
     my str $modified = ::http_date($mtime);
     my str $mime = Cannoli::Mime::type($fs);
     my scalar $headers = {
@@ -8135,10 +8545,18 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
         "Last-Modified" => $modified
     };
 
+    if ($srv->{"cache_max_age"} > 0) {
+        $headers->{"Cache-Control"} = "public, max-age=" . $srv->{"cache_max_age"};
+    }
+
+    # Conditional GET (RFC 9110 13.1): If-None-Match wins; otherwise
+    # If-Modified-Since by date -- not modified since the given time.
     my str $if_none_match = ::header($request_headers, "if-none-match");
     my str $if_modified = ::header($request_headers, "if-modified-since");
+    my int $ims = -1;
+    if (length($if_none_match) == 0 && length($if_modified) > 0) { $ims = ::parse_http_date(trim($if_modified)); }
     if ((length($if_none_match) > 0 && ::etag_matches($if_none_match, $etag) == 1)
-        || (length($if_none_match) == 0 && length($if_modified) > 0 && trim($if_modified) eq $modified)) {
+        || ($ims >= 0 && $mtime <= $ims)) {
         # No Content-Length on a 304: it would have to be the full length,
         # and caches may update the stored entry from it.
         $res{"status"} = 304;
@@ -8182,6 +8600,12 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
     $res{"content_type"} = $mime;
     if ($method eq "HEAD") {
         $res{"body"} = "";
+    } elsif ($length > $srv->{"stream_threshold"}) {
+        # The server streams this range from disk after the headers.
+        $res{"body"} = "";
+        $res{"_file"} = $fs;
+        $res{"_file_offset"} = $start;
+        $res{"_file_length"} = $length;
     } else {
         my str $content = slurp($fs);
         if ($partial == 1) { $content = core::byte_substr($content, $start, $length); }
@@ -8854,6 +9278,52 @@ func Cannoli_Server_conn_send(scalar $server_ref, scalar $conn, str $data) int {
     return 1;
 }
 
+__C__ {
+#include <fcntl.h>
+#include <unistd.h>
+}
+
+# Read up to $len bytes of $path at $offset (binary-safe); "" on error/EOF.
+func Cannoli_Server_file_chunk(str $path, int $offset, int $len) str {
+    my str $out = "";
+    __C__ {
+        char *p = strada_to_str(path);
+        long long off = (long long)strada_to_int(offset);
+        long long n = (long long)strada_to_int(len);
+        out = strada_new_str("");
+        if (p && n > 0) {
+            int fd = open(p, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                char *buf = malloc((size_t)n);
+                if (buf) {
+                    ssize_t r = pread(fd, buf, (size_t)n, (off_t)off);
+                    if (r > 0) out = strada_new_str_len(buf, (size_t)r);
+                    free(buf);
+                }
+                close(fd);
+            }
+        }
+        free(p);
+    }
+    return $out;
+}
+
+# Stream $length bytes of a file (static responses) in 256KB pieces, so a
+# large download never sits in memory whole. Returns 1 on success.
+func Cannoli_Server_send_file_range(scalar $server_ref, scalar $conn, str $path, int $offset, int $length) int {
+    my int $sent = 0;
+    while ($sent < $length) {
+        my int $want = $length - $sent;
+        if ($want > 262144) { $want = 262144; }
+        my str $piece = ::file_chunk($path, $offset + $sent, $want);
+        my int $got = core::byte_length($piece);
+        if ($got == 0) { return 0; }   # file shrank or vanished: drop the connection
+        if (::conn_send($server_ref, $conn, $piece) == 0) { return 0; }
+        $sent = $sent + $got;
+    }
+    return 1;
+}
+
 func Cannoli_Server_conn_close(scalar $server_ref, scalar $conn) void {
     if ($conn->{"tls"} == 1) {
         core::dl_call_void_sv($server_ref->{"ssl_close_fn"}, [$conn->{"ssl"}]);
@@ -8982,6 +9452,7 @@ func Cannoli_Server_parse_head(str $header_section) scalar {
     $out->{"version"} = substr($lines[0], length($lines[0]) - 8, 8);
 
     my int $hosts = 0;
+    my hash %seen_single = ();
     my int $i = 1;
     my int $n = scalar(@lines);
     while ($i < $n) {
@@ -9019,6 +9490,12 @@ func Cannoli_Server_parse_head(str $header_section) scalar {
         } elsif ($lname eq "host") {
             $hosts = $hosts + 1;
             if ($hosts > 1) { return $out; }
+        } elsif ($lname eq "content-type" || $lname eq "authorization" || $lname eq "proxy-authorization"
+                 || $lname eq "upgrade" || $lname eq "sec-websocket-key" || $lname eq "origin") {
+            # single-valued fields: a repeat would be comma-joined into a
+            # value neither copy meant (RFC 9110 5.3)
+            if (exists(%seen_single, $lname)) { return $out; }
+            $seen_single{$lname} = 1;
         } elsif ($lname eq "expect") {
             $out->{"expect"} = lc($value);
         }
@@ -9805,7 +10282,15 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
         $req{"request_id"} = $request_id;
 
         # Raw connection handles for streaming (chunked) responses / websockets
+        # Bytes already read past this request (a WebSocket client may send
+        # frames right behind its upgrade request)
+        $req{"_conn_buffer"} = $buffer;
         if ($conn->{"tls"} == 1) {
+            if ($conn->{"nb"} == 1) {
+                $req{"_ssl_try_read_fn"} = $server_ref->{"ssl_try_read_fn"};
+                $req{"_ssl_want_fn"} = $server_ref->{"ssl_want_fn"};
+                $req{"_ssl_fd"} = $conn->{"fd"};
+            }
             $req{"_ssl"} = 1;
             $req{"_ssl_conn"} = $conn->{"ssl"};
             $req{"_ssl_read_fn"} = $server_ref->{"ssl_read_fn"};
@@ -9833,6 +10318,12 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
             %res = %{$d->{"res"}};
             $c = $d->{"c"};
             $after_func = $d->{"after"};
+            # A library handler that upgraded to a WebSocket has used the
+            # connection; never write an HTTP response after the 101.
+            if (defined($c) && exists(%{$c}, "_ws_active") && $c->{"_ws_active"} == 1) {
+                $res{"sent"} = 1;
+                $res{"status"} = 101;
+            }
         } catch ($dispatch_err) {
             Cannoli::Log::error("request " . $request_id . " " . $method . " " . $req{"path"} . " failed: " . $dispatch_err);
             %res = Cannoli::Response::error_page(500, "Internal Server Error");
@@ -9861,6 +10352,9 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
             }
             ::finish_headers($server_ref, %res, $request_id);
             $send_ok = ::conn_send($server_ref, $conn, Cannoli::Response::build(%res));
+            if ($send_ok == 1 && exists(%res, "_file") && $method ne "HEAD") {
+                $send_ok = ::send_file_range($server_ref, $conn, $res{"_file"}, $res{"_file_offset"}, $res{"_file_length"});
+            }
         }
 
         my hash %end_time = core::gettimeofday();
@@ -10888,6 +11382,10 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
     $server_ref->{"running"} = 1;
 
     while ($server_ref->{"running"} == 1) {
+        if ($_g_reload_requested == 1) {
+            $_g_reload_requested = 0;
+            say("SIGHUP ignored in single-process mode (restart the process to reload)");
+        }
         # Build array of file descriptors to monitor
         my array @fds = ();
         if ($http_fd >= 0) {
@@ -11187,6 +11685,11 @@ func Cannoli_FastCGI_header_from_cgi(str $name) str {
 
 # Build FCGI_STDOUT response
 func Cannoli_FastCGI_build_response(hash %res, int $request_id) str {
+    # A static response the HTTP server would stream from disk: inline it
+    if (exists(%res, "_file")) {
+        $res{"body"} = Cannoli::Server::file_chunk($res{"_file"}, $res{"_file_offset"}, $res{"_file_length"});
+        delete($res{"_file"});
+    }
     # Build HTTP response
     my str $http_response = Cannoli::Response::build(%res);
 
@@ -11270,7 +11773,17 @@ func Cannoli_FastCGI_read_exact(int $fd, int $needed) str {
 # Handle a single FastCGI connection
 my int $g_fcgi_max_body = 10485760;
 
+# Serve FastCGI requests on one connection: several in a row when the web
+# server sets FCGI_KEEP_CONN (nginx: fastcgi_keep_conn on), then close.
 func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
+    while (::handle_request($fd, $router) == 1) { }
+    core::close_fd($fd);
+}
+
+# Read and answer one request. Returns 1 to keep the connection for the
+# next request, 0 to close it.
+func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
+    my int $keep_conn = 0;
     my hash %params = ();
     my str $params_stream = "";
     my str $stdin_data = "";
@@ -11311,7 +11824,10 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
         my int $rec_type = $header{"type"};
 
         if ($rec_type == FCGI_BEGIN_REQUEST()) {
-            # New request
+            # role (2 bytes), flags: bit 0 = FCGI_KEEP_CONN
+            if (core::byte_length($content) >= 3) {
+                $keep_conn = (core::get_byte($content, 2) % 256) % 2;
+            }
         } elsif ($rec_type == FCGI_PARAMS()) {
             # PARAMS is a stream: one name/value pair may span records, so
             # collect it all and parse once the empty record ends it.
@@ -11335,9 +11851,9 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
     }
 
     if ($done == 0) {
-        core::close_fd($fd);
-        return;
+        return 0;
     }
+    my int $t0 = core::mono_ms();
     if (scalar(keys(%params)) == 0 && core::byte_length($params_stream) > 0) {
         %params = ::parse_params($params_stream);
     }
@@ -11377,17 +11893,26 @@ func Cannoli_FastCGI_handle_connection(int $fd, scalar $router) void {
 
     # Dispatch to router
     my hash %res = ();
-    if (defined($router)) {
-        %res = Cannoli::Router::dispatch($router, %req);
-    } else {
-        %res = Cannoli::Response::text(200, "Cannoli FastCGI server running");
+    try {
+        if (defined($router)) {
+            %res = Cannoli::Router::dispatch($router, %req);
+        } else {
+            %res = Cannoli::Response::text(200, "Cannoli FastCGI server running");
+        }
+    } catch ($fcgi_err) {
+        Cannoli::Log::error("FastCGI " . $req{"method"} . " " . $req{"path"} . " failed: " . $fcgi_err);
+        %res = Cannoli::Response::error_page(500, "Internal Server Error");
+    }
+    if (!exists(%{$res{"headers"} // {}}, "Date")) {
+        Cannoli::Response::header(%res, "Date", Cannoli::Server::http_date());
     }
 
     # Send response
     my str $response = ::build_response(%res, $request_id);
-    core::write_fd($fd, $response);
+    if (core::write_fd($fd, $response) <= 0) { return 0; }
 
-    core::close_fd($fd);
+    Cannoli::Log::request_timed(%req, %res, core::mono_ms() - $t0);
+    return $keep_conn;
 }
 
 # FastCGI worker loop
@@ -12274,6 +12799,7 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         # Configure static file serving
         $g_static_server = Cannoli::Static::new();
         $g_static_server->{"document_root"} = $static_root;
+        $g_static_server->{"cache_max_age"} = Cannoli::Config::get_int(%config, "static.cache_max_age", 0);
 
         if (Cannoli::Config::get_bool(%config, "static.listing", 0) == 1) {
             $g_static_server->{"directory_listing"} = 1;

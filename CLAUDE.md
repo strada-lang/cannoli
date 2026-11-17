@@ -723,6 +723,7 @@ Test files:
 - `test_hardening.strada` - Framing/strictness, chunked decoding, cookies, templates, middleware, ranges
 - `test_hardening.sh` / `test_hardening_loop.sh` - Live timeouts, smuggling inputs, 100-continue, pid file (classic / loop workers)
 - `test_tls.sh` - classic+loop x HTTP+HTTPS smoke test (skips without openssl / SSL lib)
+- `test_websocket.sh` - WebSockets from a library over ws/wss, classic + loop (echo, idle, close, protocol errors)
 
 ---
 

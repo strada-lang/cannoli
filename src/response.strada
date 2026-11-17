@@ -280,6 +280,12 @@ func Cannoli_Response_json(int $status, str $content) hash {
 
 # Convenience: Redirect response
 func Cannoli_Response_redirect(str $url, int $permanent) hash {
+    # A URL with CR/LF/NUL cannot be sent (header injection); fail loudly
+    # instead of a redirect without a Location.
+    if (length($url) == 0 || ::valid_header_value($url) == 0) {
+        Cannoli::Log::error("redirect: refusing invalid Location URL");
+        return ::error_page(500, "Internal Server Error");
+    }
     my hash %res = ::new();
 
     if ($permanent == 1) {

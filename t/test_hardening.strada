@@ -186,6 +186,107 @@ func test_log_escape() void {
     check(Cannoli::Log::escape("Mozilla/5.0") eq "Mozilla/5.0", "plain value unchanged");
 }
 
+
+func test_api_compat() void {
+    say("Testing API compatibility fixes...");
+    my hash %req = Cannoli::Request::parse("GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    my scalar $c = Cannoli::new(%req);
+    $c->variable("foo", "bar");
+    check($c->variable("foo", "") eq "bar" && $c->variable("foo", "") eq "bar", "variable(name, \"\") reads");
+    $c->unset_variable("foo");
+    check($c->variable("foo", "") eq "", "unset_variable");
+    $c->set_cookie("s", "1", "/", 0);
+    $c->render_text("x");
+    my hash %b = $c->build_response();
+    check(index(Cannoli::Response::build(%b), "Max-Age") < 0, "set_cookie max_age 0 = session cookie");
+    my scalar $c2 = Cannoli::new(%req);
+    $c2->expire_cookie("s");
+    $c2->render_text("x");
+    my hash %b2 = $c2->build_response();
+    check(index(Cannoli::Response::build(%b2), "s=; Path=/; Max-Age=0") >= 0, "expire_cookie");
+    check(Cannoli::to_json({"id" => "42", "zip" => "007", "f" => "1.5", "big" => "12345678901234567890", "e" => "1e5"})
+          =~ /"id":42/ ? 1 : 0, "canonical numeric string -> number");
+    my str $j = Cannoli::to_json({"zip" => "007", "big" => "12345678901234567890", "e" => "1e5"});
+    check(index($j, "\"zip\":\"007\"") >= 0 && index($j, "\"big\":\"12345678901234567890\"") >= 0 && index($j, "\"e\":\"1e5\"") >= 0, "non-canonical numbers stay strings");
+}
+
+func test_parsers() void {
+    say("Testing JSON / email / redirect / duplicate headers...");
+    check(!defined(Cannoli::Request::json_parse("[01]")), "JSON leading zero rejected");
+    check(defined(Cannoli::Request::json_parse("[0, 10, -0.5]")), "JSON numbers ok");
+    my scalar $sur = Cannoli::Request::json_parse("[\"a\\ud800b\"]");
+    # (string literals encode \xNN as a code point, so build raw bytes)
+    my str $fffd = "a" . core::byte(239) . core::byte(191) . core::byte(189) . "b";
+    check(defined($sur) && $sur->[0] eq $fffd, "lone surrogate -> U+FFFD");
+    check(Cannoli::Validation::email("a@b..c") == 0, "email a@b..c rejected");
+    check(Cannoli::Validation::email("a\x7f@b.c") == 0, "email DEL rejected");
+    check(Cannoli::Validation::email("x..y@b.c") == 0, "email empty local piece rejected");
+    check(Cannoli::Validation::email("first.last@sub.example.com") == 1, "normal email ok");
+    my hash %r = Cannoli::Response::redirect("/x\r\nSet-Cookie: a=1", 0);
+    check($r{"status"} == 500, "redirect with CRLF -> 500");
+    check(Cannoli::Server::parse_head("POST /x HTTP/1.1\r\nHost: a\r\nContent-Type: a/b\r\nContent-Type: c/d")->{"ok"} == 0, "duplicate Content-Type");
+    check(Cannoli::Server::parse_head("GET /x HTTP/1.1\r\nHost: a\r\nAccept: a\r\nAccept: b")->{"ok"} == 1, "repeated list header ok");
+}
+
+func test_template_set_scope() void {
+    say("Testing {{#set}} scope...");
+    my scalar $vars = {"name" => "orig", "show" => 1};
+    my str $out = Cannoli::Template::render_string_safe("{{#if show}}{{#set name = \"changed\"}}{{/if}}[{{name}}]", $vars);
+    check(index($out, "[changed]") >= 0, "set inside if visible later in the template (" . $out . ")");
+    check($vars->{"name"} eq "orig", "caller's variables untouched");
+}
+
+func test_websocket_helpers() void {
+    say("Testing WebSocket helpers...");
+    check(Cannoli::WebSocket::origin_allowed("", "h:1", "") == 1, "no Origin (non-browser) allowed");
+    check(Cannoli::WebSocket::origin_allowed("https://h.example", "h.example", "") == 1, "same origin");
+    check(Cannoli::WebSocket::origin_allowed("https://h.example", "h.example:443", "") == 1, "same origin, explicit port");
+    check(Cannoli::WebSocket::origin_allowed("https://evil.example", "h.example", "") == 0, "cross origin rejected by default");
+    check(Cannoli::WebSocket::origin_allowed("https://app.example", "api.example", "https://app.example, https://x") == 1, "allow list");
+    check(Cannoli::WebSocket::unmask("\x01\x02\x03\x04\x05", 1, 2, 3, 4) eq "\x00\x00\x00\x00\x04", "unmask");
+    my str $e_acute = core::byte(195) . core::byte(169);
+    check(Cannoli::WebSocket::valid_utf8("h" . $e_acute) == 1 && Cannoli::WebSocket::valid_utf8(core::byte(195)) == 0
+          && Cannoli::WebSocket::valid_utf8(core::byte(237) . core::byte(160) . core::byte(128)) == 0, "UTF-8 validation");
+    check(core::byte_length(Cannoli::WebSocket::utf8_truncate("ab" . $e_acute, 3)) == 2, "close reason not cut mid-character");
+}
+
+func test_sessions() void {
+    say("Testing sessions...");
+    my str $dir = "/tmp/cannoli_hardening_sess_" . core::getpid();
+    core::mkdir($dir, 511);
+    core::chmod($dir, 511);   # 0777: must be tightened
+    check(Cannoli::Session::private_dir($dir) == 1, "own directory accepted (and made private)");
+    core::symlink($dir, $dir . ".lnk");
+    check(Cannoli::Session::private_dir($dir . ".lnk") == 0, "symlinked directory refused");
+    Cannoli::Session::configure($dir, "", 0);
+    my scalar $sess = Cannoli::Session::new();
+    Cannoli::Session::set($sess, "user", "alice");
+    Cannoli::Session::save($sess);
+    my str $old = Cannoli::Session::id($sess);
+    Cannoli::Session::regenerate($sess);
+    my str $new = Cannoli::Session::id($sess);
+    check($old ne $new && !defined(Cannoli::Session::load($old)), "regenerate: new id, old id dead");
+    my scalar $re = Cannoli::Session::load($new);
+    check(defined($re) && Cannoli::Session::get($re, "user") eq "alice", "regenerate keeps data");
+    Cannoli::Session::destroy($new);
+    core::unlink($dir . ".lnk");
+    core::rmdir($dir);
+}
+
+func test_static_validators() void {
+    say("Testing static validators...");
+    check(Cannoli::Static::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT") == 784111777, "IMF-fixdate");
+    check(Cannoli::Static::parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT") == 784111777, "RFC 850 date");
+    check(Cannoli::Static::parse_http_date("garbage") == -1, "invalid date");
+    my str $f = "/tmp/cannoli_hardening_etag_" . core::getpid();
+    core::spew($f, "abc");
+    my str $e1 = Cannoli::Static::file_etag($f);
+    core::nanosleep(5000000);
+    core::spew($f, "xyz");
+    check(length($e1) > 2 && $e1 ne Cannoli::Static::file_etag($f), "same-size edit changes the ETag");
+    core::unlink($f);
+}
+
 func main() int {
     test_parse_head();
     test_chunked_incremental();
@@ -197,6 +298,12 @@ func main() int {
     test_json_depth();
     test_multipart_boundary();
     test_log_escape();
+    test_api_compat();
+    test_parsers();
+    test_template_set_scope();
+    test_websocket_helpers();
+    test_sessions();
+    test_static_validators();
     if ($g_failed == 0) {
         say("All hardening tests passed!");
         return 0;

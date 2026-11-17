@@ -312,6 +312,7 @@ func Cannoli_Log_request_timed(hash %req, hash %res, int $time_ms) void {
     my int $status = $res{"status"};
     my str $body = defined($res{"body"}) ? ("" . $res{"body"}) : "";
     my int $size = core::byte_length($body);
+    if (exists(%res, "_file_length")) { $size = $res{"_file_length"}; }   # streamed static file
     my str $referer = Cannoli::Request::get_header(%req, "Referer");
     my str $user_agent = Cannoli::Request::get_header(%req, "User-Agent");
 

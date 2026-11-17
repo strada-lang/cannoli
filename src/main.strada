@@ -536,6 +536,7 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         # Configure static file serving
         $g_static_server = Cannoli::Static::new();
         $g_static_server->{"document_root"} = $static_root;
+        $g_static_server->{"cache_max_age"} = Cannoli::Config::get_int(%config, "static.cache_max_age", 0);
 
         if (Cannoli::Config::get_bool(%config, "static.listing", 0) == 1) {
             $g_static_server->{"directory_listing"} = 1;
