@@ -157,6 +157,16 @@ A=$(tail -c +1000001 www/rand.bin | head -c 1500000 | sha256sum | cut -c1-16); B
 [ "$A" = "$B" ] && pass "streamed range" || fail "streamed range checksum"
 C=$(curl -s -o /dev/null -w '%{http_code}' -H "If-Modified-Since: $(date -u -d '+1 day' '+%a, %d %b %Y %H:%M:%S GMT')" http://127.0.0.1:$SPORT/small.txt)
 [ "$C" = 304 ] && pass "If-Modified-Since compared as a date" || fail "IMS -> $C"
+echo "static compression"
+python3 -c "print('compress me ' * 3000)" > www/app.js
+cp www/app.js www/pre.css; gzip -9 -k www/pre.css; touch www/pre.css.gz
+curl -s -D hdr.txt -o body.gz -H 'Accept-Encoding: gzip' http://127.0.0.1:$SPORT/app.js
+grep -qi '^Content-Encoding: gzip' hdr.txt && gunzip -c body.gz | cmp -s - www/app.js && pass "gzip on the fly" || fail "on-the-fly gzip"
+grep -qi '^Vary: Accept-Encoding' hdr.txt && pass "Vary: Accept-Encoding" || fail "no Vary"
+curl -s -o body2.gz -H 'Accept-Encoding: gzip' http://127.0.0.1:$SPORT/pre.css
+cmp -s body2.gz www/pre.css.gz && pass "precompressed .gz served" || fail "precompressed file not served"
+H=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip;q=0' http://127.0.0.1:$SPORT/app.js | tr -d '\r')
+echo "$H" | grep -qi '^Content-Encoding' && fail "gzip;q=0 ignored" || pass "gzip;q=0 respected"
 kill -TERM $SPID 2>/dev/null; wait $SPID 2>/dev/null
 
 echo "a library that throws costs one 500, not the worker"

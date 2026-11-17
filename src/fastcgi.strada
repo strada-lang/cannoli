@@ -475,14 +475,25 @@ func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
 }
 
 # FastCGI worker loop
+my int $g_fcgi_stop = 0;
+
+func Cannoli_FastCGI_on_term(int $sig) void {
+    defined($sig);
+    $g_fcgi_stop = 1;
+}
+
 func Cannoli_FastCGI_worker_loop(scalar $listener, scalar $router, int $max_requests) void {
     my int $requests_handled = 0;
+    my int $parent = core::getppid();
 
-    while ($requests_handled < $max_requests) {
+    while ($requests_handled < $max_requests && $g_fcgi_stop == 0) {
+        # wake up every second to notice SIGTERM or a dead master
+        my array @ready = core::select_fds([core::socket_fd($listener)], 1000);
+        if ($g_fcgi_stop == 1 || core::getppid() != $parent) { last; }
+        if (scalar(@ready) == 0) { next; }
         my scalar $client = core::socket_accept($listener);
         if (!defined($client)) {
-            core::usleep(10000);
-            next;
+            next;   # another worker took it
         }
         # handle_connection owns (and closes) a duplicate of the fd; the
         # socket object closes its own.
@@ -495,85 +506,157 @@ func Cannoli_FastCGI_worker_loop(scalar $listener, scalar $router, int $max_requ
     }
 }
 
-func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int $max_body = 10485760, scalar $server_ref = undef) int {
-    $g_fcgi_max_body = $max_body;
-    # fastcgi.socket = host:port (TCP). The runtime has no Unix-domain
-    # sockets, so a path falls back to 127.0.0.1:9000. Bind loopback by
-    # default: FastCGI params (REMOTE_ADDR, HTTPS, ...) are trusted, so the
-    # port must not be reachable from the network.
-    my str $host = "127.0.0.1";
-    my int $port = 9000;
-    my int $colon = -1;
-    my int $k = length($socket_path) - 1;
-    while ($k >= 0) {
-        if (substr($socket_path, $k, 1) eq ":") { $colon = $k; last; }
-        $k = $k - 1;
+func Cannoli_FastCGI_spawn(scalar $listener, scalar $router, scalar $pids) void {
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        core::setproctitle("cannoli [fastcgi worker]");
+        core::signal("TERM", \&Cannoli_FastCGI_on_term);
+        core::signal("INT", "IGNORE");
+        ::worker_loop($listener, $router, 1000);
+        exit(0);
     }
-    if ($colon >= 0 && substr($socket_path, 0, 1) ne "/") {
-        my str $h = substr($socket_path, 0, $colon);
-        if (length($h) > 1 && substr($h, 0, 1) eq "[" && substr($h, length($h) - 1, 1) eq "]") {
-            $h = substr($h, 1, length($h) - 2);
-        }
-        if (length($h) > 0) { $host = $h; }
-        $port = substr($socket_path, $colon + 1, length($socket_path) - $colon - 1) + 0;
-    } elsif (length($socket_path) > 0) {
-        say("Note: Unix-domain FastCGI sockets are not supported; using TCP " . $host . ":" . $port . " (set fastcgi.socket = host:port)");
+    if ($pid > 0) {
+        push(@{$pids}, $pid);
+    } else {
+        Cannoli::Log::error("FastCGI: fork() failed");
     }
-    if ($port <= 0 || $port > 65535) {
-        say("Error: invalid FastCGI port in '" . $socket_path . "'");
-        return 1;
-    }
+}
 
-    my scalar $listener = core::socket_server_host($host, $port, 128);
+# Parse "0660"-style octal; $fallback when empty or invalid.
+func Cannoli_FastCGI_octal(str $s, int $fallback) int {
+    if ($s !~ /^0?[0-7]{3}$/) { return $fallback; }
+    my int $v = 0;
+    my int $i = 0;
+    while ($i < length($s)) {
+        $v = $v * 8 + (ord(substr($s, $i, 1)) - 48);
+        $i = $i + 1;
+    }
+    return $v;
+}
+
+# Listen on a Unix-domain socket. A leftover socket file from a previous run
+# is removed -- unless something is still accepting on it.
+func Cannoli_FastCGI_unix_listen(str $path, int $mode) scalar {
+    if (core::is_file($path) || core::is_dir($path)) {
+        say("Error: " . $path . " exists and is not a socket");
+        return undef;
+    }
+    my scalar $probe = core::unix_client($path);
+    if (defined($probe)) {
+        core::socket_close($probe);
+        say("Error: another server is already listening on " . $path);
+        return undef;
+    }
+    core::unlink($path);
+    my scalar $listener = core::unix_server($path, 0);
+    if (defined($listener)) {
+        core::chmod($path, $mode);
+    }
+    return $listener;
+}
+
+# fastcgi.socket: "unix:/path" or "/path" (Unix-domain socket), or
+# "host:port" (TCP; loopback by default -- FastCGI params such as
+# REMOTE_ADDR and HTTPS are trusted as sent, so it must not be reachable from
+# the network). fastcgi.socket_mode (default 0660) sets the socket's mode;
+# with server.user it is also chowned to that user.
+func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int $max_body = 10485760, scalar $server_ref = undef, str $socket_mode = "0660") int {
+    $g_fcgi_max_body = $max_body;
+    my scalar $listener = undef;
+    my str $where = "";
+    my str $unix_path = "";
+
+    if (substr($socket_path, 0, 5) eq "unix:" || substr($socket_path, 0, 1) eq "/") {
+        $unix_path = substr($socket_path, 0, 5) eq "unix:" ? substr($socket_path, 5, length($socket_path) - 5) : $socket_path;
+        $listener = ::unix_listen($unix_path, ::octal($socket_mode, 432));
+        $where = "unix:" . $unix_path;
+        if (defined($server_ref)) {
+            if (!exists(%{$server_ref}, "own_paths")) { $server_ref->{"own_paths"} = []; }
+            push(@{$server_ref->{"own_paths"}}, $unix_path);
+        }
+    } else {
+        my str $host = "127.0.0.1";
+        my int $port = 9000;
+        my int $colon = -1;
+        my int $k = length($socket_path) - 1;
+        while ($k >= 0) {
+            if (substr($socket_path, $k, 1) eq ":") { $colon = $k; last; }
+            $k = $k - 1;
+        }
+        if ($colon >= 0) {
+            my str $h = substr($socket_path, 0, $colon);
+            if (length($h) > 1 && substr($h, 0, 1) eq "[" && substr($h, length($h) - 1, 1) eq "]") {
+                $h = substr($h, 1, length($h) - 2);
+            }
+            if (length($h) > 0) { $host = $h; }
+            $port = substr($socket_path, $colon + 1, length($socket_path) - $colon - 1) + 0;
+        }
+        if ($port <= 0 || $port > 65535) {
+            say("Error: invalid FastCGI address '" . $socket_path . "' (use host:port or unix:/path)");
+            return 1;
+        }
+        $listener = core::socket_server_host($host, $port, 128);
+        $where = $host . ":" . $port;
+    }
     if (!defined($listener)) {
-        say("Error: Could not create FastCGI socket on " . $host . ":" . $port);
+        say("Error: Could not create FastCGI socket on " . $where);
         return 1;
     }
 
     # pid file + server.user/group, as in HTTP mode
     if (defined($server_ref) && Cannoli::Server::prepare_master($server_ref) == 0) {
+        if (length($unix_path) > 0) { core::unlink($unix_path); }
         return 1;
     }
 
-    say("FastCGI listening on " . $host . ":" . $port);
-    say("Note: Configure nginx with 'fastcgi_pass " . $host . ":" . $port . ";'");
+    say("FastCGI listening on " . $where);
+    say("Note: Configure nginx with 'fastcgi_pass " . (length($unix_path) > 0 ? "unix:" . $unix_path : $where) . ";'");
     say("Starting " . $num_workers . " worker processes...");
+    core::setproctitle("cannoli [fastcgi master]");
+    core::signal("TERM", \&Cannoli_FastCGI_on_term);
+    core::signal("INT", \&Cannoli_FastCGI_on_term);
+    core::signal("PIPE", "IGNORE");
 
-    # Fork workers
+    my scalar $pids = [];
     my int $i = 0;
     while ($i < $num_workers) {
-        my int $pid = core::fork();
-
-        if ($pid == 0) {
-            # Child
-            ::worker_loop($listener, $router, 1000);
-            exit(0);
-        } elsif ($pid > 0) {
-            say("Spawned FastCGI worker " . ($i + 1) . " with PID " . $pid);
-        }
-
+        ::spawn($listener, $router, $pids);
         $i = $i + 1;
     }
 
-    # Master waits for children
-    while (1) {
-        # core::wait() returns the reaped pid (waitpid returns the status)
-        my int $pid = core::wait();
-
-        if ($pid > 0) {
-            say("FastCGI worker " . $pid . " exited, respawning...");
-
-            my int $new_pid = core::fork();
-            if ($new_pid == 0) {
-                ::worker_loop($listener, $router, 1000);
-                exit(0);
-            } elsif ($new_pid > 0) {
-                say("Respawned FastCGI worker with PID " . $new_pid);
-            }
+    # Respawn workers until SIGTERM/SIGINT
+    while ($g_fcgi_stop == 0) {
+        my array @alive = ();
+        my int $dead = 0;
+        foreach my int $p (@{$pids}) {
+            core::waitpid($p, 1);
+            if (core::kill($p, 0) == 0) { push(@alive, $p); } else { $dead = $dead + 1; }
         }
-
+        $pids = \@alive;
+        while ($dead > 0 && $g_fcgi_stop == 0) {
+            ::spawn($listener, $router, $pids);
+            $dead = $dead - 1;
+            core::usleep(100000);   # no fork storm if workers die at once
+        }
         core::usleep(100000);
     }
 
+    # Shutdown: stop accepting, let workers finish their request, then reap
+    say("FastCGI shutdown...");
+    core::socket_close($listener);
+    foreach my int $p (@{$pids}) { core::kill($p, 15); }
+    my int $deadline = core::mono_ms() + 10000;
+    while (core::mono_ms() < $deadline) {
+        my int $left = 0;
+        foreach my int $p (@{$pids}) {
+            core::waitpid($p, 1);
+            if (core::kill($p, 0) == 0) { $left = $left + 1; }
+        }
+        if ($left == 0) { last; }
+        core::usleep(20000);
+    }
+    foreach my int $p (@{$pids}) { if (core::kill($p, 0) == 0) { core::kill($p, 9); core::waitpid($p, 0); } }
+    if (length($unix_path) > 0) { core::unlink($unix_path); }
+    if (defined($server_ref)) { Cannoli::Server::remove_pid_file($server_ref); }
     return 0;
 }

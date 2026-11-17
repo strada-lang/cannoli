@@ -255,6 +255,17 @@ func Cannoli_Config_validate(hash %config) scalar {
     ::validate_uint(%config, $errors, "server.body_min_rate", 0, -1);
     ::validate_uint(%config, $errors, "server.write_timeout", 1, 86400);
     ::validate_uint(%config, $errors, "server.shutdown_timeout", 1, 86400);
+    ::validate_uint(%config, $errors, "server.max_connections_per_ip", 0, -1);
+    ::validate_uint(%config, $errors, "server.rate_limit", 0, -1);
+    ::validate_uint(%config, $errors, "server.rate_limit_window", 1, 3600);
+    my str $health = Cannoli::Config::get_str(%config, "server.health_path", "");
+    if (length($health) > 0 && substr($health, 0, 1) ne "/") {
+        push(@{$errors}, "server.health_path must start with /");
+    }
+    my str $minv = Cannoli::Config::get_str(%config, "ssl.min_version", "1.2");
+    if ($minv ne "1.2" && $minv ne "1.3") {
+        push(@{$errors}, "ssl.min_version must be 1.2 or 1.3");
+    }
 
     foreach my str $key ("server.http", "server.keep_alive", "server.loop_workers", "server.request_id", "server.tokens", "ssl.enabled", "ssl.only", "fastcgi.enabled", "admin.enabled", "static.listing") {
         ::validate_bool(%config, $errors, $key);

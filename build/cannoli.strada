@@ -255,6 +255,17 @@ func Cannoli_Config_validate(hash %config) scalar {
     ::validate_uint(%config, $errors, "server.body_min_rate", 0, -1);
     ::validate_uint(%config, $errors, "server.write_timeout", 1, 86400);
     ::validate_uint(%config, $errors, "server.shutdown_timeout", 1, 86400);
+    ::validate_uint(%config, $errors, "server.max_connections_per_ip", 0, -1);
+    ::validate_uint(%config, $errors, "server.rate_limit", 0, -1);
+    ::validate_uint(%config, $errors, "server.rate_limit_window", 1, 3600);
+    my str $health = Cannoli::Config::get_str(%config, "server.health_path", "");
+    if (length($health) > 0 && substr($health, 0, 1) ne "/") {
+        push(@{$errors}, "server.health_path must start with /");
+    }
+    my str $minv = Cannoli::Config::get_str(%config, "ssl.min_version", "1.2");
+    if ($minv ne "1.2" && $minv ne "1.3") {
+        push(@{$errors}, "ssl.min_version must be 1.2 or 1.3");
+    }
 
     foreach my str $key ("server.http", "server.keep_alive", "server.loop_workers", "server.request_id", "server.tokens", "ssl.enabled", "ssl.only", "fastcgi.enabled", "admin.enabled", "static.listing") {
         ::validate_bool(%config, $errors, $key);
@@ -4801,6 +4812,109 @@ func read_wait(int $conn, int $max, int $timeout_ms = 30000) str {
     return "";
 }
 
+
+# ---------------------------------------------------------------------------
+# Server TLS settings: full certificate chain, minimum protocol version,
+# cipher lists, server cipher preference, ALPN "http/1.1", and certificate
+# reload (SIGHUP). The ssl module has no API for these yet, so this reaches
+# its OpenSSL context through the first fields of the module's connection
+# struct (socket_fd, SSL*, SSL_CTX*) -- verified against ssl::fd() before
+# use, so a layout change in the module makes configure() fail instead of
+# touching the wrong memory. (Candidate ssl-module API: server_configure /
+# reload_cert.)
+# ---------------------------------------------------------------------------
+
+__C__ {
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+typedef struct { int socket_fd; SSL *ssl; SSL_CTX *ctx; } cannoli_ssl_head;
+
+static int cannoli_alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                               const unsigned char *in, unsigned int inlen, void *arg) {
+    (void)ssl; (void)arg;
+    static const unsigned char protos[] = "\x08http/1.1";
+    unsigned char *sel = NULL;
+    unsigned char sel_len = 0;
+    if (SSL_select_next_proto(&sel, &sel_len, protos, sizeof(protos) - 1, in, inlen) == OPENSSL_NPN_NEGOTIATED) {
+        *out = sel;
+        *outlen = sel_len;
+        return SSL_TLSEXT_ERR_OK;
+    }
+    return SSL_TLSEXT_ERR_NOACK;   /* client offered only h2 etc.: carry on without ALPN */
+}
+
+static void cannoli_ssl_errstr(char *buf, size_t n, const char *what) {
+    unsigned long e = ERR_get_error();
+    char eb[200];
+    eb[0] = '\0';
+    if (e) ERR_error_string_n(e, eb, sizeof(eb));
+    snprintf(buf, n, "%s%s%s", what, eb[0] ? ": " : "", eb);
+    ERR_clear_error();
+}
+
+/* Load chain + key into ctx; on failure ctx is left as it was when the
+ * material was first validated on a scratch context. */
+static int cannoli_load_cert(SSL_CTX *ctx, const char *cert, const char *key, char *err, size_t en) {
+    SSL_CTX *probe = SSL_CTX_new(TLS_server_method());
+    if (!probe) { cannoli_ssl_errstr(err, en, "SSL_CTX_new"); return 0; }
+    int ok = SSL_CTX_use_certificate_chain_file(probe, cert) == 1
+          && SSL_CTX_use_PrivateKey_file(probe, key, SSL_FILETYPE_PEM) == 1
+          && SSL_CTX_check_private_key(probe) == 1;
+    if (!ok) cannoli_ssl_errstr(err, en, "certificate/key");
+    SSL_CTX_free(probe);
+    if (!ok) return 0;
+    if (SSL_CTX_use_certificate_chain_file(ctx, cert) != 1
+        || SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) != 1
+        || SSL_CTX_check_private_key(ctx) != 1) {
+        cannoli_ssl_errstr(err, en, "certificate/key");
+        return 0;
+    }
+    return 1;
+}
+}
+
+# Apply TLS settings to a listener created by server_host. Returns "" or an
+# error. $min_version: "1.2" or "1.3"; $ciphers: OpenSSL cipher list for
+# TLS 1.2 ("" = a modern AEAD-only default); $suites: TLS 1.3 suites ("" =
+# OpenSSL default).
+func configure(int $server, str $cert, str $key, str $min_version, str $ciphers, str $suites) str {
+    my int $expect_fd = ssl::fd($server);
+    my str $err = "";
+    __C__ {
+        char msg[300];
+        msg[0] = '\0';
+        cannoli_ssl_head *h = (cannoli_ssl_head *)(intptr_t)strada_to_int(server);
+        char *c = strada_to_str(cert), *k = strada_to_str(key), *mv = strada_to_str(min_version);
+        char *cl = strada_to_str(ciphers), *cs = strada_to_str(suites);
+        if (!h || h->socket_fd != (int)strada_to_int(expect_fd) || !h->ctx) {
+            snprintf(msg, sizeof(msg), "unexpected ssl module layout; TLS settings not applied");
+        } else {
+            SSL_CTX *ctx = h->ctx;
+            int ver = (mv && strcmp(mv, "1.3") == 0) ? TLS1_3_VERSION : TLS1_2_VERSION;
+            const char *list = (cl && *cl) ? cl
+                : "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:"
+                  "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305";
+            if (SSL_CTX_set_min_proto_version(ctx, ver) != 1) {
+                cannoli_ssl_errstr(msg, sizeof(msg), "ssl.min_version");
+            } else if (SSL_CTX_set_cipher_list(ctx, list) != 1) {
+                cannoli_ssl_errstr(msg, sizeof(msg), "ssl.ciphers");
+            } else if (cs && *cs && SSL_CTX_set_ciphersuites(ctx, cs) != 1) {
+                cannoli_ssl_errstr(msg, sizeof(msg), "ssl.ciphersuites");
+            } else if (c && *c && k && *k && !cannoli_load_cert(ctx, c, k, msg, sizeof(msg))) {
+                /* msg set */
+            } else {
+                SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_RENEGOTIATION | SSL_OP_NO_COMPRESSION);
+                SSL_CTX_set_alpn_select_cb(ctx, cannoli_alpn_select, NULL);
+            }
+        }
+        free(c); free(k); free(mv); free(cl); free(cs);
+        err = strada_new_str(msg);
+    }
+    return $err;
+}
+
+# Negotiated protocol of a connection ("TLSv1.3"), for logs/diagnostics.
+func version(int $conn) str { return ssl::get_version($conn); }
 /*
  This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
  Copyright (c) 2026 Michael J. Flickinger
@@ -8190,6 +8304,8 @@ func Cannoli_Static_new() scalar {
     $s{"max_file_size"} = 0;          # 0 = no limit (large files are streamed from disk)
     $s{"stream_threshold"} = 262144;  # files above this are not loaded into memory
     $s{"cache_max_age"} = 0;          # > 0: Cache-Control: public, max-age=N
+    $s{"precompressed"} = 1;          # serve file.br / file.gz when the client accepts them
+    $s{"gzip"} = 1;                   # gzip compressible files (256B..1MB) on the fly
     my hash %aliases = ();
     $s{"aliases"} = \%aliases;
     return \%s;
@@ -8532,6 +8648,35 @@ func Cannoli_Static_parse_range(str $value, int $size) scalar {
     return \%out;
 }
 
+# Types worth compressing (text-like formats; images/archives already are).
+func Cannoli_Static_compressible(str $mime) int {
+    my str $m = lc($mime);
+    if (substr($m, 0, 5) eq "text/") { return 1; }
+    if (index($m, "json") >= 0 || index($m, "javascript") >= 0 || index($m, "xml") >= 0) { return 1; }
+    if (index($m, "image/svg") >= 0 || index($m, "font/ttf") >= 0 || index($m, "font/otf") >= 0) { return 1; }
+    if (index($m, "wasm") >= 0) { return 1; }
+    return 0;
+}
+
+# Does Accept-Encoding allow $enc? ("gzip;q=0" refuses it; "*" accepts)
+func Cannoli_Static_accepts_encoding(str $header, str $enc) int {
+    my int $star = 0;
+    foreach my str $part (split(",", $header)) {
+        my str $p = trim($part);
+        my str $name = $p;
+        my str $q = "";
+        my int $semi = index($p, ";");
+        if ($semi >= 0) {
+            $name = trim(substr($p, 0, $semi));
+            $q = lc(trim(substr($p, $semi + 1, length($p) - $semi - 1)));
+        }
+        my int $zero = ($q =~ /^q\s*=\s*0(\.0*)?$/) ? 1 : 0;
+        if (lc($name) eq $enc) { return $zero == 1 ? 0 : 1; }
+        if ($name eq "*" && $zero == 0) { $star = 1; }
+    }
+    return $star;
+}
+
 func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $request_headers = undef) hash {
     my hash %res = ();
     if ($method ne "GET" && $method ne "HEAD") {
@@ -8599,6 +8744,37 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
         $headers->{"Cache-Control"} = "public, max-age=" . $srv->{"cache_max_age"};
     }
 
+    # Content coding: a precompressed sibling (file.br / file.gz, at least
+    # as new as the file), else gzip on the fly for compressible types.
+    # Range requests get the identity bytes. Each coding has its own ETag.
+    my str $encoding = "";
+    my str $enc_file = "";
+    my int $is_compressible = ::compressible($mime);
+    my str $accept_enc = ::header($request_headers, "accept-encoding");
+    if ($is_compressible == 1) {
+        $headers->{"Vary"} = "Accept-Encoding";
+        if (length(::header($request_headers, "range")) == 0 && length($accept_enc) > 0) {
+            if ($srv->{"precompressed"} == 1) {
+                foreach my str $cand ("br", "gzip") {
+                    my str $sib = $fs . ($cand eq "br" ? ".br" : ".gz");
+                    if (length($encoding) == 0 && ::accepts_encoding($accept_enc, $cand) == 1
+                        && core::is_file($sib) && core::file_mtime($sib) >= $mtime) {
+                        $encoding = $cand;
+                        $enc_file = $sib;
+                    }
+                }
+            }
+            if (length($encoding) == 0 && $srv->{"gzip"} == 1 && $size >= 256 && $size <= 1048576
+                && ::accepts_encoding($accept_enc, "gzip") == 1) {
+                $encoding = "gzip";   # compressed below, after the conditional check
+            }
+        }
+    }
+    if (length($encoding) > 0) {
+        $etag = substr($etag, 0, length($etag) - 1) . "-" . $encoding . "\"";
+        $headers->{"ETag"} = $etag;
+    }
+
     # Conditional GET (RFC 9110 13.1): If-None-Match wins; otherwise
     # If-Modified-Since by date -- not modified since the given time.
     my str $if_none_match = ::header($request_headers, "if-none-match");
@@ -8636,6 +8812,29 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
             $end = $range->{"end"};
             $partial = 1;
         }
+    }
+
+    if (length($encoding) > 0) {
+        my str $encoded = "";
+        if (length($enc_file) > 0) {
+            $encoded = slurp($enc_file);
+        } else {
+            $encoded = compress::gzip(slurp($fs));
+            if (core::byte_length($encoded) == 0 || core::byte_length($encoded) >= $size) {
+                $encoded = "";   # not worth it: send the identity bytes
+            }
+        }
+        if (core::byte_length($encoded) > 0) {
+            $headers->{"Content-Encoding"} = $encoding;
+            $headers->{"Content-Length"} = "" . core::byte_length($encoded);
+            delete($headers->{"Accept-Ranges"});
+            $res{"status"} = 200;
+            $res{"headers"} = $headers;
+            $res{"content_type"} = $mime;
+            $res{"body"} = $method eq "HEAD" ? "" : $encoded;
+            return %res;
+        }
+        $headers->{"ETag"} = ::file_etag($fs);
     }
 
     my int $length = $size;
@@ -8716,6 +8915,65 @@ my int $_g_reload_requested = 0;
 use Async::Loop;
 use Async::Task;
 
+# Settings that may change on a SIGHUP reload (everything except the
+# listeners, process user, pid file and worker mode).
+func Cannoli_Server_apply_settings(scalar $server_ref, hash %config) void {
+    $server_ref->{"num_workers"} = Cannoli::Config::get_int(%config, "server.workers", 5);
+    $server_ref->{"max_requests"} = Cannoli::Config::get_int(%config, "server.max_requests", 1000);
+    $server_ref->{"tick_interval"} = Cannoli::Config::get_int(%config, "server.tick_interval", 30);
+    $server_ref->{"tick_max"} = Cannoli::Config::get_int(%config, "server.tick_max", 1000);
+    $server_ref->{"timeout"} = Cannoli::Config::get_int(%config, "server.timeout", 30);
+    $server_ref->{"keep_alive_enabled"} = Cannoli::Config::get_bool(%config, "server.keep_alive", 1);
+    # Idle timeout for a kept-alive connection between requests (seconds). Kept
+    # short so a prefork worker parked on an idle keep-alive connection returns to
+    # accept() promptly instead of starving new connections; the value is also
+    # advertised in the Keep-Alive header so clients recycle on the same schedule.
+    $server_ref->{"keep_alive_timeout"} = Cannoli::Config::get_int(%config, "server.keep_alive_timeout", 2);
+    $server_ref->{"max_body_size"} = Cannoli::Config::get_int(%config, "server.max_body_size", 10485760);
+    $server_ref->{"max_header_size"} = Cannoli::Config::get_int(%config, "server.max_header_size", 8192);
+    # Total time allowed for a request's header block (and a TLS handshake):
+    # the slowloris bound. server.timeout stays the per-read silence limit.
+    $server_ref->{"header_timeout"} = Cannoli::Config::get_int(%config, "server.header_timeout", 20);
+    # A body must keep arriving at >= body_min_rate bytes/s once
+    # server.timeout seconds have passed (0 = no rate floor).
+    $server_ref->{"body_min_rate"} = Cannoli::Config::get_int(%config, "server.body_min_rate", 1024);
+    # A response write fails after this many seconds without progress.
+    $server_ref->{"write_timeout"} = Cannoli::Config::get_int(%config, "server.write_timeout", $server_ref->{"timeout"});
+    # Seconds a stopping (shutdown) or retiring (SIGHUP) worker gets to
+    # finish before SIGKILL.
+    $server_ref->{"shutdown_timeout"} = Cannoli::Config::get_int(%config, "server.shutdown_timeout", 10);
+    # Proxies whose X-Forwarded-For / X-Forwarded-Proto / X-Request-Id are
+    # believed (addresses and IPv4 CIDR blocks, comma-separated).
+    $server_ref->{"trusted_proxies"} = Cannoli::Config::get_str(%config, "server.trusted_proxies", "");
+    $server_ref->{"request_id_header"} = Cannoli::Config::get_bool(%config, "server.request_id", 1);
+    $server_ref->{"server_tokens"} = Cannoli::Config::get_bool(%config, "server.tokens", 1);
+    # [headers] section: added to every response that doesn't set them,
+    # e.g. X-Content-Type-Options = nosniff
+    my hash %extra_headers = ();
+    foreach my str $ck (keys(%config)) {
+        if (length($ck) > 8 && substr($ck, 0, 8) eq "headers.") {
+            $extra_headers{substr($ck, 8, length($ck) - 8)} = "" . $config{$ck};
+        }
+    }
+    $server_ref->{"extra_headers"} = \%extra_headers;
+
+    # Admission limits (shared across workers via the scoreboard)
+    $server_ref->{"max_conns_per_ip"} = Cannoli::Config::get_int(%config, "server.max_connections_per_ip", 0);
+    $server_ref->{"rate_limit"} = Cannoli::Config::get_int(%config, "server.rate_limit", 0);
+    $server_ref->{"rate_limit_window"} = Cannoli::Config::get_int(%config, "server.rate_limit_window", 1);
+    $server_ref->{"health_path"} = Cannoli::Config::get_str(%config, "server.health_path", "");
+    # Admin endpoint configuration
+    $server_ref->{"admin_enabled"} = Cannoli::Config::get_bool(%config, "admin.enabled", 0);
+    $server_ref->{"admin_path"} = Cannoli::Config::get_str(%config, "admin.path", "/__admin");
+    $server_ref->{"admin_allowed_ips"} = Cannoli::Config::get_str(%config, "admin.allowed_ips", "127.0.0.1, ::1");
+    # TLS material and protocol settings (applied by Cannoli::TLS::configure)
+    $server_ref->{"ssl_cert"} = Cannoli::Config::get_str(%config, "ssl.cert", "");
+    $server_ref->{"ssl_key"} = Cannoli::Config::get_str(%config, "ssl.key", "");
+    $server_ref->{"ssl_min_version"} = Cannoli::Config::get_str(%config, "ssl.min_version", "1.2");
+    $server_ref->{"ssl_ciphers"} = Cannoli::Config::get_str(%config, "ssl.ciphers", "");
+    $server_ref->{"ssl_ciphersuites"} = Cannoli::Config::get_str(%config, "ssl.ciphersuites", "");
+}
+
 func Cannoli_Server_new(hash %config) scalar {
     $_g_exit_funcs = [];
     $_g_tick_funcs = [];
@@ -8725,10 +8983,6 @@ func Cannoli_Server_new(hash %config) scalar {
 
     $server{"host"} = Cannoli::Config::get_str(%config, "server.host", "::");
     $server{"port"} = Cannoli::Config::get_int(%config, "server.port", 8080);
-    $server{"num_workers"} = Cannoli::Config::get_int(%config, "server.workers", 5);
-    $server{"max_requests"} = Cannoli::Config::get_int(%config, "server.max_requests", 1000);
-    $server{"tick_interval"} = Cannoli::Config::get_int(%config, "server.tick_interval", 30);
-    $server{"tick_max"} = Cannoli::Config::get_int(%config, "server.tick_max", 1000);
     # tickers: how many ticker processes (each calls cannoli_tick on its own
     # schedule; a library can use several to work through a job queue)
     $server{"tickers"} = Cannoli::Config::get_int(%config, "server.tickers", 1);
@@ -8736,46 +8990,16 @@ func Cannoli_Server_new(hash %config) scalar {
     # http = 0: no listening socket and no request workers, only the
     # tickers (a background-job server)
     $server{"http"} = Cannoli::Config::get_bool(%config, "server.http", 1);
-    $server{"timeout"} = Cannoli::Config::get_int(%config, "server.timeout", 30);
-    $server{"keep_alive_enabled"} = Cannoli::Config::get_bool(%config, "server.keep_alive", 1);
-    # Idle timeout for a kept-alive connection between requests (seconds). Kept
-    # short so a prefork worker parked on an idle keep-alive connection returns to
-    # accept() promptly instead of starving new connections; the value is also
-    # advertised in the Keep-Alive header so clients recycle on the same schedule.
-    $server{"keep_alive_timeout"} = Cannoli::Config::get_int(%config, "server.keep_alive_timeout", 2);
     $server{"loop_mode"} = Cannoli::Config::get_bool(%config, "server.loop_workers", 0);
     $server{"loop_acceptors"} = Cannoli::Config::get_int(%config, "server.loop_acceptors", 2);
     $server{"backlog"} = Cannoli::Config::get_int(%config, "server.backlog", 128);
-    $server{"max_body_size"} = Cannoli::Config::get_int(%config, "server.max_body_size", 10485760);
-    $server{"max_header_size"} = Cannoli::Config::get_int(%config, "server.max_header_size", 8192);
-    # Total time allowed for a request's header block (and a TLS handshake):
-    # the slowloris bound. server.timeout stays the per-read silence limit.
-    $server{"header_timeout"} = Cannoli::Config::get_int(%config, "server.header_timeout", 20);
-    # A body must keep arriving at >= body_min_rate bytes/s once
-    # server.timeout seconds have passed (0 = no rate floor).
-    $server{"body_min_rate"} = Cannoli::Config::get_int(%config, "server.body_min_rate", 1024);
-    # A response write fails after this many seconds without progress.
-    $server{"write_timeout"} = Cannoli::Config::get_int(%config, "server.write_timeout", $server{"timeout"});
-    # Seconds a stopping (shutdown) or retiring (SIGHUP) worker gets to
-    # finish before SIGKILL.
-    $server{"shutdown_timeout"} = Cannoli::Config::get_int(%config, "server.shutdown_timeout", 10);
     $server{"pid_file"} = Cannoli::Config::get_str(%config, "server.pid_file", "");
     $server{"user"} = Cannoli::Config::get_str(%config, "server.user", "");
     $server{"group"} = Cannoli::Config::get_str(%config, "server.group", "");
-    # Proxies whose X-Forwarded-For / X-Forwarded-Proto / X-Request-Id are
-    # believed (addresses and IPv4 CIDR blocks, comma-separated).
-    $server{"trusted_proxies"} = Cannoli::Config::get_str(%config, "server.trusted_proxies", "");
-    $server{"request_id_header"} = Cannoli::Config::get_bool(%config, "server.request_id", 1);
-    $server{"server_tokens"} = Cannoli::Config::get_bool(%config, "server.tokens", 1);
-    # [headers] section: added to every response that doesn't set them,
-    # e.g. X-Content-Type-Options = nosniff
-    my hash %extra_headers = ();
-    foreach my str $ck (keys(%config)) {
-        if (length($ck) > 8 && substr($ck, 0, 8) eq "headers.") {
-            $extra_headers{substr($ck, 8, length($ck) - 8)} = "" . $config{$ck};
-        }
-    }
-    $server{"extra_headers"} = \%extra_headers;
+    ::apply_settings(\%server, %config);
+    my hash %config_copy = %config;
+    $server{"config"} = \%config_copy;   # compared against on SIGHUP reload
+    $server{"config_file"} = Cannoli::Config::get_str(%config, "_config_file", "");
     $server{"retire_deadlines"} = {};
     $server{"spawn_times"} = {};
     $server{"crash_streak"} = 0;
@@ -8791,13 +9015,7 @@ func Cannoli_Server_new(hash %config) scalar {
     $server{"ssl_requested"} = $server{"ssl_enabled"};
     $server{"ssl_only"} = Cannoli::Config::get_bool(%config, "ssl.only", 0);
     $server{"ssl_port"} = Cannoli::Config::get_int(%config, "ssl.port", 443);
-    $server{"ssl_cert"} = Cannoli::Config::get_str(%config, "ssl.cert", "");
-    $server{"ssl_key"} = Cannoli::Config::get_str(%config, "ssl.key", "");
 
-    # Admin endpoint configuration
-    $server{"admin_enabled"} = Cannoli::Config::get_bool(%config, "admin.enabled", 0);
-    $server{"admin_path"} = Cannoli::Config::get_str(%config, "admin.path", "/__admin");
-    $server{"admin_allowed_ips"} = Cannoli::Config::get_str(%config, "admin.allowed_ips", "127.0.0.1, ::1");
 
     $server{"ssl_ctx"} = undef;
     $server{"ssl_server"} = undef;
@@ -8997,6 +9215,16 @@ func Cannoli_Server_create_ssl_socket(scalar $server_ref) scalar {
     my int $tls_backlog = exists(%{$server_ref}, "backlog") ? $server_ref->{"backlog"} : 0;
     my scalar $ssl_server = Cannoli::TLS::server_host($host, $ssl_port, $cert, $key, $tls_backlog);
     if ($ssl_server == 0) { $ssl_server = undef; }
+    if (defined($ssl_server)) {
+        # full certificate chain, protocol floor, ciphers, ALPN
+        my str $tls_err = Cannoli::TLS::configure($ssl_server, $cert, $key, $server_ref->{"ssl_min_version"},
+                                                  $server_ref->{"ssl_ciphers"}, $server_ref->{"ssl_ciphersuites"});
+        if (length($tls_err) > 0) {
+            say("Error: TLS configuration: " . $tls_err);
+            Cannoli::TLS::close_conn($ssl_server);
+            return undef;
+        }
+    }
 
     if (!defined($ssl_server)) {
         say("Error: Could not create SSL server on port " . $ssl_port);
@@ -9353,6 +9581,357 @@ func Cannoli_Server_accept_tls(scalar $server_ref, scalar $ssl_server) scalar {
     }
     Cannoli::TLS::close_conn($ssl_conn);
     return undef;
+}
+
+# ===========================================================================
+# Scoreboard: server-wide counters shared by all workers
+#
+# One shared anonymous mapping, created by the master before it forks, holds
+# a slot per worker (pid, open connections, requests) and atomic counters
+# for the whole server (requests by status class, latency histogram, bytes,
+# rejections), plus a small table of per-client-address counters used by
+# the connection and rate limits. Workers update it lock-free with atomic
+# operations; /metrics and the health check read it.
+# ===========================================================================
+
+__C__ {
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
+
+#define CSB_SLOTS 1024
+#define CSB_IPS 8192
+#define CSB_BUCKETS 12
+static const int csb_bucket_ms[CSB_BUCKETS - 1] = {5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000};
+typedef struct { int32_t pid; int32_t active; int64_t started; uint64_t requests; } csb_slot;
+typedef struct { uint64_t key; int32_t conns; int32_t count; int64_t window; int64_t seen; } csb_ip;
+typedef struct {
+    int64_t started;
+    uint64_t requests, bytes, duration_ms, connections, rejected_conn, rejected_rate, timeouts, errors;
+    uint64_t status[6];               /* 1xx..5xx, other */
+    uint64_t bucket[CSB_BUCKETS];     /* request duration histogram (not cumulative) */
+    csb_slot slots[CSB_SLOTS];
+    csb_ip ips[CSB_IPS];
+} csb_t;
+static csb_t *csb = NULL;
+static int csb_my_slot = -1;
+
+static uint64_t csb_hash(const char *s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+    return h ? h : 1;
+}
+
+/* Find (or claim) the table entry for an address. Entries idle for a
+ * minute with no open connections are reused. NULL when the table is full:
+ * callers then let the request through rather than fail closed. */
+static csb_ip *csb_ip_entry(const char *addr, int create) {
+    if (!csb || !addr || !*addr) return NULL;
+    uint64_t key = csb_hash(addr);
+    int64_t now = (int64_t)time(NULL);
+    unsigned start = (unsigned)(key % CSB_IPS);
+    for (int i = 0; i < 64; i++) {
+        csb_ip *e = &csb->ips[(start + i) % CSB_IPS];
+        uint64_t k = __atomic_load_n(&e->key, __ATOMIC_ACQUIRE);
+        if (k == key) { __atomic_store_n(&e->seen, now, __ATOMIC_RELAXED); return e; }
+        if (!create) continue;
+        int reusable = (k == 0) || (__atomic_load_n(&e->conns, __ATOMIC_RELAXED) <= 0
+                                    && now - __atomic_load_n(&e->seen, __ATOMIC_RELAXED) > 60);
+        if (reusable && __atomic_compare_exchange_n(&e->key, &k, key, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&e->conns, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->count, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->window, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&e->seen, now, __ATOMIC_RELAXED);
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static void csb_buf_add(char **buf, size_t *len, size_t *cap, const char *fmt, ...) {
+    va_list ap;
+    for (;;) {
+        va_start(ap, fmt);
+        int n = vsnprintf(*buf + *len, *cap - *len, fmt, ap);
+        va_end(ap);
+        if (n < 0) return;
+        if (*len + (size_t)n < *cap) { *len += (size_t)n; return; }
+        size_t ncap = (*cap) * 2 + (size_t)n;
+        char *nb = realloc(*buf, ncap);
+        if (!nb) return;
+        *buf = nb; *cap = ncap;
+    }
+}
+
+/* systemd sd_notify(3) without libsystemd: one datagram to $NOTIFY_SOCKET */
+static int cannoli_sd_notify(const char *msg) {
+    const char *path = getenv("NOTIFY_SOCKET");
+    if (!path || !*path || (path[0] != '/' && path[0] != '@')) return 0;
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    size_t plen = strlen(path);
+    if (plen >= sizeof(sa.sun_path)) return -1;
+    memcpy(sa.sun_path, path, plen);
+    if (sa.sun_path[0] == '@') sa.sun_path[0] = '\0';   /* abstract namespace */
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    ssize_t r = sendto(fd, msg, strlen(msg), MSG_NOSIGNAL, (struct sockaddr *)&sa,
+                       (socklen_t)(offsetof(struct sockaddr_un, sun_path) + plen));
+    close(fd);
+    return r < 0 ? -1 : 1;
+}
+}
+
+# Create the shared scoreboard (master, before forking). 1 on success.
+func Cannoli_Server_sb_init() int {
+    my scalar $ok = 0;
+    __C__ {
+        if (!csb) {
+            void *m = mmap(NULL, sizeof(csb_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+            if (m != MAP_FAILED) {
+                csb = (csb_t *)m;
+                memset(csb, 0, sizeof(csb_t));
+                csb->started = (int64_t)time(NULL);
+            }
+        }
+        ok = strada_new_int(csb ? 1 : 0);
+    }
+    return $ok;
+}
+
+# Claim a worker slot for this process (in the worker, after fork).
+func Cannoli_Server_sb_claim() void {
+    __C__ {
+        csb_my_slot = -1;
+        if (csb) {
+            int32_t me = (int32_t)getpid();
+            for (int i = 0; i < CSB_SLOTS; i++) {
+                int32_t z = 0;
+                if (__atomic_compare_exchange_n(&csb->slots[i].pid, &z, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    csb->slots[i].active = 0;
+                    csb->slots[i].requests = 0;
+                    csb->slots[i].started = (int64_t)time(NULL);
+                    csb_my_slot = i;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+# Free the slot of a worker that has exited (master).
+func Cannoli_Server_sb_release(int $pid) void {
+    __C__ {
+        if (csb) {
+            int32_t p = (int32_t)strada_to_int(pid);
+            for (int i = 0; i < CSB_SLOTS; i++) {
+                if (__atomic_load_n(&csb->slots[i].pid, __ATOMIC_ACQUIRE) == p) {
+                    __atomic_store_n(&csb->slots[i].active, 0, __ATOMIC_RELAXED);
+                    __atomic_store_n(&csb->slots[i].pid, 0, __ATOMIC_RELEASE);
+                }
+            }
+        }
+    }
+}
+
+# A connection opened (+1) or closed (-1) in this worker.
+func Cannoli_Server_sb_active(int $delta) void {
+    __C__ {
+        if (csb && csb_my_slot >= 0) {
+            int d = (int)strada_to_int(delta);
+            __atomic_add_fetch(&csb->slots[csb_my_slot].active, d, __ATOMIC_RELAXED);
+            if (d > 0) __atomic_add_fetch(&csb->connections, 1, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+# Account one finished request.
+func Cannoli_Server_sb_record(int $status, int $bytes, int $ms) void {
+    __C__ {
+        if (csb) {
+            int st = (int)strada_to_int(status);
+            int64_t b = strada_to_int(bytes), t = strada_to_int(ms);
+            if (t < 0) t = 0;
+            __atomic_add_fetch(&csb->requests, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&csb->bytes, (uint64_t)(b > 0 ? b : 0), __ATOMIC_RELAXED);
+            __atomic_add_fetch(&csb->duration_ms, (uint64_t)t, __ATOMIC_RELAXED);
+            int cls = (st >= 100 && st < 600) ? st / 100 - 1 : 5;
+            __atomic_add_fetch(&csb->status[cls], 1, __ATOMIC_RELAXED);
+            int bi = CSB_BUCKETS - 1;
+            for (int i = 0; i < CSB_BUCKETS - 1; i++) { if (t <= csb_bucket_ms[i]) { bi = i; break; } }
+            __atomic_add_fetch(&csb->bucket[bi], 1, __ATOMIC_RELAXED);
+            if (csb_my_slot >= 0) __atomic_add_fetch(&csb->slots[csb_my_slot].requests, 1, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+# Count an event: "timeout" (408) or "error" (handler threw).
+func Cannoli_Server_sb_event(str $what) void {
+    __C__ {
+        if (csb) {
+            char *w = strada_to_str(what);
+            if (w && strcmp(w, "timeout") == 0) __atomic_add_fetch(&csb->timeouts, 1, __ATOMIC_RELAXED);
+            else if (w && strcmp(w, "error") == 0) __atomic_add_fetch(&csb->errors, 1, __ATOMIC_RELAXED);
+            free(w);
+        }
+    }
+}
+
+# Per-address open-connection limit. 1 = admitted (call sb_conn_leave when
+# done), 0 = over the limit.
+func Cannoli_Server_sb_conn_enter(str $addr, int $max) int {
+    my scalar $ok = 1;
+    __C__ {
+        char *a = strada_to_str(addr);
+        csb_ip *e = csb_ip_entry(a, 1);
+        free(a);
+        int allowed = 1;
+        if (e) {
+            int32_t n = __atomic_add_fetch(&e->conns, 1, __ATOMIC_ACQ_REL);
+            int64_t m = strada_to_int(max);
+            if (m > 0 && n > m) {
+                __atomic_sub_fetch(&e->conns, 1, __ATOMIC_ACQ_REL);
+                __atomic_add_fetch(&csb->rejected_conn, 1, __ATOMIC_RELAXED);
+                allowed = 0;
+            }
+        }
+        ok = strada_new_int(allowed);
+    }
+    return $ok;
+}
+
+func Cannoli_Server_sb_conn_leave(str $addr) void {
+    __C__ {
+        char *a = strada_to_str(addr);
+        csb_ip *e = csb_ip_entry(a, 0);
+        free(a);
+        if (e && __atomic_sub_fetch(&e->conns, 1, __ATOMIC_ACQ_REL) < 0) {
+            __atomic_store_n(&e->conns, 0, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+# Per-address request rate: at most $limit requests per $window seconds
+# (fixed window). 1 = allowed, 0 = over the limit.
+func Cannoli_Server_sb_rate(str $addr, int $limit, int $window) int {
+    my scalar $ok = 1;
+    __C__ {
+        char *a = strada_to_str(addr);
+        csb_ip *e = csb_ip_entry(a, 1);
+        free(a);
+        int allowed = 1;
+        if (e) {
+            int64_t w = strada_to_int(window);
+            if (w < 1) w = 1;
+            int64_t cur = (int64_t)time(NULL) / w;
+            int64_t old = __atomic_load_n(&e->window, __ATOMIC_ACQUIRE);
+            if (old != cur && __atomic_compare_exchange_n(&e->window, &old, cur, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                __atomic_store_n(&e->count, 0, __ATOMIC_RELEASE);
+            }
+            int32_t c = __atomic_add_fetch(&e->count, 1, __ATOMIC_ACQ_REL);
+            if (c > strada_to_int(limit)) {
+                __atomic_add_fetch(&csb->rejected_rate, 1, __ATOMIC_RELAXED);
+                allowed = 0;
+            }
+        }
+        ok = strada_new_int(allowed);
+    }
+    return $ok;
+}
+
+# Prometheus text exposition of the scoreboard.
+func Cannoli_Server_sb_metrics() str {
+    my str $out = "";
+    __C__ {
+        size_t cap = 8192, len = 0;
+        char *b = malloc(cap);
+        if (b) {
+            b[0] = '\0';
+            if (csb) {
+                int workers = 0, busy = 0;
+                int64_t conns = 0;
+                for (int i = 0; i < CSB_SLOTS; i++) {
+                    if (__atomic_load_n(&csb->slots[i].pid, __ATOMIC_ACQUIRE) != 0) {
+                        int32_t a = __atomic_load_n(&csb->slots[i].active, __ATOMIC_RELAXED);
+                        workers++;
+                        if (a > 0) { busy++; conns += a; }
+                    }
+                }
+                csb_buf_add(&b, &len, &cap, "# HELP cannoli_up Whether the server is up.\n# TYPE cannoli_up gauge\ncannoli_up 1\n");
+                csb_buf_add(&b, &len, &cap, "# TYPE cannoli_start_time_seconds gauge\ncannoli_start_time_seconds %lld\n", (long long)csb->started);
+                csb_buf_add(&b, &len, &cap, "# HELP cannoli_workers Request worker processes by state.\n# TYPE cannoli_workers gauge\n"
+                            "cannoli_workers{state=\"busy\"} %d\ncannoli_workers{state=\"idle\"} %d\n", busy, workers - busy);
+                csb_buf_add(&b, &len, &cap, "# TYPE cannoli_open_connections gauge\ncannoli_open_connections %lld\n", (long long)conns);
+                csb_buf_add(&b, &len, &cap, "# TYPE cannoli_connections_total counter\ncannoli_connections_total %llu\n",
+                            (unsigned long long)__atomic_load_n(&csb->connections, __ATOMIC_RELAXED));
+                csb_buf_add(&b, &len, &cap, "# HELP cannoli_requests_total Requests answered, by status class.\n# TYPE cannoli_requests_total counter\n");
+                const char *cls[6] = {"1xx", "2xx", "3xx", "4xx", "5xx", "other"};
+                for (int i = 0; i < 6; i++) {
+                    csb_buf_add(&b, &len, &cap, "cannoli_requests_total{code=\"%s\"} %llu\n", cls[i],
+                                (unsigned long long)__atomic_load_n(&csb->status[i], __ATOMIC_RELAXED));
+                }
+                csb_buf_add(&b, &len, &cap, "# HELP cannoli_request_duration_seconds Time to answer a request.\n# TYPE cannoli_request_duration_seconds histogram\n");
+                unsigned long long cum = 0;
+                for (int i = 0; i < CSB_BUCKETS - 1; i++) {
+                    cum += __atomic_load_n(&csb->bucket[i], __ATOMIC_RELAXED);
+                    csb_buf_add(&b, &len, &cap, "cannoli_request_duration_seconds_bucket{le=\"%g\"} %llu\n", csb_bucket_ms[i] / 1000.0, cum);
+                }
+                cum += __atomic_load_n(&csb->bucket[CSB_BUCKETS - 1], __ATOMIC_RELAXED);
+                csb_buf_add(&b, &len, &cap, "cannoli_request_duration_seconds_bucket{le=\"+Inf\"} %llu\n", cum);
+                csb_buf_add(&b, &len, &cap, "cannoli_request_duration_seconds_sum %.3f\ncannoli_request_duration_seconds_count %llu\n",
+                            __atomic_load_n(&csb->duration_ms, __ATOMIC_RELAXED) / 1000.0, cum);
+                csb_buf_add(&b, &len, &cap, "# TYPE cannoli_response_bytes_total counter\ncannoli_response_bytes_total %llu\n",
+                            (unsigned long long)__atomic_load_n(&csb->bytes, __ATOMIC_RELAXED));
+                csb_buf_add(&b, &len, &cap, "# HELP cannoli_rejected_total Connections/requests refused by limits.\n# TYPE cannoli_rejected_total counter\n"
+                            "cannoli_rejected_total{reason=\"connection_limit\"} %llu\ncannoli_rejected_total{reason=\"rate_limit\"} %llu\n",
+                            (unsigned long long)__atomic_load_n(&csb->rejected_conn, __ATOMIC_RELAXED),
+                            (unsigned long long)__atomic_load_n(&csb->rejected_rate, __ATOMIC_RELAXED));
+                csb_buf_add(&b, &len, &cap, "# TYPE cannoli_request_timeouts_total counter\ncannoli_request_timeouts_total %llu\n",
+                            (unsigned long long)__atomic_load_n(&csb->timeouts, __ATOMIC_RELAXED));
+                csb_buf_add(&b, &len, &cap, "# TYPE cannoli_handler_errors_total counter\ncannoli_handler_errors_total %llu\n",
+                            (unsigned long long)__atomic_load_n(&csb->errors, __ATOMIC_RELAXED));
+            }
+            out = strada_new_str_len(b, len);
+            free(b);
+        }
+    }
+    return $out;
+}
+
+# {workers, busy, uptime} for the health check
+func Cannoli_Server_sb_health() str {
+    my str $out = "";
+    __C__ {
+        char b[160];
+        int workers = 0, busy = 0;
+        long long up = 0;
+        if (csb) {
+            for (int i = 0; i < CSB_SLOTS; i++) {
+                if (__atomic_load_n(&csb->slots[i].pid, __ATOMIC_ACQUIRE) != 0) {
+                    workers++;
+                    if (__atomic_load_n(&csb->slots[i].active, __ATOMIC_RELAXED) > 0) busy++;
+                }
+            }
+            up = (long long)time(NULL) - csb->started;
+        }
+        snprintf(b, sizeof(b), "{\"status\":\"ok\",\"workers\":%d,\"busy\":%d,\"uptime_sec\":%lld}", workers, busy, up);
+        out = strada_new_str(b);
+    }
+    return $out;
+}
+
+# systemd notification ("READY=1", "RELOADING=1", "STOPPING=1", ...);
+# a no-op unless started by systemd with Type=notify.
+func Cannoli_Server_sd_notify(str $msg) int {
+    my scalar $r = 0;
+    __C__ {
+        char *m = strada_to_str(msg);
+        r = strada_new_int(m ? cannoli_sd_notify(m) : 0);
+        free(m);
+    }
+    return $r;
 }
 
 # ===========================================================================
@@ -10092,6 +10671,7 @@ func Cannoli_Server_send_read_error(scalar $server_ref, scalar $conn, scalar $re
         %err_res = Cannoli::Response::payload_too_large($limit);
     } elsif ($err eq "timeout") {
         %err_res = Cannoli::Response::error_page(408, "Request Timeout");
+        ::sb_event("timeout");
     } elsif ($err eq "expectation_failed") {
         %err_res = Cannoli::Response::error_page(417, "Expectation Failed");
     } else {
@@ -10223,7 +10803,37 @@ func Cannoli_Server_dispatch(scalar $server_ref, scalar $req_ref) scalar {
 }
 
 # Serve every request on one connection (plain or TLS), then close it.
+# Serve every request on one connection (plain or TLS), applying the
+# per-address connection limit, then close it.
 func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
+    my int $limit = $server_ref->{"max_conns_per_ip"};
+    my str $peer = $conn->{"peer"};
+    my int $counted = 0;
+    if ($limit > 0 && length($peer) > 0 && ::ip_in_list($peer, $server_ref->{"trusted_proxies"}) == 0) {
+        if (::sb_conn_enter($peer, $limit) == 0) {
+            Cannoli::Log::debug("connection limit: refusing " . $peer);
+            if (::conn_send($server_ref, $conn, "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n") == 1) {
+                ::conn_linger_close($server_ref, $conn);
+            } else {
+                ::conn_close($server_ref, $conn);
+            }
+            return;
+        }
+        $counted = 1;
+    }
+    ::sb_active(1);
+    try {
+        ::serve_connection($server_ref, $conn);
+    } catch ($serve_err) {
+        ::sb_active(-1);
+        if ($counted == 1) { ::sb_conn_leave($peer); }
+        throw $serve_err;
+    }
+    ::sb_active(-1);
+    if ($counted == 1) { ::sb_conn_leave($peer); }
+}
+
+func Cannoli_Server_serve_connection(scalar $server_ref, scalar $conn) void {
     my str $buffer = "";
 
     while (1) {
@@ -10273,7 +10883,23 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
         # which give up after 5s on a non-blocking fd. In a classic worker
         # the handler owns the process anyway, so hand it a blocking fd.
         my int $handler_blocking = ($conn->{"tls"} == 1 && $conn->{"nb"} == 1 && $server_ref->{"loop_mode"} != 1) ? 1 : 0;
-        if ($handler_blocking == 1) { ::set_blocking($conn->{"fd"}, 1); }
+        # Health check (for load balancers / orchestrators) and the
+        # per-client request rate limit come before the application.
+        my int $pre = 0;
+        my str $hp = $server_ref->{"health_path"};
+        if (length($hp) > 0 && $req{"path"} eq $hp) {
+            %res = Cannoli::Response::json(200, ::sb_health());
+            Cannoli::Response::header(%res, "Cache-Control", "no-store");
+            $pre = 1;
+        } elsif ($server_ref->{"rate_limit"} > 0
+                 && ::ip_in_list($req{"remote_addr"}, $server_ref->{"trusted_proxies"}) == 0
+                 && ::sb_rate($req{"remote_addr"}, $server_ref->{"rate_limit"}, $server_ref->{"rate_limit_window"}) == 0) {
+            %res = Cannoli::Response::error_page(429, "Too Many Requests");
+            Cannoli::Response::header(%res, "Retry-After", "" . $server_ref->{"rate_limit_window"});
+            $pre = 1;
+        }
+        if ($handler_blocking == 1 && $pre == 0) { ::set_blocking($conn->{"fd"}, 1); }
+        if ($pre == 0) {
         try {
             my scalar $d = ::dispatch($server_ref, \%req);
             %res = %{$d->{"res"}};
@@ -10289,8 +10915,10 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
             Cannoli::Log::error("request " . $request_id . " " . $method . " " . $req{"path"} . " failed: " . $dispatch_err);
             %res = Cannoli::Response::error_page(500, "Internal Server Error");
             $failed = 1;
+            ::sb_event("error");
         }
         if ($handler_blocking == 1) { ::set_blocking($conn->{"fd"}, 0); }
+        }
 
         my int $keep_alive = ::should_keep_alive($server_ref, %req);
         if ($failed == 1) { $keep_alive = 0; }
@@ -10323,6 +10951,8 @@ func Cannoli_Server_handle_connection(scalar $server_ref, scalar $conn) void {
 
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
         ::record_request($elapsed_ms);
+        my int $out_bytes = exists(%res, "_file_length") ? $res{"_file_length"} : core::byte_length(defined($res{"body"}) ? ("" . $res{"body"}) : "");
+        ::sb_record($res{"status"} + 0, $out_bytes, $elapsed_ms);
 
         if (defined($after_func) && defined($c)) {
             try {
@@ -10359,6 +10989,14 @@ func Cannoli_Server_handle_ssl_client(scalar $server_ref, scalar $ssl_conn) void
 # Handle admin endpoint request - returns JSON stats
 # action: "" for status, "kill" to terminate worker
 func Cannoli_Server_handle_admin(scalar $server_ref, str $remote_ip, str $action) hash {
+    # Server-wide counters in Prometheus text format
+    if ($action eq "metrics") {
+        my hash %mres = Cannoli::Response::text(200, ::sb_metrics());
+        Cannoli::Response::header(%mres, "Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+        Cannoli::Response::header(%mres, "Cache-Control", "no-store");
+        return %mres;
+    }
+
     # Handle kill action
     if ($action eq "kill") {
         my int $pid = core::getpid();
@@ -10500,15 +11138,8 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
 }
 
 
-# Strada signal handlers are not dispatched while an Async::Loop is
-# running green tasks, so a loop worker never saw its SIGTERM (it was always
-# SIGKILLed after shutdown_timeout, mid-request). Loop workers therefore use
-# a raw C handler that only sets a flag; the watchdog task polls it.
 __C__ {
-#include <signal.h>
 #include <fcntl.h>
-static volatile sig_atomic_t cannoli_raw_term_flag = 0;
-static void cannoli_raw_term_handler(int s) { (void)s; cannoli_raw_term_flag = 1; }
 }
 
 # Switch an fd between blocking and non-blocking mode.
@@ -10523,24 +11154,6 @@ func Cannoli_Server_set_blocking(int $fd, int $blocking) void {
     }
 }
 
-func Cannoli_Server_install_raw_term() void {
-    __C__ {
-        struct sigaction sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sa_handler = cannoli_raw_term_handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        sigaction(SIGTERM, &sa, NULL);
-    }
-}
-
-func Cannoli_Server_raw_term_seen() int {
-    my scalar $seen = 0;
-    __C__ {
-        seen = strada_new_int(cannoli_raw_term_flag ? 1 : 0);
-    }
-    return $seen;
-}
 
 # Event-loop worker (server.loop_workers = 1): instead of one connection at
 # a time, this worker runs an Async::Loop where every connection is a green
@@ -10574,7 +11187,6 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
 
     # tasks interleave, so SIGTERM always defers to the watchdog below
     $_g_worker_busy = 1;
-    ::install_raw_term();
     my int $max_requests = $server_ref->{"max_requests"};
     my int $acceptors = $server_ref->{"loop_acceptors"};
     if ($acceptors < 1) { $acceptors = 1; }
@@ -10591,9 +11203,6 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
             Async::Task::sleep(1000);
             if (core::getppid() != $parent_pid) {
                 ::worker_exit();
-            }
-            if (::raw_term_seen() == 1) {
-                $_g_exit_requested = 1;
             }
             if ($_g_exit_requested == 1) {
                 $state->{"draining"} = 1;
@@ -10762,6 +11371,7 @@ func Cannoli_Server_spawn_worker(scalar $server_ref) int {
         core::signal("INT", "IGNORE");  # Let master handle Ctrl+C
         core::signal("HUP", "IGNORE");  # Only the master rotates workers
         ::init_worker_stats();
+        ::sb_claim();
         ::worker_loop($server_ref);
         ::worker_exit();
     }
@@ -10889,10 +11499,76 @@ func Cannoli_Server_reap_one(scalar $server_ref) int {
 # Start replacements before draining the old generation. This reloads the
 # already-loaded application generation; listener/config changes require a
 # new master process.
+# Re-read the configuration file on SIGHUP. Invalid configuration is
+# rejected (the running one stays). Settings that need a new master
+# (listeners, worker mode, user, pid file, libraries) are reported, not
+# applied. Command-line overrides stay in effect. Returns 1 if the reload
+# may proceed.
+func Cannoli_Server_reload_config(scalar $server_ref) int {
+    my str $path = $server_ref->{"config_file"};
+    if (length($path) == 0) { return 1; }   # no file: just rotate workers
+    if (!core::is_file($path)) {
+        Cannoli::Log::error("SIGHUP: configuration file " . $path . " is missing; keeping the running configuration");
+        return 0;
+    }
+    my hash %cfg = Cannoli::Config::parse_file($path);
+    my scalar $old = $server_ref->{"config"};
+    if (defined($old)) {
+        foreach my str $k (keys(%{$old})) {
+            if (length($k) > 5 && substr($k, 0, 5) eq "_cli.") {
+                $cfg{substr($k, 5, length($k) - 5)} = $old->{$k};
+                $cfg{$k} = $old->{$k};
+            }
+        }
+    }
+    $cfg{"_config_file"} = $path;
+    my scalar $errors = Cannoli::Config::validate(%cfg);
+    if (scalar(@{$errors}) > 0) {
+        Cannoli::Log::error("SIGHUP: invalid configuration, keeping the running one: " . join("; ", @{$errors}));
+        return 0;
+    }
+    if (defined($old)) {
+        foreach my str $rk ("server.host", "server.port", "server.backlog", "server.loop_workers", "server.http",
+                            "server.user", "server.group", "server.pid_file", "ssl.enabled", "ssl.only", "ssl.port",
+                            "app.library", "fastcgi.enabled", "fastcgi.socket") {
+            my str $was = exists(%{$old}, $rk) ? ("" . $old->{$rk}) : "";
+            my str $now = exists(%cfg, $rk) ? ("" . $cfg{$rk}) : "";
+            if ($was ne $now) {
+                Cannoli::Log::warn("SIGHUP: " . $rk . " changed; restart the server to apply it");
+            }
+        }
+    }
+
+    # TLS: load the (possibly renewed) certificate and settings into the
+    # listener's context before forking the new generation; keep the old
+    # ones if anything is wrong.
+    if (defined($server_ref->{"ssl_server"})) {
+        my str $tls_err = Cannoli::TLS::configure($server_ref->{"ssl_server"},
+            Cannoli::Config::get_str(%cfg, "ssl.cert", ""), Cannoli::Config::get_str(%cfg, "ssl.key", ""),
+            Cannoli::Config::get_str(%cfg, "ssl.min_version", "1.2"),
+            Cannoli::Config::get_str(%cfg, "ssl.ciphers", ""), Cannoli::Config::get_str(%cfg, "ssl.ciphersuites", ""));
+        if (length($tls_err) > 0) {
+            Cannoli::Log::error("SIGHUP: TLS configuration failed, keeping the running one: " . $tls_err);
+            return 0;
+        }
+    }
+
+    ::apply_settings($server_ref, %cfg);
+    $server_ref->{"config"} = \%cfg;
+    Cannoli::Log::init(%cfg);
+    say("SIGHUP: configuration reloaded from " . $path);
+    return 1;
+}
+
 func Cannoli_Server_rotate_workers(scalar $server_ref) void {
     my array @old = ();
     foreach my int $pid (@{$server_ref->{"worker_pids"}}) { push(@old, $pid); }
 
+    ::sd_notify("RELOADING=1\nMONOTONIC_USEC=" . (core::mono_ms() * 1000));
+    if (::reload_config($server_ref) == 0) {
+        ::sd_notify("READY=1\nSTATUS=reload rejected; running the previous configuration");
+        return;
+    }
     say("SIGHUP: starting a fresh worker generation...");
     if ($server_ref->{"http"} != 0) {
         ::spawn_workers($server_ref);
@@ -10907,6 +11583,7 @@ func Cannoli_Server_rotate_workers(scalar $server_ref) void {
         core::kill($pid, 15);
     }
     say("SIGHUP: draining " . scalar(@old) . " old worker(s)");
+    ::sd_notify("READY=1\nSTATUS=" . $server_ref->{"num_workers"} . " workers");
 }
 
 # Graceful shutdown - close sockets, wait for workers, cleanup
@@ -10917,6 +11594,7 @@ func Cannoli_Server_graceful_shutdown(scalar $server_ref) void {
     }
 
     say("\nGraceful shutdown initiated...");
+    ::sd_notify("STOPPING=1");
     $server_ref->{"running"} = 0;
 
     # Close listening sockets first to stop accepting new connections
@@ -11007,8 +11685,16 @@ func Cannoli_Server_shutdown(scalar $server_ref) void {
 # Master process loop - monitor and respawn workers
 func Cannoli_Server_master_loop(scalar $server_ref) void {
     $server_ref->{"running"} = 1;
+    # systemd WatchdogSec=: ping at half the interval while the master runs
+    my str $wd = core::getenv("WATCHDOG_USEC");
+    my int $wd_ms = (defined($wd) && $wd =~ /^[0-9]+$/) ? ($wd + 0) / 2000 : 0;
+    my int $wd_next = core::mono_ms();
 
     while ($server_ref->{"running"} == 1) {
+        if ($wd_ms > 0 && core::mono_ms() >= $wd_next) {
+            ::sd_notify("WATCHDOG=1");
+            $wd_next = core::mono_ms() + $wd_ms;
+        }
         if ($_g_reload_requested == 1) {
             $_g_reload_requested = 0;
             ::rotate_workers($server_ref);
@@ -11021,6 +11707,7 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
         if ($pid > 0 && $server_ref->{"running"} == 1) {
             my int $was_ticker = ::is_ticker($server_ref, $pid);
             ::forget_child($server_ref, $pid);
+            ::sb_release($pid);
 
             my scalar $retiring = $server_ref->{"retiring_pids"};
             my str $pid_key = "" . $pid;
@@ -11094,65 +11781,41 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
 # Process management: pid file, privilege drop
 # ===========================================================================
 
-__C__ {
-#include <pwd.h>
-#include <grp.h>
-#include <unistd.h>
-#include <errno.h>
-#include <string.h>
-}
-
-# Switch to server.user / server.group after the listening sockets are
-# bound. Supplementary groups are reset (initgroups for the target user, or
-# just the target group), then setgid, then setuid; finally we verify root
-# cannot be regained. Returns "" on success or an error message.
-func Cannoli_Server_drop_privileges_c(str $user, str $group, str $own_paths = "") str {
-    my str $err = "";
-    __C__ {
-        char *u = strada_to_str(user);
-        char *g = strada_to_str(group);
-        char *paths = strada_to_str(own_paths);
-        char msg[256];
-        msg[0] = '\0';
-        uid_t uid = (uid_t)-1;
-        gid_t gid = (gid_t)-1;
-        struct passwd *pw = NULL;
-        if (u && *u) {
-            pw = getpwnam(u);
-            if (!pw) snprintf(msg, sizeof(msg), "unknown user '%s'", u);
-            else { uid = pw->pw_uid; gid = pw->pw_gid; }
-        }
-        if (!msg[0] && g && *g) {
-            struct group *gr = getgrnam(g);
-            if (!gr) snprintf(msg, sizeof(msg), "unknown group '%s'", g);
-            else gid = gr->gr_gid;
-        }
-        /* Files the unprivileged processes must keep writing (logs, which
-         * are reopened on every write) were created as root: hand them over. */
-        if (!msg[0] && paths && *paths) {
-            char *save = NULL;
-            for (char *pth = strtok_r(paths, "\n", &save); pth; pth = strtok_r(NULL, "\n", &save)) {
-                if (*pth && chown(pth, uid, gid) != 0 && errno != ENOENT) {
-                    snprintf(msg, sizeof(msg), "chown %s failed: %s", pth, strerror(errno));
-                    break;
-                }
-            }
-        }
-        if (!msg[0] && gid != (gid_t)-1) {
-            int rc = pw ? initgroups(pw->pw_name, gid) : setgroups(1, &gid);
-            if (rc != 0) snprintf(msg, sizeof(msg), "setting supplementary groups failed: %s", strerror(errno));
-            else if (setgid(gid) != 0) snprintf(msg, sizeof(msg), "setgid(%d) failed: %s", (int)gid, strerror(errno));
-        }
-        if (!msg[0] && uid != (uid_t)-1) {
-            if (setuid(uid) != 0) snprintf(msg, sizeof(msg), "setuid(%d) failed: %s", (int)uid, strerror(errno));
-            else if (uid != 0 && setuid(0) == 0) snprintf(msg, sizeof(msg), "privileges could be regained after setuid(%d)", (int)uid);
-        }
-        free(u);
-        free(g);
-        free(paths);
-        err = strada_new_str(msg);
+# Switch to $user / $group after the listening sockets are bound:
+# supplementary groups reset (initgroups for the user, or just the group),
+# then setgid, then setuid; finally check root cannot be regained. Files the
+# unprivileged processes must keep writing ($own_paths: logs, which are
+# reopened on every write; a FastCGI Unix socket) are handed over first.
+# Returns "" on success or an error message.
+func Cannoli_Server_drop_privileges_to(str $user, str $group, scalar $own_paths) str {
+    my int $uid = -1;
+    my int $gid = -1;
+    if (length($user) > 0) {
+        my scalar $pw = core::getpwnam($user);
+        if (!defined($pw)) { return "unknown user '" . $user . "'"; }
+        $uid = $pw->{"uid"};
+        $gid = $pw->{"gid"};
     }
-    return $err;
+    if (length($group) > 0) {
+        my scalar $gr = core::getgrnam($group);
+        if (!defined($gr)) { return "unknown group '" . $group . "'"; }
+        $gid = $gr->{"gid"};
+    }
+    foreach my str $path (@{$own_paths}) {
+        if (length($path) > 0 && core::chown($path, $uid, $gid) != 0 && core::errno() != 2) {   # ENOENT: fine
+            return "chown " . $path . " failed: " . core::strerror(core::errno());
+        }
+    }
+    if ($gid >= 0) {
+        my int $rc = length($user) > 0 ? core::initgroups($user, $gid) : core::setgroups([$gid]);
+        if ($rc != 0) { return "setting supplementary groups failed: " . core::strerror(core::errno()); }
+        if (core::setgid($gid) != 0) { return "setgid(" . $gid . ") failed: " . core::strerror(core::errno()); }
+    }
+    if ($uid >= 0) {
+        if (core::setuid($uid) != 0) { return "setuid(" . $uid . ") failed: " . core::strerror(core::errno()); }
+        if ($uid != 0 && core::setuid(0) == 0) { return "privileges could be regained after setuid(" . $uid . ")"; }
+    }
+    return "";
 }
 
 func Cannoli_Server_drop_privileges(scalar $server_ref) int {
@@ -11163,7 +11826,11 @@ func Cannoli_Server_drop_privileges(scalar $server_ref) int {
         say("Note: server.user/server.group ignored (not started as root)");
         return 1;
     }
-    my str $err = ::drop_privileges_c($user, $group, join("\n", Cannoli::Log::files()));
+    my array @own = Cannoli::Log::files();
+    if (exists(%{$server_ref}, "own_paths")) {
+        foreach my str $op (@{$server_ref->{"own_paths"}}) { push(@own, $op); }
+    }
+    my str $err = ::drop_privileges_to($user, $group, \@own);
     if (length($err) > 0) {
         say(STDERR, "Error: could not drop privileges: " . $err);
         return 0;
@@ -11225,6 +11892,7 @@ func Cannoli_Server_run(scalar $server_ref) int {
         core::setproctitle("cannoli [master]");
         say("No HTTP (server.http = 0): starting " . $server_ref->{"tickers"} . " ticker(s)");
         ::spawn_tickers($server_ref);
+        ::sd_notify("READY=1\nMAINPID=" . core::getpid());
         ::master_loop($server_ref);
         return 0;
     }
@@ -11270,10 +11938,12 @@ func Cannoli_Server_run(scalar $server_ref) int {
     core::setproctitle("cannoli [master]");
 
     say("Starting " . $server_ref->{"num_workers"} . " worker processes...");
+    if (::sb_init() == 0) { Cannoli::Log::warn("could not create the shared scoreboard; metrics and per-client limits are disabled"); }
 
     # Spawn workers (and the ticker, if a library wants one)
     ::spawn_workers($server_ref);
     ::spawn_tickers($server_ref);
+    ::sd_notify("READY=1\nMAINPID=" . core::getpid() . "\nSTATUS=" . $server_ref->{"num_workers"} . " workers");
 
     # Run master loop
     ::master_loop($server_ref);
@@ -11324,6 +11994,9 @@ func Cannoli_Server_run_single(scalar $server_ref) int {
     # Install signal handlers for graceful shutdown
     ::install_signal_handlers($server_ref);
     ::init_worker_stats();
+    ::sb_init();
+    ::sb_claim();
+    ::sd_notify("READY=1\nMAINPID=" . core::getpid());
 
     say("Running in single-process development mode");
     say("Press Ctrl+C to stop");
@@ -11864,14 +12537,25 @@ func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
 }
 
 # FastCGI worker loop
+my int $g_fcgi_stop = 0;
+
+func Cannoli_FastCGI_on_term(int $sig) void {
+    defined($sig);
+    $g_fcgi_stop = 1;
+}
+
 func Cannoli_FastCGI_worker_loop(scalar $listener, scalar $router, int $max_requests) void {
     my int $requests_handled = 0;
+    my int $parent = core::getppid();
 
-    while ($requests_handled < $max_requests) {
+    while ($requests_handled < $max_requests && $g_fcgi_stop == 0) {
+        # wake up every second to notice SIGTERM or a dead master
+        my array @ready = core::select_fds([core::socket_fd($listener)], 1000);
+        if ($g_fcgi_stop == 1 || core::getppid() != $parent) { last; }
+        if (scalar(@ready) == 0) { next; }
         my scalar $client = core::socket_accept($listener);
         if (!defined($client)) {
-            core::usleep(10000);
-            next;
+            next;   # another worker took it
         }
         # handle_connection owns (and closes) a duplicate of the fd; the
         # socket object closes its own.
@@ -11884,86 +12568,158 @@ func Cannoli_FastCGI_worker_loop(scalar $listener, scalar $router, int $max_requ
     }
 }
 
-func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int $max_body = 10485760, scalar $server_ref = undef) int {
-    $g_fcgi_max_body = $max_body;
-    # fastcgi.socket = host:port (TCP). The runtime has no Unix-domain
-    # sockets, so a path falls back to 127.0.0.1:9000. Bind loopback by
-    # default: FastCGI params (REMOTE_ADDR, HTTPS, ...) are trusted, so the
-    # port must not be reachable from the network.
-    my str $host = "127.0.0.1";
-    my int $port = 9000;
-    my int $colon = -1;
-    my int $k = length($socket_path) - 1;
-    while ($k >= 0) {
-        if (substr($socket_path, $k, 1) eq ":") { $colon = $k; last; }
-        $k = $k - 1;
+func Cannoli_FastCGI_spawn(scalar $listener, scalar $router, scalar $pids) void {
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        core::setproctitle("cannoli [fastcgi worker]");
+        core::signal("TERM", \&Cannoli_FastCGI_on_term);
+        core::signal("INT", "IGNORE");
+        ::worker_loop($listener, $router, 1000);
+        exit(0);
     }
-    if ($colon >= 0 && substr($socket_path, 0, 1) ne "/") {
-        my str $h = substr($socket_path, 0, $colon);
-        if (length($h) > 1 && substr($h, 0, 1) eq "[" && substr($h, length($h) - 1, 1) eq "]") {
-            $h = substr($h, 1, length($h) - 2);
-        }
-        if (length($h) > 0) { $host = $h; }
-        $port = substr($socket_path, $colon + 1, length($socket_path) - $colon - 1) + 0;
-    } elsif (length($socket_path) > 0) {
-        say("Note: Unix-domain FastCGI sockets are not supported; using TCP " . $host . ":" . $port . " (set fastcgi.socket = host:port)");
+    if ($pid > 0) {
+        push(@{$pids}, $pid);
+    } else {
+        Cannoli::Log::error("FastCGI: fork() failed");
     }
-    if ($port <= 0 || $port > 65535) {
-        say("Error: invalid FastCGI port in '" . $socket_path . "'");
-        return 1;
-    }
+}
 
-    my scalar $listener = core::socket_server_host($host, $port, 128);
+# Parse "0660"-style octal; $fallback when empty or invalid.
+func Cannoli_FastCGI_octal(str $s, int $fallback) int {
+    if ($s !~ /^0?[0-7]{3}$/) { return $fallback; }
+    my int $v = 0;
+    my int $i = 0;
+    while ($i < length($s)) {
+        $v = $v * 8 + (ord(substr($s, $i, 1)) - 48);
+        $i = $i + 1;
+    }
+    return $v;
+}
+
+# Listen on a Unix-domain socket. A leftover socket file from a previous run
+# is removed -- unless something is still accepting on it.
+func Cannoli_FastCGI_unix_listen(str $path, int $mode) scalar {
+    if (core::is_file($path) || core::is_dir($path)) {
+        say("Error: " . $path . " exists and is not a socket");
+        return undef;
+    }
+    my scalar $probe = core::unix_client($path);
+    if (defined($probe)) {
+        core::socket_close($probe);
+        say("Error: another server is already listening on " . $path);
+        return undef;
+    }
+    core::unlink($path);
+    my scalar $listener = core::unix_server($path, 0);
+    if (defined($listener)) {
+        core::chmod($path, $mode);
+    }
+    return $listener;
+}
+
+# fastcgi.socket: "unix:/path" or "/path" (Unix-domain socket), or
+# "host:port" (TCP; loopback by default -- FastCGI params such as
+# REMOTE_ADDR and HTTPS are trusted as sent, so it must not be reachable from
+# the network). fastcgi.socket_mode (default 0660) sets the socket's mode;
+# with server.user it is also chowned to that user.
+func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int $max_body = 10485760, scalar $server_ref = undef, str $socket_mode = "0660") int {
+    $g_fcgi_max_body = $max_body;
+    my scalar $listener = undef;
+    my str $where = "";
+    my str $unix_path = "";
+
+    if (substr($socket_path, 0, 5) eq "unix:" || substr($socket_path, 0, 1) eq "/") {
+        $unix_path = substr($socket_path, 0, 5) eq "unix:" ? substr($socket_path, 5, length($socket_path) - 5) : $socket_path;
+        $listener = ::unix_listen($unix_path, ::octal($socket_mode, 432));
+        $where = "unix:" . $unix_path;
+        if (defined($server_ref)) {
+            if (!exists(%{$server_ref}, "own_paths")) { $server_ref->{"own_paths"} = []; }
+            push(@{$server_ref->{"own_paths"}}, $unix_path);
+        }
+    } else {
+        my str $host = "127.0.0.1";
+        my int $port = 9000;
+        my int $colon = -1;
+        my int $k = length($socket_path) - 1;
+        while ($k >= 0) {
+            if (substr($socket_path, $k, 1) eq ":") { $colon = $k; last; }
+            $k = $k - 1;
+        }
+        if ($colon >= 0) {
+            my str $h = substr($socket_path, 0, $colon);
+            if (length($h) > 1 && substr($h, 0, 1) eq "[" && substr($h, length($h) - 1, 1) eq "]") {
+                $h = substr($h, 1, length($h) - 2);
+            }
+            if (length($h) > 0) { $host = $h; }
+            $port = substr($socket_path, $colon + 1, length($socket_path) - $colon - 1) + 0;
+        }
+        if ($port <= 0 || $port > 65535) {
+            say("Error: invalid FastCGI address '" . $socket_path . "' (use host:port or unix:/path)");
+            return 1;
+        }
+        $listener = core::socket_server_host($host, $port, 128);
+        $where = $host . ":" . $port;
+    }
     if (!defined($listener)) {
-        say("Error: Could not create FastCGI socket on " . $host . ":" . $port);
+        say("Error: Could not create FastCGI socket on " . $where);
         return 1;
     }
 
     # pid file + server.user/group, as in HTTP mode
     if (defined($server_ref) && Cannoli::Server::prepare_master($server_ref) == 0) {
+        if (length($unix_path) > 0) { core::unlink($unix_path); }
         return 1;
     }
 
-    say("FastCGI listening on " . $host . ":" . $port);
-    say("Note: Configure nginx with 'fastcgi_pass " . $host . ":" . $port . ";'");
+    say("FastCGI listening on " . $where);
+    say("Note: Configure nginx with 'fastcgi_pass " . (length($unix_path) > 0 ? "unix:" . $unix_path : $where) . ";'");
     say("Starting " . $num_workers . " worker processes...");
+    core::setproctitle("cannoli [fastcgi master]");
+    core::signal("TERM", \&Cannoli_FastCGI_on_term);
+    core::signal("INT", \&Cannoli_FastCGI_on_term);
+    core::signal("PIPE", "IGNORE");
 
-    # Fork workers
+    my scalar $pids = [];
     my int $i = 0;
     while ($i < $num_workers) {
-        my int $pid = core::fork();
-
-        if ($pid == 0) {
-            # Child
-            ::worker_loop($listener, $router, 1000);
-            exit(0);
-        } elsif ($pid > 0) {
-            say("Spawned FastCGI worker " . ($i + 1) . " with PID " . $pid);
-        }
-
+        ::spawn($listener, $router, $pids);
         $i = $i + 1;
     }
 
-    # Master waits for children
-    while (1) {
-        # core::wait() returns the reaped pid (waitpid returns the status)
-        my int $pid = core::wait();
-
-        if ($pid > 0) {
-            say("FastCGI worker " . $pid . " exited, respawning...");
-
-            my int $new_pid = core::fork();
-            if ($new_pid == 0) {
-                ::worker_loop($listener, $router, 1000);
-                exit(0);
-            } elsif ($new_pid > 0) {
-                say("Respawned FastCGI worker with PID " . $new_pid);
-            }
+    # Respawn workers until SIGTERM/SIGINT
+    while ($g_fcgi_stop == 0) {
+        my array @alive = ();
+        my int $dead = 0;
+        foreach my int $p (@{$pids}) {
+            core::waitpid($p, 1);
+            if (core::kill($p, 0) == 0) { push(@alive, $p); } else { $dead = $dead + 1; }
         }
-
+        $pids = \@alive;
+        while ($dead > 0 && $g_fcgi_stop == 0) {
+            ::spawn($listener, $router, $pids);
+            $dead = $dead - 1;
+            core::usleep(100000);   # no fork storm if workers die at once
+        }
         core::usleep(100000);
     }
 
+    # Shutdown: stop accepting, let workers finish their request, then reap
+    say("FastCGI shutdown...");
+    core::socket_close($listener);
+    foreach my int $p (@{$pids}) { core::kill($p, 15); }
+    my int $deadline = core::mono_ms() + 10000;
+    while (core::mono_ms() < $deadline) {
+        my int $left = 0;
+        foreach my int $p (@{$pids}) {
+            core::waitpid($p, 1);
+            if (core::kill($p, 0) == 0) { $left = $left + 1; }
+        }
+        if ($left == 0) { last; }
+        core::usleep(20000);
+    }
+    foreach my int $p (@{$pids}) { if (core::kill($p, 0) == 0) { core::kill($p, 9); core::waitpid($p, 0); } }
+    if (length($unix_path) > 0) { core::unlink($unix_path); }
+    if (defined($server_ref)) { Cannoli::Server::remove_pid_file($server_ref); }
     return 0;
 }
 /*
@@ -12098,7 +12854,8 @@ func Cannoli_App_run(scalar $app) int {
         my str $socket = Cannoli::Config::get_str(%config, "fastcgi.socket", "127.0.0.1:9000");
         my int $workers = Cannoli::Config::get_int(%config, "server.workers", 5);
         return Cannoli::FastCGI::run($socket, $app->{"router"}, $workers,
-            Cannoli::Config::get_int(%config, "server.max_body_size", 10485760), $server_ref);
+            Cannoli::Config::get_int(%config, "server.max_body_size", 10485760), $server_ref,
+            Cannoli::Config::get_str(%config, "fastcgi.socket_mode", "0660"));
     }
 
     return Cannoli::Server::run($server_ref);
@@ -12699,6 +13456,19 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         $i = $i + 1;
     }
 
+    # Remember the config file and which settings the command line
+    # overrides, so a SIGHUP reload re-reads the file but keeps those.
+    if (length($config_file) > 0 && core::is_file($config_file)) {
+        my hash %file_cfg = Cannoli::Config::parse_file($config_file);
+        foreach my str $ck (keys(%config)) {
+            if (substr($ck, 0, 1) eq "_") { next; }
+            if (!exists(%file_cfg, $ck) || ("" . $file_cfg{$ck}) ne ("" . $config{$ck})) {
+                $config{"_cli." . $ck} = $config{$ck};
+            }
+        }
+        $config{"_config_file"} = $config_file;
+    }
+
     if ($show_help == 1) {
         ::print_help();
         return 0;
@@ -12748,6 +13518,8 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         $g_static_server = Cannoli::Static::new();
         $g_static_server->{"document_root"} = $static_root;
         $g_static_server->{"cache_max_age"} = Cannoli::Config::get_int(%config, "static.cache_max_age", 0);
+        $g_static_server->{"gzip"} = Cannoli::Config::get_bool(%config, "static.gzip", 1);
+        $g_static_server->{"precompressed"} = Cannoli::Config::get_bool(%config, "static.precompressed", 1);
 
         if (Cannoli::Config::get_bool(%config, "static.listing", 0) == 1) {
             $g_static_server->{"directory_listing"} = 1;

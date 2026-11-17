@@ -1,0 +1,61 @@
+# systemd unit for Cannoli.
+#
+#   sudo cp contrib/cannoli.service /etc/systemd/system/
+#   sudo cp contrib/cannoli.conf /etc/cannoli/cannoli.conf    # then edit it
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cannoli
+#
+# Reload configuration / renewed TLS certificates without dropping
+# connections:   sudo systemctl reload cannoli     (SIGHUP)
+#
+# Cannoli tells systemd when it is ready, reloading and stopping
+# (Type=notify) and pings the watchdog while the master is healthy.
+
+[Unit]
+Description=Cannoli web server
+Documentation=file:///usr/local/share/doc/cannoli/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=/usr/local/bin/cannoli -t -c /etc/cannoli/cannoli.conf
+ExecStart=/usr/local/bin/cannoli -c /etc/cannoli/cannoli.conf
+ExecReload=/bin/kill -HUP $MAINPID
+# The master forwards SIGTERM to its workers and waits shutdown_timeout
+# seconds; only the master gets the signal, systemd SIGKILLs leftovers.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+WatchdogSec=30
+Restart=on-failure
+RestartSec=2
+
+# Run unprivileged from the start; the capability lets it bind 80/443.
+# (Alternatively start as root and set server.user in cannoli.conf.)
+User=www-data
+Group=www-data
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Filesystem and kernel hardening. Add paths your application writes to
+# (uploads, SQLite databases, ...) to ReadWritePaths.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RuntimeDirectory=cannoli
+LogsDirectory=cannoli
+StateDirectory=cannoli
+ReadWritePaths=/var/log/cannoli /var/lib/cannoli
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

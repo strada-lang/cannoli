@@ -27,6 +27,8 @@ func Cannoli_Static_new() scalar {
     $s{"max_file_size"} = 0;          # 0 = no limit (large files are streamed from disk)
     $s{"stream_threshold"} = 262144;  # files above this are not loaded into memory
     $s{"cache_max_age"} = 0;          # > 0: Cache-Control: public, max-age=N
+    $s{"precompressed"} = 1;          # serve file.br / file.gz when the client accepts them
+    $s{"gzip"} = 1;                   # gzip compressible files (256B..1MB) on the fly
     my hash %aliases = ();
     $s{"aliases"} = \%aliases;
     return \%s;
@@ -369,6 +371,35 @@ func Cannoli_Static_parse_range(str $value, int $size) scalar {
     return \%out;
 }
 
+# Types worth compressing (text-like formats; images/archives already are).
+func Cannoli_Static_compressible(str $mime) int {
+    my str $m = lc($mime);
+    if (substr($m, 0, 5) eq "text/") { return 1; }
+    if (index($m, "json") >= 0 || index($m, "javascript") >= 0 || index($m, "xml") >= 0) { return 1; }
+    if (index($m, "image/svg") >= 0 || index($m, "font/ttf") >= 0 || index($m, "font/otf") >= 0) { return 1; }
+    if (index($m, "wasm") >= 0) { return 1; }
+    return 0;
+}
+
+# Does Accept-Encoding allow $enc? ("gzip;q=0" refuses it; "*" accepts)
+func Cannoli_Static_accepts_encoding(str $header, str $enc) int {
+    my int $star = 0;
+    foreach my str $part (split(",", $header)) {
+        my str $p = trim($part);
+        my str $name = $p;
+        my str $q = "";
+        my int $semi = index($p, ";");
+        if ($semi >= 0) {
+            $name = trim(substr($p, 0, $semi));
+            $q = lc(trim(substr($p, $semi + 1, length($p) - $semi - 1)));
+        }
+        my int $zero = ($q =~ /^q\s*=\s*0(\.0*)?$/) ? 1 : 0;
+        if (lc($name) eq $enc) { return $zero == 1 ? 0 : 1; }
+        if ($name eq "*" && $zero == 0) { $star = 1; }
+    }
+    return $star;
+}
+
 func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $request_headers = undef) hash {
     my hash %res = ();
     if ($method ne "GET" && $method ne "HEAD") {
@@ -436,6 +467,37 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
         $headers->{"Cache-Control"} = "public, max-age=" . $srv->{"cache_max_age"};
     }
 
+    # Content coding: a precompressed sibling (file.br / file.gz, at least
+    # as new as the file), else gzip on the fly for compressible types.
+    # Range requests get the identity bytes. Each coding has its own ETag.
+    my str $encoding = "";
+    my str $enc_file = "";
+    my int $is_compressible = ::compressible($mime);
+    my str $accept_enc = ::header($request_headers, "accept-encoding");
+    if ($is_compressible == 1) {
+        $headers->{"Vary"} = "Accept-Encoding";
+        if (length(::header($request_headers, "range")) == 0 && length($accept_enc) > 0) {
+            if ($srv->{"precompressed"} == 1) {
+                foreach my str $cand ("br", "gzip") {
+                    my str $sib = $fs . ($cand eq "br" ? ".br" : ".gz");
+                    if (length($encoding) == 0 && ::accepts_encoding($accept_enc, $cand) == 1
+                        && core::is_file($sib) && core::file_mtime($sib) >= $mtime) {
+                        $encoding = $cand;
+                        $enc_file = $sib;
+                    }
+                }
+            }
+            if (length($encoding) == 0 && $srv->{"gzip"} == 1 && $size >= 256 && $size <= 1048576
+                && ::accepts_encoding($accept_enc, "gzip") == 1) {
+                $encoding = "gzip";   # compressed below, after the conditional check
+            }
+        }
+    }
+    if (length($encoding) > 0) {
+        $etag = substr($etag, 0, length($etag) - 1) . "-" . $encoding . "\"";
+        $headers->{"ETag"} = $etag;
+    }
+
     # Conditional GET (RFC 9110 13.1): If-None-Match wins; otherwise
     # If-Modified-Since by date -- not modified since the given time.
     my str $if_none_match = ::header($request_headers, "if-none-match");
@@ -473,6 +535,29 @@ func Cannoli_Static_handle_request(scalar $srv, str $method, str $url, scalar $r
             $end = $range->{"end"};
             $partial = 1;
         }
+    }
+
+    if (length($encoding) > 0) {
+        my str $encoded = "";
+        if (length($enc_file) > 0) {
+            $encoded = slurp($enc_file);
+        } else {
+            $encoded = compress::gzip(slurp($fs));
+            if (core::byte_length($encoded) == 0 || core::byte_length($encoded) >= $size) {
+                $encoded = "";   # not worth it: send the identity bytes
+            }
+        }
+        if (core::byte_length($encoded) > 0) {
+            $headers->{"Content-Encoding"} = $encoding;
+            $headers->{"Content-Length"} = "" . core::byte_length($encoded);
+            delete($headers->{"Accept-Ranges"});
+            $res{"status"} = 200;
+            $res{"headers"} = $headers;
+            $res{"content_type"} = $mime;
+            $res{"body"} = $method eq "HEAD" ? "" : $encoded;
+            return %res;
+        }
+        $headers->{"ETag"} = ::file_etag($fs);
     }
 
     my int $length = $size;

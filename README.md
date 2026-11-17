@@ -68,21 +68,24 @@ make
 ### FastCGI Mode (with nginx)
 
 ```bash
-./cannoli --fastcgi --socket 127.0.0.1:9000
+./cannoli --fastcgi --socket unix:/run/cannoli/cannoli.sock   # or 127.0.0.1:9000
 ```
 
 nginx configuration:
 ```nginx
 location / {
-    fastcgi_pass 127.0.0.1:9000;
+    fastcgi_pass unix:/run/cannoli/cannoli.sock;
+    fastcgi_keep_conn on;
     include fastcgi_params;
 }
 ```
 
-FastCGI listens on TCP (`fastcgi.socket = host:port`, default
-`127.0.0.1:9000`); Unix-domain sockets are not supported by the runtime yet.
-Keep it on loopback or a private network: FastCGI parameters such as
-`REMOTE_ADDR` and `HTTPS` are trusted as sent.
+`fastcgi.socket` is `unix:/path` (or just `/path`) for a Unix-domain socket
+-- created with `fastcgi.socket_mode` (default `0660`), handed to
+`server.user`, removed on shutdown; a stale file from a crashed run is
+replaced, a live one is refused -- or `host:port` for TCP (default
+`127.0.0.1:9000`). Keep TCP on loopback or a private network: FastCGI
+parameters such as `REMOTE_ADDR` and `HTTPS` are trusted as sent.
 
 ### Dynamic Library Mode
 
@@ -472,6 +475,12 @@ level = info
 Set `server.keep_alive = false` or pass `--no-keep-alive` to always close each response.
 `static.cache_max_age = N` adds `Cache-Control: public, max-age=N` to static
 files; files over 256KB are streamed from disk rather than loaded into memory.
+Compressible files (text, JSON, JS, CSS, SVG, ...) are served from a
+precompressed `file.br` / `file.gz` next to them when the client accepts it
+and it is at least as new (`static.precompressed`, default on), otherwise
+gzipped on the fly between 256B and 1MB (`static.gzip`, default on), with
+`Vary: Accept-Encoding` and a per-encoding ETag. Range requests get the
+uncompressed bytes.
 
 Sessions are stored under `/tmp/cannoli_sessions` (or the directory given to
 `Cannoli::Session::configure`) only if it is a private directory owned by the
@@ -515,6 +524,39 @@ Command-line options override the config file regardless of their order.
   starting are respawned with exponential backoff instead of a fork storm.
 - **Logs** are reopened on every write, so `logrotate` needs no signal.
   Access-log fields that come from the client are escaped.
+- **systemd**: `contrib/cannoli.service` (Type=notify -- Cannoli reports
+  READY / RELOADING / STOPPING and pings `WatchdogSec`), `contrib/cannoli.conf`
+  (an annotated production configuration) and `contrib/nginx-proxy.conf`.
+- **Reload** (`systemctl reload cannoli` / SIGHUP): the config file is
+  re-read and validated -- an invalid one is rejected and the running
+  configuration stays -- then a fresh worker generation starts with the new
+  settings and the old one drains. TLS certificates and settings are
+  reloaded too (point a certbot deploy hook at `systemctl reload`).
+  Listener, user, pid-file, worker-mode and library changes are reported as
+  needing a restart. Command-line options keep overriding the file.
+- **Health and metrics**: `server.health_path = /healthz` answers
+  `{"status":"ok","workers":N,"busy":M,"uptime_sec":S}` (exempt from rate
+  limits, cheap enough for load-balancer probes). With `[admin] enabled`,
+  `/__admin/metrics` serves Prometheus text: requests by status class, a
+  latency histogram, bytes, open connections, busy/idle workers, timeouts,
+  handler errors and limit rejections -- summed across all workers through
+  a shared-memory scoreboard.
+- **Per-client limits**: `server.max_connections_per_ip` caps simultaneous
+  connections from one socket address (trusted proxies exempt; excess
+  connections get 429 and are closed); `server.rate_limit` /
+  `server.rate_limit_window` cap requests per client address (the forwarded
+  address behind a trusted proxy) with a 429 and `Retry-After`. Both are
+  shared across workers.
+- **TLS** (direct HTTPS): the full chain in `ssl.cert` (e.g. Let's Encrypt
+  `fullchain.pem`) is served; `ssl.min_version` (1.2 default, or 1.3),
+  `ssl.ciphers` (TLS 1.2; default: ECDHE with AES-GCM / ChaCha20 only),
+  `ssl.ciphersuites` (TLS 1.3), server cipher preference, no renegotiation,
+  ALPN `http/1.1`. For HTTP/2 or HTTP/3, put nginx/Caddy in front.
+- **Robustness testing**: `t/test_fuzz.strada` (parser fuzzing; seed and
+  size via `CANNOLI_FUZZ_SEED` / `CANNOLI_FUZZ_ITERS`), `t/test_fuzz_http.sh`
+  (malformed requests against live servers; `tools/fuzz_http.py`), and
+  `tools/soak.sh [seconds] [concurrency]` (sustained load with worker memory
+  sampling). `sudo t/test_privdrop.sh` checks the privilege drop as root.
 
 ## Dynamic Library Interface
 

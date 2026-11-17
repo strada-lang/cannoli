@@ -89,3 +89,106 @@ func read_wait(int $conn, int $max, int $timeout_ms = 30000) str {
     return "";
 }
 
+
+# ---------------------------------------------------------------------------
+# Server TLS settings: full certificate chain, minimum protocol version,
+# cipher lists, server cipher preference, ALPN "http/1.1", and certificate
+# reload (SIGHUP). The ssl module has no API for these yet, so this reaches
+# its OpenSSL context through the first fields of the module's connection
+# struct (socket_fd, SSL*, SSL_CTX*) -- verified against ssl::fd() before
+# use, so a layout change in the module makes configure() fail instead of
+# touching the wrong memory. (Candidate ssl-module API: server_configure /
+# reload_cert.)
+# ---------------------------------------------------------------------------
+
+__C__ {
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+typedef struct { int socket_fd; SSL *ssl; SSL_CTX *ctx; } cannoli_ssl_head;
+
+static int cannoli_alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                               const unsigned char *in, unsigned int inlen, void *arg) {
+    (void)ssl; (void)arg;
+    static const unsigned char protos[] = "\x08http/1.1";
+    unsigned char *sel = NULL;
+    unsigned char sel_len = 0;
+    if (SSL_select_next_proto(&sel, &sel_len, protos, sizeof(protos) - 1, in, inlen) == OPENSSL_NPN_NEGOTIATED) {
+        *out = sel;
+        *outlen = sel_len;
+        return SSL_TLSEXT_ERR_OK;
+    }
+    return SSL_TLSEXT_ERR_NOACK;   /* client offered only h2 etc.: carry on without ALPN */
+}
+
+static void cannoli_ssl_errstr(char *buf, size_t n, const char *what) {
+    unsigned long e = ERR_get_error();
+    char eb[200];
+    eb[0] = '\0';
+    if (e) ERR_error_string_n(e, eb, sizeof(eb));
+    snprintf(buf, n, "%s%s%s", what, eb[0] ? ": " : "", eb);
+    ERR_clear_error();
+}
+
+/* Load chain + key into ctx; on failure ctx is left as it was when the
+ * material was first validated on a scratch context. */
+static int cannoli_load_cert(SSL_CTX *ctx, const char *cert, const char *key, char *err, size_t en) {
+    SSL_CTX *probe = SSL_CTX_new(TLS_server_method());
+    if (!probe) { cannoli_ssl_errstr(err, en, "SSL_CTX_new"); return 0; }
+    int ok = SSL_CTX_use_certificate_chain_file(probe, cert) == 1
+          && SSL_CTX_use_PrivateKey_file(probe, key, SSL_FILETYPE_PEM) == 1
+          && SSL_CTX_check_private_key(probe) == 1;
+    if (!ok) cannoli_ssl_errstr(err, en, "certificate/key");
+    SSL_CTX_free(probe);
+    if (!ok) return 0;
+    if (SSL_CTX_use_certificate_chain_file(ctx, cert) != 1
+        || SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) != 1
+        || SSL_CTX_check_private_key(ctx) != 1) {
+        cannoli_ssl_errstr(err, en, "certificate/key");
+        return 0;
+    }
+    return 1;
+}
+}
+
+# Apply TLS settings to a listener created by server_host. Returns "" or an
+# error. $min_version: "1.2" or "1.3"; $ciphers: OpenSSL cipher list for
+# TLS 1.2 ("" = a modern AEAD-only default); $suites: TLS 1.3 suites ("" =
+# OpenSSL default).
+func configure(int $server, str $cert, str $key, str $min_version, str $ciphers, str $suites) str {
+    my int $expect_fd = ssl::fd($server);
+    my str $err = "";
+    __C__ {
+        char msg[300];
+        msg[0] = '\0';
+        cannoli_ssl_head *h = (cannoli_ssl_head *)(intptr_t)strada_to_int(server);
+        char *c = strada_to_str(cert), *k = strada_to_str(key), *mv = strada_to_str(min_version);
+        char *cl = strada_to_str(ciphers), *cs = strada_to_str(suites);
+        if (!h || h->socket_fd != (int)strada_to_int(expect_fd) || !h->ctx) {
+            snprintf(msg, sizeof(msg), "unexpected ssl module layout; TLS settings not applied");
+        } else {
+            SSL_CTX *ctx = h->ctx;
+            int ver = (mv && strcmp(mv, "1.3") == 0) ? TLS1_3_VERSION : TLS1_2_VERSION;
+            const char *list = (cl && *cl) ? cl
+                : "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:"
+                  "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305";
+            if (SSL_CTX_set_min_proto_version(ctx, ver) != 1) {
+                cannoli_ssl_errstr(msg, sizeof(msg), "ssl.min_version");
+            } else if (SSL_CTX_set_cipher_list(ctx, list) != 1) {
+                cannoli_ssl_errstr(msg, sizeof(msg), "ssl.ciphers");
+            } else if (cs && *cs && SSL_CTX_set_ciphersuites(ctx, cs) != 1) {
+                cannoli_ssl_errstr(msg, sizeof(msg), "ssl.ciphersuites");
+            } else if (c && *c && k && *k && !cannoli_load_cert(ctx, c, k, msg, sizeof(msg))) {
+                /* msg set */
+            } else {
+                SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_RENEGOTIATION | SSL_OP_NO_COMPRESSION);
+                SSL_CTX_set_alpn_select_cb(ctx, cannoli_alpn_select, NULL);
+            }
+        }
+        free(c); free(k); free(mv); free(cl); free(cs);
+        err = strada_new_str(msg);
+    }
+    return $err;
+}
+
+# Negotiated protocol of a connection ("TLSv1.3"), for logs/diagnostics.
+func version(int $conn) str { return ssl::get_version($conn); }

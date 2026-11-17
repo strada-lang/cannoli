@@ -488,6 +488,19 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         $i = $i + 1;
     }
 
+    # Remember the config file and which settings the command line
+    # overrides, so a SIGHUP reload re-reads the file but keeps those.
+    if (length($config_file) > 0 && core::is_file($config_file)) {
+        my hash %file_cfg = Cannoli::Config::parse_file($config_file);
+        foreach my str $ck (keys(%config)) {
+            if (substr($ck, 0, 1) eq "_") { next; }
+            if (!exists(%file_cfg, $ck) || ("" . $file_cfg{$ck}) ne ("" . $config{$ck})) {
+                $config{"_cli." . $ck} = $config{$ck};
+            }
+        }
+        $config{"_config_file"} = $config_file;
+    }
+
     if ($show_help == 1) {
         ::print_help();
         return 0;
@@ -537,6 +550,8 @@ func Cannoli_Main_main(int $argc, array @argv) int {
         $g_static_server = Cannoli::Static::new();
         $g_static_server->{"document_root"} = $static_root;
         $g_static_server->{"cache_max_age"} = Cannoli::Config::get_int(%config, "static.cache_max_age", 0);
+        $g_static_server->{"gzip"} = Cannoli::Config::get_bool(%config, "static.gzip", 1);
+        $g_static_server->{"precompressed"} = Cannoli::Config::get_bool(%config, "static.precompressed", 1);
 
         if (Cannoli::Config::get_bool(%config, "static.listing", 0) == 1) {
             $g_static_server->{"directory_listing"} = 1;

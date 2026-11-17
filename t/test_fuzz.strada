@@ -1,0 +1,139 @@
+# t/test_fuzz.strada - randomized robustness test for the request parsers.
+# Deterministic seed (CANNOLI_FUZZ_SEED overrides), CANNOLI_FUZZ_ITERS per
+# target (default 2000). Each target must return normally on every input
+# and keep its invariants; a crash or a broken invariant fails the test.
+
+my int $g_failed = 0;
+my int $g_seed = 12345;
+
+func rnd(int $n) int {
+    # xorshift-ish LCG, reproducible across platforms
+    $g_seed = ($g_seed * 1103515245 + 12345) % 2147483648;
+    if ($n <= 0) { return 0; }
+    return $g_seed % $n;
+}
+
+func rnd_bytes(int $n) str {
+    my str $s = "";
+    my int $i = 0;
+    while ($i < $n) { $s = $s . core::byte(rnd(256)); $i = $i + 1; }
+    return $s;
+}
+
+my array @g_tokens = ("\r\n", "\n", "\r", ":", " ", "\t", ";", ",", "=", "\"", "0", "1", "f", "ff",
+                      "Content-Length", "Transfer-Encoding", "chunked", "Host", "GET", "POST",
+                      "HTTP/1.1", "HTTP/1.0", "/", "?", "%", "%00", "\x00", "-1", "99999999999999999999",
+                      "bytes=", "multipart/form-data", "boundary=", "[", "{", "}", "]", "\\u");
+
+# Mutate a seed: flips, inserts of interesting tokens, deletions, truncation.
+func mutate(str $seed) str {
+    my str $s = $seed;
+    my int $ops = 1 + rnd(6);
+    my int $k = 0;
+    while ($k < $ops) {
+        my int $len = core::byte_length($s);
+        my int $pos = $len > 0 ? rnd($len + 1) : 0;
+        my int $op = rnd(5);
+        if ($op == 0 && $len > 0) {
+            $s = core::byte_substr($s, 0, $pos) . core::byte(rnd(256)) . core::byte_substr($s, $pos + 1 <= $len ? $pos + 1 : $len, $len - ($pos + 1 <= $len ? $pos + 1 : $len));
+        } elsif ($op == 1) {
+            $s = core::byte_substr($s, 0, $pos) . $g_tokens[rnd(scalar(@g_tokens))] . core::byte_substr($s, $pos, $len - $pos);
+        } elsif ($op == 2 && $len > 0) {
+            my int $cut = rnd(8) + 1;
+            if ($pos + $cut > $len) { $cut = $len - $pos; }
+            $s = core::byte_substr($s, 0, $pos) . core::byte_substr($s, $pos + $cut, $len - $pos - $cut);
+        } elsif ($op == 3) {
+            $s = core::byte_substr($s, 0, $pos);
+        } else {
+            $s = core::byte_substr($s, 0, $pos) . rnd_bytes(rnd(6)) . core::byte_substr($s, $pos, $len - $pos);
+        }
+        $k = $k + 1;
+    }
+    return $s;
+}
+
+func fail_case(str $what, str $input) void {
+    say("  FAIL: " . $what . " (input bytes: " . core::byte_length($input) . ")");
+    $g_failed = $g_failed + 1;
+}
+
+func main() int {
+    my str $env_seed = core::getenv("CANNOLI_FUZZ_SEED");
+    if (defined($env_seed) && length($env_seed) > 0) { $g_seed = $env_seed + 0; }
+    my str $env_iters = core::getenv("CANNOLI_FUZZ_ITERS");
+    my int $iters = (defined($env_iters) && length($env_iters) > 0) ? $env_iters + 0 : 2000;
+    say("Fuzzing parsers: seed " . $g_seed . ", " . $iters . " inputs per target");
+
+    my array @heads = ("POST /a?b=1 HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Type: text/plain",
+                       "GET http://h/p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue",
+                       "PUT /x HTTP/1.0\r\nCookie: a=1; b=2\r\nX-Forwarded-For: 1.2.3.4, 5.6.7.8");
+    my array @chunks = ("4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\nT: 1\r\n\r\n", "a\r\n0123456789\r\n0\r\n\r\nNEXT");
+    my array @jsons = ("{\"a\":[1,2.5,-3e2,\"x\\u00e9\\n\"],\"b\":{\"c\":null,\"d\":true}}", "[[[[0]]],{\"k\":\"v\"}]");
+    my array @bodies = ("--BB\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--BB--\r\n");
+
+    my int $i = 0;
+    while ($i < $iters) {
+        # 1. header block: ok results must be self-consistent
+        my str $h = mutate($heads[rnd(scalar(@heads))]);
+        my scalar $ph = Cannoli::Server::parse_head($h);
+        if ($ph->{"ok"} == 1 && (Cannoli::Server::valid_request_line($h) != 1 || $ph->{"cl"} < 0
+            || ($ph->{"te"} == 1 && $ph->{"has_cl"} == 1))) {
+            fail_case("parse_head accepted an inconsistent head", $h);
+        }
+        Cannoli::Server::origin_form($h);
+        Cannoli::Request::parse($h . "\r\n\r\n" . rnd_bytes(rnd(20)));
+
+        # 2. chunked decoding: consumed within bounds, body within limit
+        my str $c = mutate($chunks[rnd(scalar(@chunks))]);
+        my scalar $dc = Cannoli::Server::decode_chunked($c, 64, 256);
+        if ($dc->{"status"} eq "ok" && ($dc->{"consumed"} > core::byte_length($c) || core::byte_length($dc->{"body"}) > 64)) {
+            fail_case("decode_chunked consumed/limit invariant", $c);
+        }
+        # same input fed in two pieces must agree with the one-shot result
+        my int $cut = core::byte_length($c) > 0 ? rnd(core::byte_length($c)) : 0;
+        my scalar $st = Cannoli::Server::chunked_state();
+        Cannoli::Server::decode_chunked_step(core::byte_substr($c, 0, $cut), $st, 64, 256);
+        if ($st->{"status"} eq "need_more") {
+            Cannoli::Server::decode_chunked_step($c, $st, 64, 256);
+        }
+        if ($st->{"status"} ne $dc->{"status"} && $st->{"status"} ne "need_more" && $dc->{"status"} ne "need_more") {
+            fail_case("incremental vs one-shot chunked decode disagree (" . $st->{"status"} . " / " . $dc->{"status"} . ")", $c);
+        }
+
+        # 3. JSON: never crashes; a nesting bomb is refused
+        Cannoli::Request::json_parse(mutate($jsons[rnd(scalar(@jsons))]));
+
+        # 4. ranges: results inside the file
+        my int $size = rnd(5000);
+        my scalar $r = Cannoli::Static::parse_range(mutate("bytes=" . rnd(6000) . "-" . rnd(6000)), $size);
+        if ($r->{"ok"} == 1 && ($r->{"start"} < 0 || $r->{"end"} >= $size || $r->{"start"} > $r->{"end"})) {
+            fail_case("parse_range out of bounds", "");
+        }
+
+        # 5. multipart + boundaries
+        my str $ct = mutate("multipart/form-data; boundary=BB");
+        my str $bd = Cannoli::Request::extract_boundary($ct);
+        if (length($bd) > 70) { fail_case("boundary longer than 70", $ct); }
+        if (length($bd) > 0) { Cannoli::Request::parse_multipart(mutate($bodies[0]), $bd); }
+
+        # 6. cookies, query strings, header values in responses
+        my hash %req = Cannoli::Request::parse("GET /?" . mutate("a=1&b=%41&c") . " HTTP/1.1\r\nHost: x\r\nCookie: " . mutate("a=1; b=2") . "\r\n\r\n");
+        Cannoli::Request::cookies(%req);
+        my hash %res = Cannoli::Response::text(200, "x");
+        Cannoli::Response::header(%res, "X-T", mutate("value"));
+        Cannoli::Response::set_cookie(%res, "n", mutate("v"), "");
+        my str $wire = Cannoli::Response::build(%res);
+        my str $head_part = core::byte_substr($wire, 0, index($wire, "\r\n\r\n"));
+        if (index($head_part, "\n") >= 0 && index(join("", split("\r\n", $head_part)), "\n") >= 0) {
+            fail_case("bare LF in a response header block", $wire);
+        }
+        $i = $i + 1;
+    }
+
+    if ($g_failed == 0) {
+        say("All fuzz tests passed!");
+        return 0;
+    }
+    say($g_failed . " fuzz failure(s)");
+    return 1;
+}

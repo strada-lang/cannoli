@@ -246,8 +246,9 @@ request is read go through `send_read_error` + `conn_linger_close`.
 - `SIGTERM/SIGINT`: Graceful shutdown (workers SIGKILLed after `shutdown_timeout`)
 - `SIGHUP`: Graceful reload (new worker generation; old one SIGKILLed if it outstays `shutdown_timeout`)
 - Dead workers are respawned; ones that crash within 2s of starting back off exponentially
-- Loop workers detect SIGTERM through a raw C handler flag (`install_raw_term`): Strada
-  signal handlers are not dispatched while an `Async::Loop` runs tasks
+- Loop workers rely on Strada dispatching signal handlers inside `Async::Loop`
+  (fixed in Strada 3ce3007; older Strada never ran them there)
+- systemd: `sd_notify` READY/RELOADING/STOPPING + watchdog pings (see `contrib/cannoli.service`)
 
 ---
 
@@ -505,6 +506,9 @@ level = info
 - `server.host`, `server.port`, `server.workers`, `server.max_requests`, `server.timeout`
 - `server.header_timeout`, `server.body_min_rate`, `server.write_timeout`, `server.keep_alive_timeout`, `server.shutdown_timeout`
 - `server.pid_file`, `server.user`, `server.group`, `server.trusted_proxies`, `server.request_id`, `server.tokens`
+- `server.health_path`, `server.max_connections_per_ip`, `server.rate_limit`, `server.rate_limit_window`
+- `ssl.min_version`, `ssl.ciphers`, `ssl.ciphersuites`; `static.cache_max_age`, `static.gzip`, `static.precompressed`
+- `fastcgi.socket` (`unix:/path` or `host:port`), `fastcgi.socket_mode`
 - `[headers]` section: default response headers (`headers.X-Content-Type-Options = nosniff`)
 - `ssl.enabled`, `ssl.port`, `ssl.cert`, `ssl.key`
 - `fastcgi.enabled`, `fastcgi.socket`
@@ -722,6 +726,19 @@ Test files:
 - `test_hardening.sh` / `test_hardening_loop.sh` - Live timeouts, smuggling inputs, 100-continue, pid file (classic / loop workers)
 - `test_tls.sh` - classic+loop x HTTP+HTTPS smoke test (skips without openssl / SSL lib)
 - `test_websocket.sh` - WebSockets from a library over ws/wss, classic + loop (echo, idle, close, protocol errors)
+- `test_ops.sh` - health, metrics, connection/rate limits, SIGHUP config + cert reload, TLS settings, sd_notify
+- `test_fastcgi.sh` - FastCGI over TCP and Unix sockets, keep-conn, shutdown
+- `test_fuzz.strada` / `test_fuzz_http.sh` - parser fuzzing / malformed requests against live servers
+- `test_privdrop.sh` - privilege drop (needs root; skipped otherwise)
+- `tools/soak.sh` - long load test with worker RSS sampling (not part of the suite)
+
+**Scoreboard:** `sb_*` functions in `server.strada` keep server-wide counters,
+worker slots and a per-address table in one MAP_SHARED mapping created by the
+master before fork (atomic ops, no locks); `/__admin/metrics` and the health
+check read it. `reload_config` (SIGHUP) re-reads the config file via
+`apply_settings`; `src/tls.strada` `configure()` sets chain/min version/
+ciphers/ALPN on the ssl module's SSL_CTX (reached through a verified struct
+prefix -- the ssl module has no API for it yet).
 
 ---
 
