@@ -6,8 +6,6 @@
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/cannoli}"
 for tool in python3 openssl strada; do command -v $tool >/dev/null || { echo "SKIP: $tool not installed"; exit 0; }; done
-SSL_LIB="${STRADA_SSL_LIB:-/usr/local/lib/strada/lib/ssl/libstrada_ssl.so}"
-[ -f "$SSL_LIB" ] || { echo "SKIP: $SSL_LIB not available"; exit 0; }
 P1=$(( 20000 + RANDOM % 20000 )); P2=$((P1 + 1))
 S="$(mktemp -d)"; MPID=""
 cleanup() { [ -n "$MPID" ] && kill -9 "$MPID" 2>/dev/null; rm -rf "$S"; }

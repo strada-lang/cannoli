@@ -29,6 +29,7 @@ This document provides comprehensive internal documentation for the Cannoli web 
 │   ├── request.strada           # HTTP request parsing (~1,055 lines)
 │   ├── response.strada          # HTTP response building (~542 lines)
 │   ├── cannoli_obj.strada       # OOP request/response wrapper (~1,537 lines)
+│   ├── tls.strada               # TLS transport over Strada's ssl module (~90 lines)
 │   ├── app.strada               # Application framework API (~240 lines)
 │   ├── config.strada            # Configuration file parser (~298 lines)
 │   ├── log.strada               # Logging system (~498 lines)
@@ -686,9 +687,6 @@ make
 ./cannoli --ssl --ssl-cert cert.pem --ssl-key key.pem --host ::    # dual-stack (default)
 ./cannoli --ssl --ssl-cert cert.pem --ssl-key key.pem --host ::1   # IPv6 loopback only
 
-# Point Cannoli at a specific SSL library (skips the install/dev path search)
-STRADA_SSL_LIB=/path/to/libstrada_ssl.so ./cannoli --ssl --ssl-cert cert.pem --ssl-key key.pem
-
 # FastCGI mode (TCP host:port; loopback by default)
 ./cannoli --fastcgi --socket 127.0.0.1:9000
 
@@ -696,16 +694,16 @@ STRADA_SSL_LIB=/path/to/libstrada_ssl.so ./cannoli --ssl --ssl-cert cert.pem --s
 sudo ./cannoli -c /etc/cannoli.conf --pid-file /run/cannoli.pid --user www-data
 ```
 
-**SSL library resolution.** When `--ssl` is set, the SSL library is `dlopen`'d
-from, in order: `$STRADA_SSL_LIB` (if set and non-empty), then
-`/usr/local/lib/strada/lib/ssl/libstrada_ssl.so` (installed), then
-`../lib/ssl/libstrada_ssl.so` (dev tree). The HTTPS listener binds the
-configured `--host` (`::`/dual-stack default, `::1`, `0.0.0.0`, `127.0.0.1`, a
-literal address, …) via `strada_ssl_server_host_sv`, matching the plain HTTP
-listener; it falls back to a wildcard bind with an older SSL library that
-predates the host-aware entry point. IPv6/dual-stack HTTPS requires an SSL
-library built with that entry point — rebuild + reinstall `lib/ssl` in the
-Strada tree.
+**TLS implementation.** TLS goes through Strada's `ssl` module
+(`lib/ssl.strada`), compiled into the binary and wrapped by `src/tls.strada`
+(`Cannoli::TLS`); OpenSSL is linked automatically. There is no separate SSL
+library to load (`libstrada_ssl.so` / `STRADA_SSL_LIB` are gone -- Strada no
+longer ships that C library). The HTTPS listener binds the configured
+`--host` (`::`/dual-stack default, `::1`, `0.0.0.0`, `127.0.0.1`, a literal
+address, ...) through `ssl::server_host`, with the same backlog as the HTTP
+listener. Accepted connections are non-blocking; handshakes, reads and writes
+park the green task in loop workers and use poll(2) in classic workers, all
+bounded by the configured timeouts.
 
 ---
 

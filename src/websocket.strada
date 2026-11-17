@@ -153,14 +153,7 @@ func Cannoli_WebSocket_from_request(hash %req) scalar {
     if (exists(%req, "_ssl") && $req{"_ssl"} == 1) {
         $ws{"_ssl"} = 1;
         $ws{"_ssl_conn"} = $req{"_ssl_conn"};
-        $ws{"_ssl_read_fn"} = $req{"_ssl_read_fn"};
-        $ws{"_ssl_write_fn"} = $req{"_ssl_write_fn"};
-        $ws{"_ssl_close_fn"} = $req{"_ssl_close_fn"};
-        if (exists(%req, "_ssl_try_read_fn")) {
-            $ws{"_ssl_try_read_fn"} = $req{"_ssl_try_read_fn"};
-            $ws{"_ssl_want_fn"} = $req{"_ssl_want_fn"};
-            $ws{"_ssl_fd"} = $req{"_ssl_fd"};
-        }
+        $ws{"_ssl_fd"} = $req{"_ssl_fd"};
     } else {
         $ws{"_client"} = $req{"_client"};
         $ws{"_fd"} = $req{"_fd"};
@@ -442,9 +435,7 @@ func Cannoli_WebSocket_pack_u64(num $value) str {
 # Write all of $data (parks the task in loop workers).
 func Cannoli_WebSocket_write_ws(scalar $ws, str $data) int {
     if ($ws->{"_ssl"} == 1) {
-        my scalar $ssl_conn = $ws->{"_ssl_conn"};
-        my scalar $ssl_write_fn = $ws->{"_ssl_write_fn"};
-        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+        return Cannoli::TLS::write_all($ws->{"_ssl_conn"}, $data);
     }
     if (defined($ws->{"_client"})) {
         return Async::Task::send($ws->{"_client"}, $data);
@@ -464,9 +455,7 @@ func Cannoli_WebSocket_close_socket(scalar $ws) void {
 
 func Cannoli_WebSocket_write_response(hash %req, str $data) int {
     if (exists(%req, "_ssl") && $req{"_ssl"} == 1) {
-        my scalar $ssl_conn = $req{"_ssl_conn"};
-        my scalar $ssl_write_fn = $req{"_ssl_write_fn"};
-        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $data]);
+        return Cannoli::TLS::write_all($req{"_ssl_conn"}, $data);
     }
     return Async::Task::send($req{"_client"}, $data);
 }
@@ -474,17 +463,14 @@ func Cannoli_WebSocket_write_response(hash %req, str $data) int {
 # Read up to $len bytes, waiting as long as it takes (WebSockets idle).
 func Cannoli_WebSocket_read_ws(scalar $ws, int $len) str {
     if ($ws->{"_ssl"} == 1) {
-        my scalar $ssl_conn = $ws->{"_ssl_conn"};
-        if (exists(%{$ws}, "_ssl_try_read_fn") && defined($ws->{"_ssl_try_read_fn"})) {
-            while (1) {
-                my scalar $chunk = core::dl_call_sv($ws->{"_ssl_try_read_fn"}, [$ssl_conn, $len]);
-                if (defined($chunk)) { return $chunk; }
-                my int $want = core::dl_call_int_sv($ws->{"_ssl_want_fn"}, [$ssl_conn]);
-                Cannoli::Server::wait_fd($ws->{"_ssl_fd"}, $want == 2 ? "w" : "r", 60000);
-            }
+        my int $ssl_conn = $ws->{"_ssl_conn"};
+        # WebSockets may idle: wait as long as it takes (re-poll each minute)
+        while (1) {
+            my scalar $chunk = Cannoli::TLS::try_read($ssl_conn, $len);
+            if (defined($chunk)) { return $chunk; }
+            Cannoli::TLS::wait_fd(Cannoli::TLS::fd($ssl_conn), Cannoli::TLS::want($ssl_conn), 60000);
         }
-        my scalar $ssl_read_fn = $ws->{"_ssl_read_fn"};
-        return core::dl_call_str_sv($ssl_read_fn, [$ssl_conn, $len]);
+        return "";
     }
     if (!defined($ws->{"_client"})) {
         my scalar $raw = core::read_fd($ws->{"_fd"}, $len);

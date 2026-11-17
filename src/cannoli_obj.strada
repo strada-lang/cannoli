@@ -70,21 +70,10 @@ func Cannoli_new(hash %req) scalar {
         $self{"_client"} = $req{"_client"};
     }
     if (exists(%req, "_conn_buffer")) { $self{"_conn_buffer"} = $req{"_conn_buffer"}; }
-    if (exists(%req, "_ssl_try_read_fn")) {
-        $self{"_ssl_try_read_fn"} = $req{"_ssl_try_read_fn"};
-        $self{"_ssl_want_fn"} = $req{"_ssl_want_fn"};
-        $self{"_ssl_fd"} = $req{"_ssl_fd"};
-    }
     if (exists(%req, "_ssl")) {
         $self{"_ssl"} = $req{"_ssl"};
         $self{"_ssl_conn"} = $req{"_ssl_conn"};
-        if (exists(%req, "_ssl_read_fn")) {
-            $self{"_ssl_read_fn"} = $req{"_ssl_read_fn"};
-        }
-        $self{"_ssl_write_fn"} = $req{"_ssl_write_fn"};
-        if (exists(%req, "_ssl_close_fn")) {
-            $self{"_ssl_close_fn"} = $req{"_ssl_close_fn"};
-        }
+        $self{"_ssl_fd"} = $req{"_ssl_fd"};
     }
 
     # Response data
@@ -731,13 +720,12 @@ func Cannoli_start_chunked(scalar $self) scalar {
     # Check if SSL or regular socket
     if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
         # SSL chunked - need to send headers via SSL write
-        my scalar $ssl_conn = $self->{"_ssl_conn"};
-        my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
+        my int $ssl_conn = $self->{"_ssl_conn"};
 
         Cannoli::Response::header(%res, "Transfer-Encoding", "chunked");
         Cannoli::Response::remove_header(%res, "Content-Length");
         my str $headers = Cannoli::Response::build_headers(%res);
-        core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $headers]);
+        Cannoli::TLS::write_all($ssl_conn, $headers);
 
         $self->{"_chunked"} = 1;
         $self->{"_chunked_ssl"} = 1;
@@ -766,9 +754,7 @@ func Cannoli_write_chunk(scalar $self, str $data) int {
 
     if (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
         # SSL write
-        my scalar $ssl_conn = $self->{"_ssl_conn"};
-        my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
-        return core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $chunk]);
+        return Cannoli::TLS::write_all($self->{"_ssl_conn"}, $chunk);
     } else {
         # Regular socket write
         my int $fd = $self->{"_fd"};
@@ -782,9 +768,7 @@ func Cannoli_end_chunked(scalar $self) scalar {
 
     if (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
         # SSL write
-        my scalar $ssl_conn = $self->{"_ssl_conn"};
-        my scalar $ssl_write_fn = $self->{"_ssl_write_fn"};
-        core::dl_call_int_sv($ssl_write_fn, [$ssl_conn, $terminator]);
+        Cannoli::TLS::write_all($self->{"_ssl_conn"}, $terminator);
     } else {
         # Regular socket write
         my int $fd = $self->{"_fd"};
@@ -815,11 +799,6 @@ func Cannoli_ws_accept(scalar $self, str $protocol = "", str $allowed_origins = 
     $req{"method"} = $self->{"_method"};
     $req{"headers"} = $self->{"_headers"};
     if (exists(%{$self}, "_conn_buffer")) { $req{"_conn_buffer"} = $self->{"_conn_buffer"}; }
-    if (exists(%{$self}, "_ssl_try_read_fn")) {
-        $req{"_ssl_try_read_fn"} = $self->{"_ssl_try_read_fn"};
-        $req{"_ssl_want_fn"} = $self->{"_ssl_want_fn"};
-        $req{"_ssl_fd"} = $self->{"_ssl_fd"};
-    }
 
     my scalar $hdrs = $self->{"_headers"};
     my str $origin = (defined($hdrs) && exists(%{$hdrs}, "origin")) ? $hdrs->{"origin"} : "";
@@ -837,13 +816,7 @@ func Cannoli_ws_accept(scalar $self, str $protocol = "", str $allowed_origins = 
     if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
         $req{"_ssl"} = $self->{"_ssl"};
         $req{"_ssl_conn"} = $self->{"_ssl_conn"};
-        if (exists(%{$self}, "_ssl_read_fn")) {
-            $req{"_ssl_read_fn"} = $self->{"_ssl_read_fn"};
-        }
-        $req{"_ssl_write_fn"} = $self->{"_ssl_write_fn"};
-        if (exists(%{$self}, "_ssl_close_fn")) {
-            $req{"_ssl_close_fn"} = $self->{"_ssl_close_fn"};
-        }
+        $req{"_ssl_fd"} = $self->{"_ssl_fd"};
     }
 
     my scalar $ws = Cannoli::WebSocket::accept(%req, $protocol);

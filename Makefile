@@ -28,6 +28,7 @@ SOURCES := \
 	$(SRC_DIR)/request.strada \
 	$(SRC_DIR)/log.strada \
 	$(SRC_DIR)/response.strada \
+	$(SRC_DIR)/tls.strada \
 	$(SRC_DIR)/websocket.strada \
 	$(SRC_DIR)/cannoli_obj.strada \
 	$(SRC_DIR)/router.strada \

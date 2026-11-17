@@ -1,0 +1,91 @@
+# Cannoli::TLS - TLS transport over Strada's `ssl` module (lib/ssl.strada).
+#
+# Cannoli used to dlopen libstrada_ssl.so, a C library that Strada no longer
+# ships; every TLS operation now goes through the ssl module, which is
+# compiled into the binary. Connection handles are the ssl module's integer
+# handles (0 = none). Accepted connections are non-blocking, so the "blocking"
+# helpers here (write_all, read_wait) wait for readiness (parking the task in
+# loop workers), bounded by a timeout.
+
+package Cannoli::TLS;
+
+use ssl;
+
+# Listening TLS socket bound to $host ("" / "*" / "::" dual-stack, "0.0.0.0"
+# IPv4, or a literal address). Returns a server handle or 0.
+func server_host(str $host, int $port, str $cert, str $key, int $backlog = 0) int {
+    return ssl::server_host($host, $port, $cert, $key, $backlog);
+}
+
+# Accept one pending connection without blocking (handshake not started).
+# Returns a connection handle, or 0 when none is pending.
+func try_accept(int $server) int {
+    my int $fd = ssl::try_accept_fd($server);
+    if ($fd < 0) { return 0; }
+    my int $conn = ssl::attach_server_fd($server, $fd);
+    if ($conn == 0) { core::close_fd($fd); }
+    return $conn;
+}
+
+# One handshake step: 0 = done, 1 = want-read, 2 = want-write, -1 = failed.
+func handshake_step(int $conn) int { return ssl::handshake_step($conn); }
+
+# Non-blocking read: data; "" = closed/error; undef = would block (see want).
+func try_read(int $conn, int $max) scalar { return ssl::try_read($conn, $max); }
+
+# Non-blocking write: bytes written; 0 = would block (see want); -1 = error.
+func try_write(int $conn, str $data) int { return ssl::try_write($conn, $data); }
+
+# Direction the last would-block asked for: 1 = read, 2 = write.
+func want(int $conn) int { return ssl::want($conn); }
+
+func fd(int $conn) int { return ssl::fd($conn); }
+
+func close_conn(int $conn) void {
+    if ($conn != 0) { ssl::close($conn); }
+}
+
+# Wait for readiness: parks the green task in loop workers, poll(2) otherwise
+# (Cannoli::Server::wait_fd).
+func wait_fd(int $fd, int $dir, int $timeout_ms) void {
+    Cannoli::Server::wait_fd($fd, $dir == 2 ? "w" : "r", $timeout_ms);
+}
+
+# Write all of $data, waiting up to $timeout_ms without progress. Returns the
+# bytes written, or -1 on error/timeout.
+func write_all(int $conn, str $data, int $timeout_ms = 30000) int {
+    my int $total = core::byte_length($data);
+    my int $sent = 0;
+    my str $slice = $data;
+    my int $deadline = core::mono_ms() + $timeout_ms;
+    while ($sent < $total) {
+        my int $n = ssl::try_write($conn, $slice);
+        if ($n < 0) { return 0 - 1; }
+        if ($n > 0) {
+            $sent = $sent + $n;
+            $deadline = core::mono_ms() + $timeout_ms;
+            if ($sent < $total) { $slice = core::byte_substr($data, $sent, $total - $sent); }
+            next;
+        }
+        my int $left = $deadline - core::mono_ms();
+        if ($left <= 0) { return 0 - 1; }
+        # a retry after WANT must pass the same bytes again: $slice is kept
+        wait_fd(ssl::fd($conn), ssl::want($conn), $left);
+    }
+    return $total;
+}
+
+# Read up to $max bytes, waiting up to $timeout_ms. Returns "" on EOF, error
+# or timeout.
+func read_wait(int $conn, int $max, int $timeout_ms = 30000) str {
+    my int $deadline = core::mono_ms() + $timeout_ms;
+    while (1) {
+        my scalar $chunk = ssl::try_read($conn, $max);
+        if (defined($chunk)) { return $chunk; }
+        my int $left = $deadline - core::mono_ms();
+        if ($left <= 0) { return ""; }
+        wait_fd(ssl::fd($conn), ssl::want($conn), $left);
+    }
+    return "";
+}
+

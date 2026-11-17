@@ -1,12 +1,11 @@
 #!/bin/bash
 # {classic, loop workers} x {HTTP, HTTPS}: GET, POST body, keep-alive, error
 # paths, and a silent TLS client that must not pin a worker. Skipped when
-# openssl or the Strada SSL library is unavailable.
+# openssl is unavailable.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 for tool in curl python3 bc nc; do command -v $tool >/dev/null || { echo "SKIP: $tool not installed"; exit 0; }; done
 BIN="${BIN:-$ROOT/cannoli}"
-SSL_LIB="${STRADA_SSL_LIB:-/usr/local/lib/strada/lib/ssl/libstrada_ssl.so}"
-if ! command -v openssl >/dev/null || [ ! -f "$SSL_LIB" ]; then echo "SKIP: openssl or $SSL_LIB not available"; exit 0; fi
+command -v openssl >/dev/null || { echo "SKIP: openssl not installed"; exit 0; }
 P1=$(( 20000 + RANDOM % 20000 )); P2=$((P1 + 1))
 S="$(mktemp -d)"
 MPID=""
