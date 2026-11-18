@@ -110,6 +110,10 @@ func main() int {
 }
 ```
 
+A program that calls `Cannoli::App::run($app)` (or `run_dev`) accepts the
+server's command-line options: `-p/--port`, `-h/--host`, `-w/--workers`,
+`--fastcgi` and `--socket` override the defaults and any `App::configure` file.
+
 ### REST API
 
 ```strada
@@ -591,7 +595,7 @@ See the `examples/` directory:
 
 - `headers_demo.strada` - HTTP headers demonstration
 - `static_server.strada` - Static file server
-- `api_example.strada` - REST API example
+- `api_app.strada` - REST API example
 
 ## Architecture
 

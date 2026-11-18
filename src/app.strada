@@ -115,6 +115,11 @@ func Cannoli_App_error(scalar $app, int $code, scalar $handler) void {
 func Cannoli_App_run(scalar $app) int {
     my scalar $config_ref = $app->{"config"};
     my hash %config = %{$config_ref};
+    # command-line -p/--port, -h/--host, -w/--workers, --fastcgi, --socket
+    # override the defaults and the configure()d file
+    my array @run_av = ("app");
+    foreach my str $ra (core::argv()) { push(@run_av, $ra); }
+    %config = Cannoli::Config::merge_args(%config, size(@run_av), @run_av);
 
     # Initialize logging
     Cannoli::Log::init(%config);
@@ -141,6 +146,11 @@ func Cannoli_App_run(scalar $app) int {
 func Cannoli_App_run_dev(scalar $app) int {
     my scalar $config_ref = $app->{"config"};
     my hash %config = %{$config_ref};
+    # command-line -p/--port, -h/--host, -w/--workers, --fastcgi, --socket
+    # override the defaults and the configure()d file
+    my array @run_av = ("app");
+    foreach my str $ra (core::argv()) { push(@run_av, $ra); }
+    %config = Cannoli::Config::merge_args(%config, size(@run_av), @run_av);
 
     # Initialize logging
     Cannoli::Log::init(%config);

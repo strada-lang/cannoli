@@ -455,7 +455,7 @@ func handle_api(scalar $c) hash {
 | `App_post_c(...)` | Cannoli-style POST route |
 | `App_not_found($app, $handler)` | Set 404 handler |
 | `App_error($app, $code, $handler)` | Set error handler |
-| `App_run($app)` | Start server |
+| `App_run($app)` | Start server (command-line `-p`/`-h`/`-w`/`--fastcgi`/`--socket` override the config; `Config::merge_args`) |
 | `App_run_dev($app)` | Start in dev mode |
 
 **Example:**
