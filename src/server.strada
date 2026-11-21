@@ -2302,6 +2302,17 @@ func Cannoli_Server_set_blocking(int $fd, int $blocking) void {
 #    workers semantics (loop workers ignore it and a warning is logged).
 #  - Anything blocking inside a handler (DBI, file I/O) stalls this worker's
 #    loop for its duration; other preforked workers keep serving.
+# 1 once this worker has stopped accepting connections and is waiting for
+# the open ones to finish (max_requests reached, SIGTERM, SIGHUP reload).
+# Long-lived handlers (WebSockets, streams) should wrap up when they see it;
+# their clients reconnect to a fresh worker. Exposed as $c->worker_draining().
+my int $_g_draining = 0;
+
+func Cannoli_Server_is_draining() int {
+    if ($_g_draining == 1 || $_g_exit_requested == 1) { return 1; }
+    return 0;
+}
+
 func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
     my scalar $server_sock = $server_ref->{"server_sock"};
     my scalar $loop_ssl_server = $server_ref->{"ssl_server"};
@@ -2341,7 +2352,7 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                 ::worker_exit();
             }
             if ($_g_exit_requested == 1) {
-                $state->{"draining"} = 1;
+                $state->{"draining"} = 1; $_g_draining = 1;
             }
             if ($state->{"draining"} == 1) {
                 last;
@@ -2372,7 +2383,7 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                         }
                         $state->{"served"} = $state->{"served"} + 1;
                         if ($max_requests > 0 && $state->{"served"} >= $max_requests) {
-                            $state->{"draining"} = 1;
+                            $state->{"draining"} = 1; $_g_draining = 1;
                         }
                     });
                 }
@@ -2425,7 +2436,7 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                         }
                         $state->{"served"} = $state->{"served"} + 1;
                         if ($max_requests > 0 && $state->{"served"} >= $max_requests) {
-                            $state->{"draining"} = 1;
+                            $state->{"draining"} = 1; $_g_draining = 1;
                         }
                     });
                 }
