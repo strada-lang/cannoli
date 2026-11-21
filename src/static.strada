@@ -287,8 +287,13 @@ func Cannoli_Static_file_etag(str $path) str {
         char buf[96];
         buf[0] = '\0';
         if (p && stat(p, &st) == 0) {
+#ifdef __APPLE__
+            struct timespec mtime = st.st_mtimespec;
+#else
+            struct timespec mtime = st.st_mtim;
+#endif
             snprintf(buf, sizeof(buf), "\"%lx-%llx-%llx%09ld\"", (unsigned long)st.st_ino,
-                     (unsigned long long)st.st_size, (unsigned long long)st.st_mtim.tv_sec, (long)st.st_mtim.tv_nsec);
+                     (unsigned long long)st.st_size, (unsigned long long)mtime.tv_sec, (long)mtime.tv_nsec);
         }
         free(p);
         tag = strada_new_str(buf);

@@ -8571,8 +8571,13 @@ func Cannoli_Static_file_etag(str $path) str {
         char buf[96];
         buf[0] = '\0';
         if (p && stat(p, &st) == 0) {
+#ifdef __APPLE__
+            struct timespec mtime = st.st_mtimespec;
+#else
+            struct timespec mtime = st.st_mtim;
+#endif
             snprintf(buf, sizeof(buf), "\"%lx-%llx-%llx%09ld\"", (unsigned long)st.st_ino,
-                     (unsigned long long)st.st_size, (unsigned long long)st.st_mtim.tv_sec, (long)st.st_mtim.tv_nsec);
+                     (unsigned long long)st.st_size, (unsigned long long)mtime.tv_sec, (long)mtime.tv_nsec);
         }
         free(p);
         tag = strada_new_str(buf);
@@ -9682,8 +9687,18 @@ static int cannoli_sd_notify(const char *msg) {
     if (plen >= sizeof(sa.sun_path)) return -1;
     memcpy(sa.sun_path, path, plen);
     if (sa.sun_path[0] == '@') sa.sun_path[0] = '\0';   /* abstract namespace */
+#ifdef SOCK_CLOEXEC
     int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+#else
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+#endif
     if (fd < 0) return -1;
+#ifndef SOCK_CLOEXEC
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+        close(fd);
+        return -1;
+    }
+#endif
     ssize_t r = sendto(fd, msg, strlen(msg), MSG_NOSIGNAL, (struct sockaddr *)&sa,
                        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + plen));
     close(fd);
