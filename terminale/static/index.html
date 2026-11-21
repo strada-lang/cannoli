@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<title>Terminale</title>
+<link rel="icon" href="static/favicon.svg">
+<link rel="manifest" href="static/manifest.webmanifest">
+<meta name="theme-color" content="#16181d">
+<link rel="stylesheet" href="static/xterm.css?v={{v}}">
+<link rel="stylesheet" href="static/app.css?v={{v}}">
+</head>
+<body>
+<header id="bar">
+  <div id="tabs" role="tablist"></div>
+  <button id="new" class="icon-btn" title="New terminal (Alt+Shift+T)" aria-label="New terminal">+</button>
+  <div class="spacer"></div>
+  <button id="sessions-btn" class="text-btn tool" title="All sessions" aria-label="All sessions" aria-haspopup="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg></button>
+  <button id="files-btn" class="text-btn tool" title="Files: browse, download, upload" aria-label="Files"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 13V3M2.5 5.5 5 3l2.5 2.5M11 3v10M8.5 10.5 11 13l2.5-2.5"/></svg></button>
+  <button id="search-btn" class="text-btn tool" title="Search scrollback (Ctrl+Shift+F)" aria-label="Search"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3.3 3.3"/></svg></button>
+  <button id="fs-btn" class="text-btn tool" title="Full screen (also frees browser shortcuts like Ctrl+W for the terminal)" aria-label="Full screen"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg></button>
+  <span id="status" class="status" title="Connection"></span>
+  <span id="user" class="user"></span>
+  <button id="settings-btn" class="text-btn" title="Settings" aria-label="Settings" aria-expanded="false"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"/></svg></button>
+  <button id="logout" class="text-btn" title="Sign out (terminals keep running)">Sign out</button>
+</header>
+<div id="searchbar" class="searchbar" hidden>
+  <input id="search-input" type="text" placeholder="Search scrollback" spellcheck="false" aria-label="Search scrollback">
+  <label title="Match case"><input id="search-case" type="checkbox"> Aa</label>
+  <label title="Regular expression"><input id="search-regex" type="checkbox"> .*</label>
+  <button id="search-prev" title="Previous (Shift+Enter)" aria-label="Previous match">&uarr;</button>
+  <button id="search-next" title="Next (Enter)" aria-label="Next match">&darr;</button>
+  <button id="search-close" aria-label="Close search">&times;</button>
+</div>
+<main id="panes">
+  <div id="drop" class="drop" hidden><div>Drop to upload into <b id="drop-dir"></b></div></div>
+  <div id="empty" class="empty" hidden>
+    <p>No terminals open.</p>
+    <button id="empty-new">New terminal</button>
+  </div>
+</main>
+<div id="keybar" class="keybar" hidden>
+  <button data-key="esc">Esc</button><button data-key="tab">Tab</button>
+  <button data-mod="ctrl">Ctrl</button><button data-mod="alt">Alt</button>
+  <button data-key="left">&larr;</button><button data-key="down">&darr;</button><button data-key="up">&uarr;</button><button data-key="right">&rarr;</button>
+  <button data-key="home">Home</button><button data-key="end">End</button><button data-key="pgup">PgUp</button><button data-key="pgdn">PgDn</button>
+  <button data-text="|">|</button><button data-text="/">/</button><button data-text="-">-</button><button data-text="~">~</button>
+  <button data-key="paste">Paste</button>
+</div>
+<div id="menu" class="menu" hidden role="menu"></div>
+<div id="toast" class="toast" hidden role="status"></div>
+<aside id="files" class="settings files" hidden aria-label="Files">
+  <div class="settings-head"><h2>Files</h2><button id="files-close" class="tab-close" aria-label="Close files">&times;</button></div>
+  <div class="files-path">
+    <button id="files-up" title="Parent directory" aria-label="Parent directory">&uarr;</button>
+    <input id="files-input" type="text" spellcheck="false" aria-label="Directory">
+    <button id="files-here" title="Go to the terminal's current directory">cwd</button>
+  </div>
+  <div id="files-list" class="files-list"></div>
+  <div class="settings-foot files-foot">
+    <button id="files-upload" type="button">Upload files...</button>
+    <span id="files-status" class="saved"></span>
+    <input id="files-pick" type="file" multiple hidden>
+  </div>
+</aside>
+<aside id="settings" class="settings" hidden aria-label="Settings">
+  <div class="settings-head"><h2>Settings</h2><button id="settings-close" class="tab-close" aria-label="Close settings">&times;</button></div>
+  <div class="settings-body">
+    <h3>Appearance</h3>
+    <label class="row"><span>Theme</span><select id="set-theme"></select></label>
+    <div id="swatches" class="swatches" aria-hidden="true"></div>
+    <label class="row"><span>Font</span><select id="set-fontFamily"></select></label>
+    <label class="row" id="custom-font-row" hidden><span>Font name</span><input id="set-customFont" type="text" spellcheck="false" placeholder="e.g. Iosevka"></label>
+    <label class="row"><span>Font size</span><span class="stepper"><button type="button" data-step="fontSize" data-by="-1" aria-label="Smaller">&minus;</button><input id="set-fontSize" type="number" min="8" max="32" step="1"><button type="button" data-step="fontSize" data-by="1" aria-label="Larger">+</button></span></label>
+    <label class="row"><span>Line height</span><select id="set-lineHeight"><option value="1">1.0</option><option value="1.1">1.1</option><option value="1.2">1.2</option><option value="1.3">1.3</option><option value="1.5">1.5</option></select></label>
+    <label class="row"><span>Cursor</span><select id="set-cursorStyle"><option value="block">Block</option><option value="bar">Bar</option><option value="underline">Underline</option></select></label>
+    <label class="row check"><span>Blinking cursor</span><input id="set-cursorBlink" type="checkbox"></label>
+    <h3>Behaviour</h3>
+    <label class="row"><span>Scrollback lines</span><select id="set-scrollback"><option value="1000">1,000</option><option value="5000">5,000</option><option value="10000">10,000</option><option value="50000">50,000</option><option value="100000">100,000</option></select></label>
+    <label class="row check"><span>Copy on select</span><input id="set-copyOnSelect" type="checkbox"></label>
+    <label class="row check"><span>Right-click pastes</span><input id="set-rightClickPaste" type="checkbox"></label>
+    <label class="row check"><span>Confirm before closing a terminal</span><input id="set-confirmClose" type="checkbox"></label>
+    <label class="row"><span>Bell</span><select id="set-bell"><option value="none">Off</option><option value="visual">Mark the tab</option><option value="sound">Sound + mark the tab</option><option value="notify">Desktop notification</option></select></label>
+    <label class="row check"><span>Programs may copy to the clipboard</span><input id="set-allowClipboard" type="checkbox"></label>
+    <label class="row check"><span>Ask before leaving the page</span><input id="set-warnOnLeave" type="checkbox"></label>
+    <label class="row"><span>On-screen keys</span><select id="set-keyBar"><option value="auto">On touch devices</option><option value="on">Always</option><option value="off">Never</option></select></label>
+    <label class="row check"><span>Option/Alt is Meta (macOS)</span><input id="set-macOptionIsMeta" type="checkbox"></label>
+    <label class="row check"><span>GPU rendering (WebGL)</span><input id="set-webgl" type="checkbox"></label>
+    <h3>Security</h3>
+    <div id="logins" class="logins"></div>
+    <h3>Keys</h3>
+    <dl class="keys">
+      <dt>Alt+Shift+T</dt><dd>New terminal</dd>
+      <dt>Alt+Shift+W</dt><dd>Close terminal</dd>
+      <dt>Alt+Shift+&larr; / &rarr;</dt><dd>Previous / next tab</dd>
+      <dt>Alt+1 &hellip; 9</dt><dd>Go to tab</dd>
+      <dt>Ctrl+Shift+C / V</dt><dd>Copy / paste</dd>
+      <dt>Ctrl+Shift+F</dt><dd>Search scrollback</dd>
+      <dt>Alt+Shift+D</dt><dd>Detach tab (keeps running)</dd>
+      <dt>Alt+Shift+S</dt><dd>Split / unsplit</dd>
+      <dt>Ctrl+Shift+, </dt><dd>Settings</dd>
+      <dt>Ctrl + / Ctrl &minus; / Ctrl 0</dt><dd>Font size</dd>
+    </dl>
+    <div class="settings-foot"><button id="set-reset" type="button">Reset to defaults</button><span id="set-saved" class="saved"></span></div>
+  </div>
+</aside>
+<script src="static/themes.js?v={{v}}"></script>
+<script src="static/xterm.js?v={{v}}"></script>
+<script src="static/addon-fit.js?v={{v}}"></script>
+<script src="static/addon-web-links.js?v={{v}}"></script>
+<script src="static/addon-webgl.js?v={{v}}"></script>
+<script src="static/addon-search.js?v={{v}}"></script>
+<script src="static/app.js?v={{v}}"></script>
+</body>
+</html>

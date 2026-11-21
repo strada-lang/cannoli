@@ -589,6 +589,17 @@ Return value conventions:
 - `STATUS:code:content` for custom status
 - `REDIRECT:url` for redirects
 
+## Terminale (web terminal module)
+
+[`terminale/`](terminale/README.md) is a loadable module that serves a
+multi-tab terminal in the browser, with sessions that keep running when the
+browser closes: `cd terminale && ./start.sh -u me`.
+
+Long-lived handlers such as its WebSocket relay can ask
+`$c->worker_draining()` whether their worker is recycling, reloading or
+shutting down, and end the connection so the worker can exit (clients
+reconnect to a fresh worker).
+
 ## Examples
 
 See the `examples/` directory:

@@ -1,0 +1,1949 @@
+# terminale - a web terminal for Cannoli
+#
+# A dynamically loaded Cannoli module (terminale.so) that serves a
+# multi-tab terminal in the browser. Shells run as the user the Cannoli
+# process runs as.
+#
+# How it works
+#   - Every terminal session is its own small detached process (the
+#     "session host", written in C below). It owns the PTY and the shell,
+#     keeps the last 2MB of output, and listens on a Unix socket in a private
+#     directory (~/.terminale/sessions by default).
+#   - A browser tab talks WebSocket to any Cannoli worker; the worker attaches
+#     to the session's Unix socket and relays bytes both ways. Closing the
+#     tab (or the browser, or restarting Cannoli) only detaches: the session
+#     keeps running and is replayed on the next attach.
+#   - Login is a username + password from the module configuration; a
+#     successful login gets a random token (HttpOnly, SameSite=Strict cookie)
+#     stored in the private directory so every worker can check it.
+#
+# Load it with
+#   cannoli --loop-workers -l terminale.so:config=/path/terminale.conf
+#   cannoli --loop-workers -l "terminale.so:user=me;password=secret"
+# or use ./start.sh. See README.md.
+
+__C__ {
+#include <pty.h>
+#include <termios.h>
+#include <poll.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <pwd.h>
+#include <crypt.h>
+#include <dirent.h>
+#include <time.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/epoll.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
+
+/* ------------------------------------------------------------------ */
+/* Session host: runs in its own process, never returns into Strada.   */
+/* Wire format on the Unix socket, both directions:                    */
+/*   1 byte type, 4 bytes big-endian length, payload                   */
+/* client -> host: I input, R "cols rows", T title, K kill, Q query    */
+/* host -> client: S attach start, O output, X exit code, M metadata   */
+/* ------------------------------------------------------------------ */
+
+#define TM_RING (2 * 1024 * 1024)
+#define TM_MAXC 16
+#define TM_QPAUSE (1024 * 1024)
+#define TM_INMAX (256 * 1024)
+
+typedef struct {
+    int fd;
+    unsigned char *q;
+    size_t qlen, qcap;
+    unsigned char *in;
+    size_t inlen;
+    time_t stalled;
+} tm_client;
+
+static unsigned char *tm_ring;
+static size_t tm_ring_len, tm_ring_pos;
+static tm_client tm_clients[TM_MAXC];
+static int tm_nclients;
+
+static void tm_ring_add(const unsigned char *d, size_t n) {
+    if (n >= TM_RING) { d += n - TM_RING; n = TM_RING; }
+    size_t first = TM_RING - tm_ring_pos;
+    if (first > n) first = n;
+    memcpy(tm_ring + tm_ring_pos, d, first);
+    memcpy(tm_ring, d + first, n - first);
+    tm_ring_pos = (tm_ring_pos + n) % TM_RING;
+    tm_ring_len = tm_ring_len + n > TM_RING ? TM_RING : tm_ring_len + n;
+}
+
+static void tm_client_drop(int i) {
+    close(tm_clients[i].fd);
+    free(tm_clients[i].q);
+    free(tm_clients[i].in);
+    tm_clients[i] = tm_clients[tm_nclients - 1];
+    tm_nclients--;
+}
+
+static int tm_enqueue(tm_client *c, char type, const unsigned char *d, size_t n) {
+    size_t need = c->qlen + 5 + n;
+    if (need > c->qcap) {
+        size_t ncap = c->qcap ? c->qcap * 2 : 65536;
+        while (ncap < need) ncap *= 2;
+        unsigned char *nq = realloc(c->q, ncap);
+        if (!nq) return -1;
+        c->q = nq;
+        c->qcap = ncap;
+    }
+    unsigned char *p = c->q + c->qlen;
+    p[0] = (unsigned char)type;
+    p[1] = (unsigned char)(n >> 24); p[2] = (unsigned char)(n >> 16);
+    p[3] = (unsigned char)(n >> 8);  p[4] = (unsigned char)n;
+    if (n) memcpy(p + 5, d, n);
+    c->qlen = need;
+    return 0;
+}
+
+/* 0 ok, -1 drop the client */
+static int tm_flush(tm_client *c) {
+    while (c->qlen > 0) {
+        ssize_t w = send(c->fd, c->q, c->qlen, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (w > 0) {
+            memmove(c->q, c->q + w, c->qlen - (size_t)w);
+            c->qlen -= (size_t)w;
+            continue;
+        }
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        if (w < 0 && errno == EINTR) continue;
+        return -1;
+    }
+    return 0;
+}
+
+/* Input for the shell is queued and written as the PTY accepts it. Writing
+ * it synchronously deadlocks on a large paste: the shell stops reading while
+ * it waits for us to read the echo it is writing back. */
+#define TM_INQ_MAX (8 * 1024 * 1024)
+static unsigned char *tm_inq;
+static size_t tm_inq_len, tm_inq_cap;
+
+static void tm_inq_flush(int master) {
+    while (tm_inq_len > 0) {
+        ssize_t w = write(master, tm_inq, tm_inq_len);
+        if (w > 0) {
+            memmove(tm_inq, tm_inq + w, tm_inq_len - (size_t)w);
+            tm_inq_len -= (size_t)w;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) continue;
+        return;   /* EAGAIN: wait for POLLOUT; other errors show up as EOF */
+    }
+}
+
+static void tm_write_master(int master, const unsigned char *d, size_t n) {
+    if (tm_inq_len + n > TM_INQ_MAX) return;
+    if (tm_inq_len + n > tm_inq_cap) {
+        size_t ncap = tm_inq_cap ? tm_inq_cap * 2 : 65536;
+        while (ncap < tm_inq_len + n) ncap *= 2;
+        unsigned char *nq = realloc(tm_inq, ncap);
+        if (!nq) return;
+        tm_inq = nq;
+        tm_inq_cap = ncap;
+    }
+    memcpy(tm_inq + tm_inq_len, d, n);
+    tm_inq_len += n;
+    tm_inq_flush(master);
+}
+
+/* Track the terminal modes programs switch on (alternate screen, mouse
+ * reporting, bracketed paste, application cursor keys, hidden cursor ...)
+ * so a browser attaching later can be put in the same state even when the
+ * sequence that set them has scrolled out of the 2MB buffer. A small CSI
+ * parser that survives sequences split across reads. */
+static const int tm_mode_ids[] = { 1, 25, 47, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1047, 1049, 2004 };
+#define TM_NMODES ((int)(sizeof(tm_mode_ids) / sizeof(tm_mode_ids[0])))
+static int tm_mode_on[sizeof(tm_mode_ids) / sizeof(tm_mode_ids[0])];
+static int tm_keypad_app;
+static int tm_alt;
+static int tm_ps_state;            /* 0 text, 1 ESC, 2 ESC [, 3 ESC [ ? params */
+static int tm_ps_params[8], tm_ps_n, tm_ps_cur, tm_ps_have;
+
+static void tm_modes_reset(void) {
+    for (int i = 0; i < TM_NMODES; i++) tm_mode_on[i] = (tm_mode_ids[i] == 25);
+    tm_keypad_app = 0;
+    tm_alt = 0;
+}
+
+static void tm_mode_set(int id, int on) {
+    for (int i = 0; i < TM_NMODES; i++) if (tm_mode_ids[i] == id) tm_mode_on[i] = on;
+    if (id == 1049 || id == 1047 || id == 47) tm_alt = on;
+}
+
+static void tm_scan_modes(const unsigned char *d, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = d[i];
+        switch (tm_ps_state) {
+        case 0:
+            if (c == 0x1b) tm_ps_state = 1;
+            break;
+        case 1:
+            if (c == '[') tm_ps_state = 2;
+            else if (c == '=') { tm_keypad_app = 1; tm_ps_state = 0; }
+            else if (c == '>') { tm_keypad_app = 0; tm_ps_state = 0; }
+            else if (c == 'c') { tm_modes_reset(); tm_ps_state = 0; }   /* RIS */
+            else if (c == 0x1b) tm_ps_state = 1;
+            else tm_ps_state = 0;
+            break;
+        case 2:
+            if (c == '?') { tm_ps_state = 3; tm_ps_n = 0; tm_ps_cur = 0; tm_ps_have = 0; }
+            else if (c == 0x1b) tm_ps_state = 1;
+            else tm_ps_state = 0;
+            break;
+        default:
+            if (c >= '0' && c <= '9') {
+                if (tm_ps_cur < 100000) tm_ps_cur = tm_ps_cur * 10 + (c - '0');
+                tm_ps_have = 1;
+            } else if (c == ';') {
+                if (tm_ps_n < 8) tm_ps_params[tm_ps_n++] = tm_ps_cur;
+                tm_ps_cur = 0;
+                tm_ps_have = 0;
+            } else {
+                if (tm_ps_have && tm_ps_n < 8) tm_ps_params[tm_ps_n++] = tm_ps_cur;
+                if (c == 'h' || c == 'l') {
+                    for (int k = 0; k < tm_ps_n; k++) tm_mode_set(tm_ps_params[k], c == 'h');
+                }
+                tm_ps_state = (c == 0x1b) ? 1 : 0;
+            }
+            break;
+        }
+    }
+}
+
+/* Escape sequences that put a fresh terminal into the tracked state */
+static size_t tm_modes_restore(char *out, size_t cap) {
+    size_t o = 0;
+    for (int i = 0; i < TM_NMODES && o + 16 < cap; i++) {
+        int id = tm_mode_ids[i];
+        if (id == 25) { if (!tm_mode_on[i]) o += (size_t)snprintf(out + o, cap - o, "\033[?25l"); }
+        else if (tm_mode_on[i]) o += (size_t)snprintf(out + o, cap - o, "\033[?%dh", id);
+    }
+    if (tm_keypad_app && o + 4 < cap) o += (size_t)snprintf(out + o, cap - o, "\033=");
+    return o;
+}
+
+/* Working directory of the foreground program (what "here" means to the
+ * user): for the file browser and uploads. */
+static void tm_session_cwd(int master, pid_t child, char *out, size_t cap) {
+    char link[64];
+    out[0] = 0;
+    pid_t fg = tcgetpgrp(master);
+    pid_t tries[2] = { fg, child };
+    for (int i = 0; i < 2 && !out[0]; i++) {
+        if (tries[i] <= 0) continue;
+        snprintf(link, sizeof(link), "/proc/%d/cwd", (int)tries[i]);
+        ssize_t n = readlink(link, out, cap - 1);
+        if (n > 0) out[n] = 0; else out[0] = 0;
+    }
+}
+
+static void tm_set_size(int master, int cols, int rows) {
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_col = (unsigned short)cols;
+    ws.ws_row = (unsigned short)rows;
+    ioctl(master, TIOCSWINSZ, &ws);
+}
+
+static void tm_host_run(const char *sockpath, int cols, int rows, const char *shell_cfg, int idle_timeout) {
+    char title[256];
+    snprintf(title, sizeof(title), "shell");
+    time_t created = time(NULL);
+
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    if (strlen(sockpath) >= sizeof(sa.sun_path)) _exit(2);
+    strcpy(sa.sun_path, sockpath);
+    int lfd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (lfd < 0) _exit(2);
+    unlink(sockpath);
+    umask(077);
+    if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(lfd, 16) != 0) _exit(2);
+
+    struct passwd *pw = getpwuid(getuid());
+    const char *home = (pw && pw->pw_dir && pw->pw_dir[0]) ? pw->pw_dir : "/";
+    const char *shell = (shell_cfg && shell_cfg[0]) ? shell_cfg
+                      : (pw && pw->pw_shell && pw->pw_shell[0]) ? pw->pw_shell : "/bin/sh";
+
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_col = (unsigned short)cols;
+    ws.ws_row = (unsigned short)rows;
+    int master = -1;
+    pid_t child = forkpty(&master, NULL, NULL, &ws);
+    if (child < 0) { unlink(sockpath); _exit(2); }
+    if (child == 0) {
+        for (int s = 1; s < 32; s++) signal(s, SIG_DFL);
+        sigset_t none;
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);
+        setenv("TERM", "xterm-256color", 1);
+        setenv("COLORTERM", "truecolor", 1);
+        setenv("HOME", home, 1);
+        setenv("SHELL", shell, 1);
+        if (pw && pw->pw_name) { setenv("USER", pw->pw_name, 1); setenv("LOGNAME", pw->pw_name, 1); }
+        setenv("TERMINALE", "1", 1);
+        unsetenv("TERMINALE_PASSWORD");
+        unsetenv("TERMINALE_PASSWORD_HASH");
+        unsetenv("TERMINALE_USER");
+        unsetenv("NOTIFY_SOCKET");
+        unsetenv("WATCHDOG_USEC");
+        unsetenv("WATCHDOG_PID");
+        if (chdir(home) != 0) { if (chdir("/") != 0) _exit(126); }
+        const char *base = strrchr(shell, '/');
+        base = base ? base + 1 : shell;
+        char argv0[128];
+        snprintf(argv0, sizeof(argv0), "-%s", base);   /* login shell */
+        execl(shell, argv0, (char *)NULL);
+        execl("/bin/sh", "-sh", (char *)NULL);
+        _exit(127);
+    }
+
+    fcntl(master, F_SETFL, fcntl(master, F_GETFL, 0) | O_NONBLOCK);
+    fcntl(master, F_SETFD, FD_CLOEXEC);
+    tm_ring = malloc(TM_RING);
+    unsigned char *rbuf = malloc(65536);
+    if (!tm_ring || !rbuf) { kill(child, SIGKILL); unlink(sockpath); _exit(2); }
+
+    tm_modes_reset();
+    int cur_cols = cols, cur_rows = rows;
+    int exit_code = -1, ended = 0;
+    time_t last_client = time(NULL), kill_at = 0;
+
+    while (!ended) {
+        struct pollfd pf[2 + TM_MAXC];
+        int paused = 0;
+        time_t now = time(NULL);
+        for (int i = 0; i < tm_nclients; i++) {
+            if (tm_clients[i].qlen > TM_QPAUSE) {
+                if (!tm_clients[i].stalled) tm_clients[i].stalled = now;
+                if (now - tm_clients[i].stalled > 10) { tm_client_drop(i); i--; continue; }
+                paused = 1;
+            } else {
+                tm_clients[i].stalled = 0;
+            }
+        }
+        pf[0].fd = lfd; pf[0].events = POLLIN; pf[0].revents = 0;
+        pf[1].fd = master; pf[1].events = (short)((paused ? 0 : POLLIN) | (tm_inq_len ? POLLOUT : 0)); pf[1].revents = 0;
+        int nc = tm_nclients;
+        for (int i = 0; i < nc; i++) {
+            pf[2 + i].fd = tm_clients[i].fd;
+            pf[2 + i].events = POLLIN | (tm_clients[i].qlen ? POLLOUT : 0);
+            pf[2 + i].revents = 0;
+        }
+        int pr = poll(pf, (nfds_t)(2 + nc), 1000);
+        now = time(NULL);
+        if (pr < 0 && errno != EINTR) break;
+
+        if (pr > 0 && (pf[1].revents & POLLOUT)) tm_inq_flush(master);
+
+        /* shell output */
+        if (pr > 0 && (pf[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+            ssize_t n = read(master, rbuf, 65536);
+            if (n > 0) {
+                tm_ring_add(rbuf, (size_t)n);
+                tm_scan_modes(rbuf, (size_t)n);
+                for (int i = 0; i < tm_nclients; i++) tm_enqueue(&tm_clients[i], 'O', rbuf, (size_t)n);
+            } else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                ended = 1;
+            }
+        }
+
+        /* clients */
+        for (int i = 0; pr > 0 && i < nc && i < tm_nclients; i++) {
+            tm_client *c = &tm_clients[i];
+            if (c->fd != pf[2 + i].fd) continue;   /* slot was reused by a drop */
+            int drop = 0;
+            if (pf[2 + i].revents & (POLLIN | POLLHUP | POLLERR)) {
+                ssize_t n = recv(c->fd, c->in + c->inlen, TM_INMAX + 5 - c->inlen, MSG_DONTWAIT);
+                if (n > 0) {
+                    c->inlen += (size_t)n;
+                    size_t off = 0;
+                    while (c->inlen - off >= 5) {
+                        unsigned char *h = c->in + off;
+                        size_t len = ((size_t)h[1] << 24) | ((size_t)h[2] << 16) | ((size_t)h[3] << 8) | (size_t)h[4];
+                        if (len > TM_INMAX) { drop = 1; break; }
+                        if (c->inlen - off < 5 + len) break;
+                        unsigned char *p = h + 5;
+                        if (h[0] == 'I') {
+                            tm_write_master(master, p, len);
+                        } else if (h[0] == 'R') {
+                            char tmp[64];
+                            size_t tl = len < sizeof(tmp) - 1 ? len : sizeof(tmp) - 1;
+                            memcpy(tmp, p, tl);
+                            tmp[tl] = 0;
+                            int nc2 = 0, nr2 = 0;
+                            if (sscanf(tmp, "%d %d", &nc2, &nr2) == 2 && nc2 >= 2 && nc2 <= 1000 && nr2 >= 1 && nr2 <= 500) {
+                                if (nc2 == cur_cols && nr2 == cur_rows) {
+                                    /* same size on (re)attach: full-screen programs
+                                     * must repaint, so make the size change briefly */
+                                    if (tm_alt) { tm_set_size(master, nc2, nr2 > 1 ? nr2 - 1 : nr2 + 1); tm_set_size(master, nc2, nr2); }
+                                } else {
+                                    tm_set_size(master, nc2, nr2);
+                                    cur_cols = nc2;
+                                    cur_rows = nr2;
+                                    /* other attached browsers follow the new size */
+                                    char zs[32];
+                                    int zl = snprintf(zs, sizeof(zs), "%d %d", nc2, nr2);
+                                    for (int o = 0; o < tm_nclients; o++) {
+                                        if (&tm_clients[o] != c) tm_enqueue(&tm_clients[o], 'Z', (unsigned char *)zs, (size_t)zl);
+                                    }
+                                }
+                            }
+                        } else if (h[0] == 'T') {
+                            size_t tl = len < sizeof(title) - 1 ? len : sizeof(title) - 1;
+                            memcpy(title, p, tl);
+                            title[tl] = 0;
+                            for (size_t q = 0; q < tl; q++) if ((unsigned char)title[q] < 0x20) title[q] = ' ';
+                        } else if (h[0] == 'Q') {
+                            char meta[5000], cwd[4096];
+                            tm_session_cwd(master, child, cwd, sizeof(cwd));
+                            if (strchr(cwd, '\t') || strchr(cwd, '\n')) cwd[0] = 0;
+                            int ml = snprintf(meta, sizeof(meta), "%lld\t%d\t%d\t%d\t%s\t%s", (long long)created, cur_cols, cur_rows,
+                                              tm_nclients - 1, cwd, title);
+                            tm_enqueue(c, 'M', (unsigned char *)meta, (size_t)(ml < (int)sizeof(meta) ? ml : (int)sizeof(meta) - 1));
+                        } else if (h[0] == 'K') {
+                            kill(-child, SIGHUP);
+                            kill(child, SIGHUP);
+                            kill_at = now + 2;
+                        }
+                        off += 5 + len;
+                    }
+                    if (off > 0) {
+                        memmove(c->in, c->in + off, c->inlen - off);
+                        c->inlen -= off;
+                    }
+                } else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                    drop = 1;
+                }
+            }
+            if (!drop && tm_flush(c) != 0) drop = 1;
+            if (drop) { tm_client_drop(i); break; }   /* indexes shifted: next round */
+        }
+
+        /* new client: attach marker, then the scrollback */
+        if (pr > 0 && (pf[0].revents & POLLIN)) {
+            int cfd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+            if (cfd >= 0) {
+                if (tm_nclients >= TM_MAXC) {
+                    close(cfd);
+                } else {
+                    tm_client *c = &tm_clients[tm_nclients];
+                    memset(c, 0, sizeof(*c));
+                    c->fd = cfd;
+                    c->in = malloc(TM_INMAX + 5);
+                    if (!c->in) {
+                        close(cfd);
+                    } else {
+                        tm_nclients++;
+                        char sz[32];
+                        int sl = snprintf(sz, sizeof(sz), "%d %d", cur_cols, cur_rows);
+                        tm_enqueue(c, 'S', (unsigned char *)sz, (size_t)sl);
+                        size_t start = (tm_ring_pos + TM_RING - tm_ring_len) % TM_RING;
+                        size_t left = tm_ring_len;
+                        while (left > 0) {
+                            size_t chunk = TM_RING - start;
+                            if (chunk > left) chunk = left;
+                            if (chunk > 262144) chunk = 262144;
+                            tm_enqueue(c, 'O', tm_ring + start, chunk);
+                            start = (start + chunk) % TM_RING;
+                            left -= chunk;
+                        }
+                        char modes[256];
+                        size_t mlen = tm_modes_restore(modes, sizeof(modes));
+                        if (mlen) tm_enqueue(c, 'O', (unsigned char *)modes, mlen);
+                    }
+                }
+            }
+        }
+
+        if (tm_nclients > 0) last_client = now;
+        if (idle_timeout > 0 && tm_nclients == 0 && now - last_client > idle_timeout && !kill_at) {
+            kill(-child, SIGHUP);
+            kill(child, SIGHUP);
+            kill_at = now + 2;
+        }
+        if (kill_at && now >= kill_at) { kill(-child, SIGKILL); kill(child, SIGKILL); }
+
+        /* the shell itself is gone (even if a background job holds the tty) */
+        int st = 0;
+        if (waitpid(child, &st, WNOHANG) == child) {
+            exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+            child = -1;
+            /* drain what is left of its output */
+            for (int k = 0; k < 64; k++) {
+                ssize_t n = read(master, rbuf, 65536);
+                if (n <= 0) break;
+                for (int i = 0; i < tm_nclients; i++) tm_enqueue(&tm_clients[i], 'O', rbuf, (size_t)n);
+            }
+            ended = 1;
+        }
+    }
+
+    if (child > 0) {
+        int st = 0;
+        kill(-child, SIGHUP);
+        for (int k = 0; k < 50 && waitpid(child, &st, WNOHANG) == 0; k++) usleep(10000);
+        if (waitpid(child, &st, WNOHANG) == 0) { kill(-child, SIGKILL); kill(child, SIGKILL); waitpid(child, &st, 0); }
+        exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+    }
+    unlink(sockpath);
+    close(lfd);
+    char code[16];
+    int cl = snprintf(code, sizeof(code), "%d", exit_code);
+    for (int i = 0; i < tm_nclients; i++) tm_enqueue(&tm_clients[i], 'X', (unsigned char *)code, (size_t)cl);
+    for (int k = 0; k < 100; k++) {
+        int pending = 0;
+        for (int i = 0; i < tm_nclients; i++) {
+            tm_flush(&tm_clients[i]);
+            if (tm_clients[i].qlen) pending = 1;
+        }
+        if (!pending) break;
+        usleep(10000);
+    }
+    _exit(0);
+}
+
+/* Start a session host, fully detached (double fork). 0 on success. */
+static int tm_spawn_host(const char *sockpath, int cols, int rows, const char *shell, int idle) {
+    pid_t a = fork();
+    if (a < 0) return -1;
+    if (a == 0) {
+        pid_t b = fork();
+        if (b != 0) _exit(b < 0 ? 1 : 0);
+        setsid();
+        for (int s = 1; s < 32; s++) signal(s, SIG_DFL);
+        signal(SIGPIPE, SIG_IGN);
+        signal(SIGHUP, SIG_IGN);
+        signal(SIGINT, SIG_IGN);
+        sigset_t none;
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);
+        long maxfd = sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0 || maxfd > 65536) maxfd = 65536;
+        for (int fd = 0; fd < (int)maxfd; fd++) close(fd);
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) { dup2(nul, 0); dup2(nul, 1); dup2(nul, 2); if (nul > 2) close(nul); }
+        /* show up as what it is in ps, not as a copy of the worker */
+        const char *base = strrchr(sockpath, '/');
+        char name[64];
+        snprintf(name, sizeof(name), "terminale: session %.16s", base && strlen(base) > 3 ? base + 3 : "?");
+        StradaValue *title_sv = strada_new_str(name);
+        strada_setproctitle(title_sv);
+        tm_host_run(sockpath, cols, rows, shell, idle);
+        _exit(0);
+    }
+    int st = 0;
+    while (waitpid(a, &st, 0) < 0 && errno == EINTR) { }
+    return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+static int tm_unix_connect(const char *path) {
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof(sa.sun_path)) return -1;
+    strcpy(sa.sun_path, path);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) { close(fd); return -1; }
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    return fd;
+}
+
+static const char *tm_bytes(StradaValue *sv, size_t *n) {
+    *n = 0;
+    if (sv && !STRADA_IS_TAGGED_INT(sv) && sv->type == STRADA_STR && sv->value.pv) {
+        *n = STRADA_STR_BYTELEN(sv);
+        if (*n == 0 && sv->value.pv[0] != 0) *n = strlen(sv->value.pv);
+        return sv->value.pv;
+    }
+    return "";
+}
+}
+
+# ---------------------------------------------------------------------------
+# C helpers callable from Strada
+# ---------------------------------------------------------------------------
+
+# 1 if $path is (or was just created as) a directory owned by us, not a
+# symlink, with no access for group/other.
+func tm_private_dir(str $path) int {
+    my scalar $ok = 0;
+    __C__ {
+        char *p = strada_to_str(path);
+        int good = 0;
+        struct stat st;
+        if (p) {
+            if (lstat(p, &st) != 0) {
+                if (mkdir(p, 0700) == 0) lstat(p, &st);
+                else memset(&st, 0, sizeof(st));
+            }
+            if (S_ISDIR(st.st_mode) && st.st_uid == geteuid()) {
+                good = ((st.st_mode & 077) == 0) || chmod(p, 0700) == 0;
+            }
+        }
+        free(p);
+        ok = strada_new_int(good);
+    }
+    return $ok;
+}
+
+func tm_random_hex(int $nbytes) str {
+    my str $out = "";
+    __C__ {
+        int n = (int)strada_to_int(nbytes);
+        if (n < 1) n = 1;
+        if (n > 64) n = 64;
+        unsigned char raw[64];
+        char hex[129];
+        int got = 0;
+        int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            while (got < n) {
+                ssize_t r = read(fd, raw + got, (size_t)(n - got));
+                if (r <= 0) break;
+                got += (int)r;
+            }
+            close(fd);
+        }
+        hex[0] = 0;
+        if (got == n) {
+            for (int i = 0; i < n; i++) snprintf(hex + i * 2, 3, "%02x", raw[i]);
+        }
+        strada_decref(out);
+        out = strada_new_str(hex);
+    }
+    return $out;
+}
+
+# Constant-time string comparison
+func tm_ct_eq(str $a, str $b) int {
+    my scalar $eq = 0;
+    __C__ {
+        size_t la, lb;
+        const char *pa = tm_bytes(a, &la);
+        const char *pb = tm_bytes(b, &lb);
+        unsigned char diff = (unsigned char)(la != lb);
+        size_t n = la < lb ? la : lb;
+        for (size_t i = 0; i < n; i++) diff |= (unsigned char)(pa[i] ^ pb[i]);
+        eq = strada_new_int(diff == 0);
+    }
+    return $eq;
+}
+
+# Check $password against a crypt(3) hash ("$6$salt$...", "$y$...", ...)
+func tm_crypt_check(str $password, str $hash) int {
+    my scalar $ok = 0;
+    __C__ {
+        char *pw = strada_to_str(password);
+        char *h = strada_to_str(hash);
+        int good = 0;
+        if (pw && h && h[0]) {
+            struct crypt_data cd;
+            memset(&cd, 0, sizeof(cd));
+            char *res = crypt_r(pw, h, &cd);
+            if (res && res[0] != '*' && strlen(res) == strlen(h)) {
+                unsigned char diff = 0;
+                for (size_t i = 0; h[i]; i++) diff |= (unsigned char)(res[i] ^ h[i]);
+                good = diff == 0;
+            }
+        }
+        if (pw) memset(pw, 0, strlen(pw));
+        free(pw);
+        free(h);
+        ok = strada_new_int(good);
+    }
+    return $ok;
+}
+
+func tm_home_dir() str {
+    my str $out = "";
+    __C__ {
+        struct passwd *pw = getpwuid(getuid());
+        strada_decref(out);
+        out = strada_new_str((pw && pw->pw_dir) ? pw->pw_dir : "");
+    }
+    return $out;
+}
+
+func tm_user_name() str {
+    my str $out = "";
+    __C__ {
+        struct passwd *pw = getpwuid(getuid());
+        strada_decref(out);
+        out = strada_new_str((pw && pw->pw_name) ? pw->pw_name : "");
+    }
+    return $out;
+}
+
+func tm_unsetenv(str $name) void {
+    __C__ {
+        char *n = strada_to_str(name);
+        if (n) unsetenv(n);
+        free(n);
+    }
+}
+
+# Start a detached session host listening on $sockpath; 1 once it accepts
+# connections.
+func tm_spawn(str $sockpath, int $cols, int $rows, str $shell, int $idle) int {
+    my scalar $ok = 0;
+    __C__ {
+        char *p = strada_to_str(sockpath);
+        char *sh = strada_to_str(shell);
+        int good = 0;
+        if (p && tm_spawn_host(p, (int)strada_to_int(cols), (int)strada_to_int(rows), sh ? sh : "", (int)strada_to_int(idle)) == 0) {
+            for (int i = 0; i < 150 && !good; i++) {
+                int fd = tm_unix_connect(p);
+                if (fd >= 0) { close(fd); good = 1; }
+                else usleep(20000);
+            }
+        }
+        free(p);
+        free(sh);
+        ok = strada_new_int(good);
+    }
+    return $ok;
+}
+
+# Connect to a session host; fd (non-blocking) or -1.
+func tm_connect(str $sockpath) int {
+    my scalar $fd = -1;
+    __C__ {
+        char *p = strada_to_str(sockpath);
+        fd = strada_new_int(p ? tm_unix_connect(p) : -1);
+        free(p);
+    }
+    return $fd;
+}
+
+func tm_close(int $fd) void {
+    __C__ {
+        int f = (int)strada_to_int(fd);
+        if (f >= 0) close(f);
+    }
+}
+
+# Send one frame to a session host. 1 on success.
+func tm_send_frame(int $fd, str $type, str $payload) int {
+    my scalar $ok = 0;
+    __C__ {
+        size_t n, tn;
+        const char *d = tm_bytes(payload, &n);
+        const char *t = tm_bytes(type, &tn);
+        int f = (int)strada_to_int(fd);
+        int good = 0;
+        unsigned char *buf = malloc(n + 5);
+        if (buf && tn >= 1 && f >= 0) {
+            buf[0] = (unsigned char)t[0];
+            buf[1] = (unsigned char)(n >> 24); buf[2] = (unsigned char)(n >> 16);
+            buf[3] = (unsigned char)(n >> 8);  buf[4] = (unsigned char)n;
+            if (n) memcpy(buf + 5, d, n);
+            size_t off = 0, total = n + 5;
+            int tries = 0;
+            good = 1;
+            while (off < total) {
+                ssize_t w = send(f, buf + off, total - off, MSG_NOSIGNAL);
+                if (w > 0) { off += (size_t)w; continue; }
+                if (w < 0 && errno == EINTR) continue;
+                if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && tries < 100) {
+                    struct pollfd p = { f, POLLOUT, 0 };
+                    poll(&p, 1, 50);
+                    tries++;
+                    continue;
+                }
+                good = 0;
+                break;
+            }
+        }
+        free(buf);
+        ok = strada_new_int(good);
+    }
+    return $ok;
+}
+
+# Read what is available: data, "" at EOF/error, undef when nothing is there.
+func tm_recv(int $fd) scalar {
+    my scalar $out = undef;
+    __C__ {
+        int f = (int)strada_to_int(fd);
+        char *buf = malloc(262144);
+        if (buf) {
+            ssize_t n;
+            do { n = recv(f, buf, 262144, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
+            if (n > 0) out = strada_new_str_len(buf, (size_t)n);
+            else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) out = strada_new_str("");
+            else out = strada_new_undef();
+            free(buf);
+        } else {
+            out = strada_new_str("");
+        }
+    }
+    return $out;
+}
+
+# poll() one fd for reading: 1 readable (or closed), 0 not within $ms.
+func tm_poll(int $fd, int $ms) int {
+    my scalar $r = 0;
+    __C__ {
+        struct pollfd p = { (int)strada_to_int(fd), POLLIN, 0 };
+        int rc;
+        do { rc = poll(&p, 1, (int)strada_to_int(ms)); } while (rc < 0 && errno == EINTR);
+        r = strada_new_int(rc > 0 ? 1 : 0);
+    }
+    return $r;
+}
+
+# An epoll fd that becomes readable when either fd is: lets one wait cover
+# both the browser connection and the session host.
+func tm_ep_new(int $a, int $b) int {
+    my scalar $ep = -1;
+    __C__ {
+        int e = epoll_create1(EPOLL_CLOEXEC);
+        if (e >= 0) {
+            struct epoll_event ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.events = EPOLLIN;
+            ev.data.fd = (int)strada_to_int(a);
+            int r1 = epoll_ctl(e, EPOLL_CTL_ADD, ev.data.fd, &ev);
+            ev.data.fd = (int)strada_to_int(b);
+            int r2 = epoll_ctl(e, EPOLL_CTL_ADD, ev.data.fd, &ev);
+            if (r1 != 0 || r2 != 0) { close(e); e = -1; }
+        }
+        ep = strada_new_int(e);
+    }
+    return $ep;
+}
+
+# Watch ($on = 1) or ignore ($on = 0) $fd in the epoll set.
+func tm_ep_set(int $ep, int $fd, int $on) void {
+    __C__ {
+        struct epoll_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.events = strada_to_int(on) ? EPOLLIN : 0;
+        ev.data.fd = (int)strada_to_int(fd);
+        epoll_ctl((int)strada_to_int(ep), EPOLL_CTL_MOD, ev.data.fd, &ev);
+    }
+}
+
+# Session ids (the 16 hex digits of s_<id>.sock) in $dir, newline-separated.
+func tm_list_ids(str $dir) str {
+    my str $out = "";
+    __C__ {
+        char *d = strada_to_str(dir);
+        char *buf = malloc(64 * 1024);
+        size_t len = 0;
+        if (d && buf) {
+            DIR *dh = opendir(d);
+            if (dh) {
+                struct dirent *de;
+                while ((de = readdir(dh)) != NULL && len < 64 * 1024 - 32) {
+                    const char *n = de->d_name;
+                    if (strlen(n) == 23 && n[0] == 's' && n[1] == '_' && strcmp(n + 18, ".sock") == 0) {
+                        memcpy(buf + len, n + 2, 16);
+                        len += 16;
+                        buf[len++] = '\n';
+                    }
+                }
+                closedir(dh);
+            }
+        }
+        strada_decref(out);
+        out = strada_new_str_len(buf ? buf : "", len);
+        free(buf);
+        free(d);
+    }
+    return $out;
+}
+
+# JSON string body: escapes quotes, backslashes and controls; bytes that are
+# not valid UTF-8 become "?".
+func tm_json_escape(str $s) str {
+    my str $out = "";
+    __C__ {
+        size_t n;
+        const unsigned char *p = (const unsigned char *)tm_bytes(s, &n);
+        char *buf = malloc(n * 6 + 1);
+        size_t o = 0;
+        if (buf) {
+            size_t i = 0;
+            while (i < n) {
+                unsigned char c = p[i];
+                if (c == 34 || c == 92) { buf[o++] = 92; buf[o++] = (char)c; i++; }
+                else if (c < 0x20 || c == 0x7f) { o += (size_t)snprintf(buf + o, 7, "\\u%04x", c); i++; }
+                else if (c < 0x80) { buf[o++] = (char)c; i++; }
+                else {
+                    size_t len = (c >= 0xC2 && c <= 0xDF) ? 2 : (c >= 0xE0 && c <= 0xEF) ? 3 : (c >= 0xF0 && c <= 0xF4) ? 4 : 0;
+                    int good = len > 0 && i + len <= n;
+                    for (size_t k = 1; good && k < len; k++) good = (p[i + k] & 0xC0) == 0x80;
+                    if (good) { memcpy(buf + o, p + i, len); o += len; i += len; }
+                    else { buf[o++] = '?'; i++; }
+                }
+            }
+        }
+        strada_decref(out);
+        out = strada_new_str_len(buf ? buf : "", o);
+        free(buf);
+    }
+    return $out;
+}
+
+# Names in $dir starting with $prefix, newline-separated (no dot files).
+func tm_list_dir(str $dir, str $prefix) str {
+    my str $out = "";
+    __C__ {
+        char *d = strada_to_str(dir);
+        char *pre = strada_to_str(prefix);
+        size_t cap = 256 * 1024, len = 0, pl = pre ? strlen(pre) : 0;
+        char *buf = malloc(cap);
+        if (d && buf) {
+            DIR *dh = opendir(d);
+            if (dh) {
+                struct dirent *de;
+                while ((de = readdir(dh)) != NULL) {
+                    size_t nl = strlen(de->d_name);
+                    if (de->d_name[0] == '.' || nl + 2 > cap - len) continue;
+                    if (pl && strncmp(de->d_name, pre, pl) != 0) continue;
+                    memcpy(buf + len, de->d_name, nl);
+                    len += nl;
+                    buf[len++] = '\n';
+                }
+                closedir(dh);
+            }
+        }
+        strada_decref(out);
+        out = strada_new_str_len(buf ? buf : "", len);
+        free(buf);
+        free(d);
+        free(pre);
+    }
+    return $out;
+}
+
+# Directory listing for the file browser: one "d|f <TAB> size <TAB> mtime
+# <TAB> name" line per entry (at most 5000; names with control characters
+# are skipped). undef if $dir cannot be read.
+func tm_list_files(str $dir) scalar {
+    my scalar $out = undef;
+    __C__ {
+        char *d = strada_to_str(dir);
+        DIR *dh = d ? opendir(d) : NULL;
+        if (!dh) {
+            out = strada_new_undef();
+        } else {
+            size_t cap = 65536, len = 0;
+            char *buf = malloc(cap);
+            int count = 0;
+            int dfd = dirfd(dh);
+            struct dirent *de;
+            while (buf && (de = readdir(dh)) != NULL && count < 5000) {
+                const char *n = de->d_name;
+                if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) continue;
+                int bad = 0;
+                for (const unsigned char *q = (const unsigned char *)n; *q; q++) if (*q < 0x20 || *q == 0x7f) bad = 1;
+                if (bad) continue;
+                struct stat st;
+                if (fstatat(dfd, n, &st, 0) != 0) {
+                    if (fstatat(dfd, n, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+                }
+                size_t need = strlen(n) + 64;
+                if (len + need > cap) {
+                    cap = (cap + need) * 2;
+                    char *nb = realloc(buf, cap);
+                    if (!nb) break;
+                    buf = nb;
+                }
+                len += (size_t)snprintf(buf + len, cap - len, "%c\t%lld\t%lld\t%s\n", S_ISDIR(st.st_mode) ? 'd' : 'f',
+                                        (long long)st.st_size, (long long)st.st_mtime, n);
+                count++;
+            }
+            closedir(dh);
+            out = strada_new_str_len(buf ? buf : "", len);
+            free(buf);
+        }
+        free(d);
+    }
+    return $out;
+}
+
+# Time-based one-time password (RFC 6238: HMAC-SHA1, 30s steps, 6 digits).
+# Returns the time step $code is valid for (now, or one step either side),
+# or 0. $secret is base32.
+func tm_totp_step(str $secret, str $code) int {
+    my scalar $step = 0;
+    __C__ {
+        char *sec = strada_to_str(secret);
+        char *cd = strada_to_str(code);
+        long long match = 0;
+        unsigned char key[64];
+        size_t klen = 0;
+        unsigned int acc = 0;
+        int bits = 0, ok = sec && cd && strlen(cd) == 6;
+        for (const char *q = sec; ok && q && *q; q++) {
+            int v;
+            char ch = *q;
+            if (ch == '=' || ch == ' ' || ch == '-') continue;
+            if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
+            if (ch >= 'A' && ch <= 'Z') v = ch - 'A';
+            else if (ch >= '2' && ch <= '7') v = ch - '2' + 26;
+            else { ok = 0; break; }
+            acc = (acc << 5) | (unsigned int)v;
+            bits += 5;
+            if (bits >= 8) {
+                bits -= 8;
+                if (klen < sizeof(key)) key[klen++] = (unsigned char)(acc >> bits);
+                acc &= (1u << bits) - 1;
+            }
+        }
+        if (ok && klen >= 10) {
+            long long now = (long long)time(NULL) / 30;
+            for (long long t = now - 1; t <= now + 1; t++) {
+                unsigned char msg[8], mac[EVP_MAX_MD_SIZE];
+                unsigned int mlen = 0;
+                for (int i = 7; i >= 0; i--) msg[7 - i] = (unsigned char)((unsigned long long)t >> (i * 8));
+                if (!HMAC(EVP_sha1(), key, (int)klen, msg, 8, mac, &mlen) || mlen < 20) continue;
+                int off = mac[mlen - 1] & 0x0f;
+                unsigned int bin = ((unsigned int)(mac[off] & 0x7f) << 24) | ((unsigned int)mac[off + 1] << 16)
+                                 | ((unsigned int)mac[off + 2] << 8) | (unsigned int)mac[off + 3];
+                char want[8];
+                snprintf(want, sizeof(want), "%06u", bin % 1000000u);
+                unsigned char diff = 0;
+                for (int i = 0; i < 6; i++) diff |= (unsigned char)(want[i] ^ cd[i]);
+                if (diff == 0) match = t;     /* no early exit: constant time */
+            }
+        }
+        if (sec) memset(sec, 0, strlen(sec));
+        free(sec);
+        free(cd);
+        step = strada_new_int(match);
+    }
+    return $step;
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+my str $g_tm_user = "";
+my str $g_tm_pass = "";           # plain password, or
+my str $g_tm_hash = "";           # crypt(3) hash (openssl passwd -6)
+my str $g_tm_dir = "";            # private state directory
+my str $g_tm_static = "";         # directory with index.html, app.js, xterm.js ...
+my str $g_tm_shell = "";          # "" = the user's login shell
+my int $g_tm_max_sessions = 32;
+my int $g_tm_idle = 0;            # kill sessions nobody is attached to for N seconds (0 = never)
+my int $g_tm_login_ttl = 604800;  # login lifetime in seconds (7 days)
+my str $g_tm_totp = "";           # base32 secret: sign-in also needs a 6-digit code
+my int $g_tm_max_download = 268435456;   # largest file the browser may fetch (256MB)
+my int $g_tm_ready = 0;
+my str $g_tm_version = "1";
+
+func tm_trim(str $s) str {
+    my int $a = 0;
+    my int $b = length($s);
+    while ($a < $b && (substr($s, $a, 1) eq " " || substr($s, $a, 1) eq "\t" || substr($s, $a, 1) eq "\r")) { $a = $a + 1; }
+    while ($b > $a && (substr($s, $b - 1, 1) eq " " || substr($s, $b - 1, 1) eq "\t" || substr($s, $b - 1, 1) eq "\r")) { $b = $b - 1; }
+    return substr($s, $a, $b - $a);
+}
+
+func tm_set_option(str $key, str $value) void {
+    my str $k = lc(tm_trim($key));
+    my str $v = tm_trim($value);
+    if (length($v) >= 2 && ((substr($v, 0, 1) eq "\"" && substr($v, length($v) - 1, 1) eq "\"")
+                            || (substr($v, 0, 1) eq "'" && substr($v, length($v) - 1, 1) eq "'"))) {
+        $v = substr($v, 1, length($v) - 2);
+    }
+    if ($k eq "user" || $k eq "username") { $g_tm_user = $v; }
+    elsif ($k eq "password" || $k eq "pass") { $g_tm_pass = $v; $g_tm_hash = ""; }
+    elsif ($k eq "password_hash") { $g_tm_hash = $v; $g_tm_pass = ""; }
+    elsif ($k eq "dir" || $k eq "state_dir") { $g_tm_dir = $v; }
+    elsif ($k eq "static" || $k eq "static_dir") { $g_tm_static = $v; }
+    elsif ($k eq "shell") { $g_tm_shell = $v; }
+    elsif ($k eq "max_sessions") { $g_tm_max_sessions = $v + 0; }
+    elsif ($k eq "idle_timeout") { $g_tm_idle = $v + 0; }
+    elsif ($k eq "login_ttl") { $g_tm_login_ttl = $v + 0; }
+    elsif ($k eq "totp_secret" || $k eq "totp") { $g_tm_totp = $v; }
+    elsif ($k eq "max_download") { $g_tm_max_download = $v + 0; }
+}
+
+# key = value lines; "#" comments; an optional [terminale] header is ignored
+func tm_load_config_file(str $path) int {
+    if (!core::is_file($path)) {
+        say("terminale: configuration file not found: " . $path);
+        return 0;
+    }
+    foreach my str $raw (split("\n", slurp($path))) {
+        my str $line = tm_trim($raw);
+        if (length($line) == 0 || substr($line, 0, 1) eq "#" || substr($line, 0, 1) eq "[") { next; }
+        my int $eq = index($line, "=");
+        if ($eq > 0) {
+            tm_set_option(substr($line, 0, $eq), substr($line, $eq + 1, length($line) - $eq - 1));
+        }
+    }
+    return 1;
+}
+
+# Called once by Cannoli in the master process with the text after
+# "terminale.so:" -- "key=value;key=value". Returns 0 to refuse loading.
+func cannoli_init(str $config) int {
+    my str $config_file = "";
+    foreach my str $pair (split(";", $config)) {
+        my int $eq = index($pair, "=");
+        if ($eq <= 0) { next; }
+        my str $k = lc(tm_trim(substr($pair, 0, $eq)));
+        my str $v = substr($pair, $eq + 1, length($pair) - $eq - 1);
+        if ($k eq "config") { $config_file = tm_trim($v); }
+    }
+    # 1. the config file, 2. options on the -l line, 3. the environment
+    if (length($config_file) > 0 && tm_load_config_file($config_file) == 0) {
+        return 0;
+    }
+    foreach my str $pair (split(";", $config)) {
+        my int $eq = index($pair, "=");
+        if ($eq > 0) {
+            tm_set_option(substr($pair, 0, $eq), substr($pair, $eq + 1, length($pair) - $eq - 1));
+        }
+    }
+    my str $env_user = core::getenv("TERMINALE_USER");
+    my str $env_pass = core::getenv("TERMINALE_PASSWORD");
+    my str $env_hash = core::getenv("TERMINALE_PASSWORD_HASH");
+    if (defined($env_user) && length($env_user) > 0) { $g_tm_user = $env_user; }
+    if (defined($env_hash) && length($env_hash) > 0) { $g_tm_hash = $env_hash; $g_tm_pass = ""; }
+    if (defined($env_pass) && length($env_pass) > 0) { $g_tm_pass = $env_pass; $g_tm_hash = ""; }
+    # keep the secret out of the workers' and the shells' environment
+    tm_unsetenv("TERMINALE_PASSWORD");
+    tm_unsetenv("TERMINALE_PASSWORD_HASH");
+    my str $env_totp = core::getenv("TERMINALE_TOTP_SECRET");
+    if (defined($env_totp) && length($env_totp) > 0) { $g_tm_totp = $env_totp; }
+    tm_unsetenv("TERMINALE_TOTP_SECRET");
+    if (length($g_tm_totp) > 0 && length(join("", split("[ =-]", $g_tm_totp))) < 16) {
+        say("terminale: totp_secret must be at least 16 base32 characters (run ./totp-setup.sh)");
+        return 0;
+    }
+
+    if (length($g_tm_user) == 0 || (length($g_tm_pass) == 0 && length($g_tm_hash) == 0)) {
+        say("terminale: refusing to start without a username and a password");
+        say("terminale: set user/password (or password_hash) in the config file, on the -l line,");
+        say("terminale: or in TERMINALE_USER / TERMINALE_PASSWORD");
+        return 0;
+    }
+    if (length($g_tm_dir) == 0) {
+        $g_tm_dir = tm_home_dir() . "/.terminale";
+    }
+    if (tm_private_dir($g_tm_dir) == 0 || tm_private_dir($g_tm_dir . "/sessions") == 0
+        || tm_private_dir($g_tm_dir . "/auth") == 0) {
+        say("terminale: " . $g_tm_dir . " must be a private directory owned by " . tm_user_name());
+        return 0;
+    }
+    if (length($g_tm_static) == 0) {
+        foreach my str $cand ("terminale/static", "static") {
+            if (length($g_tm_static) == 0 && core::is_file($cand . "/index.html")) { $g_tm_static = $cand; }
+        }
+    }
+    if (length($g_tm_static) == 0 || !core::is_file($g_tm_static . "/index.html") || !core::is_file($g_tm_static . "/xterm.js")) {
+        say("terminale: static files not found (set static=/path/to/terminale/static)");
+        return 0;
+    }
+    $g_tm_static = core::realpath($g_tm_static);
+    if ($g_tm_max_sessions < 1) { $g_tm_max_sessions = 1; }
+    if ($g_tm_login_ttl < 60) { $g_tm_login_ttl = 60; }
+    $g_tm_version = "" . core::file_mtime($g_tm_static . "/app.js");
+    $g_tm_ready = 1;
+    say("terminale: web terminal for user '" . tm_user_name() . "', login '" . $g_tm_user . "'"
+        . (length($g_tm_totp) > 0 ? " + one-time code" : "") . ", state in " . $g_tm_dir);
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# Responses
+# ---------------------------------------------------------------------------
+
+func tm_resp(int $status, str $ctype, str $body, str $extra = "") str {
+    my str $h = "Content-Type:" . $ctype . "\n"
+              . "X-Content-Type-Options:nosniff\n"
+              . "X-Frame-Options:DENY\n"
+              . "Referrer-Policy:no-referrer\n"
+              . $extra;
+    if (index($extra, "Cache-Control:") < 0) { $h = $h . "Cache-Control:no-store\n"; }
+    return "RESPONSE:" . $status . ":" . core::byte_length($h) . ":" . $h . ":" . $body;
+}
+
+func tm_json(int $status, str $json) str {
+    return tm_resp($status, "application/json", $json);
+}
+
+func tm_cookie_value(scalar $c, str $name) str {
+    my str $hdr = $c->header("Cookie");
+    foreach my str $part (split(";", $hdr)) {
+        my str $p = tm_trim($part);
+        my int $eq = index($p, "=");
+        if ($eq > 0 && substr($p, 0, $eq) eq $name) {
+            return substr($p, $eq + 1, length($p) - $eq - 1);
+        }
+    }
+    return "";
+}
+
+# State-changing requests from a browser must come from our own pages.
+func tm_origin_ok(scalar $c) int {
+    my str $origin = $c->header("Origin");
+    if (length($origin) == 0) { return 1; }   # not a browser cross-site request
+    my int $sep = index($origin, "://");
+    if ($sep < 0) { return 0; }
+    my str $ohost = lc(substr($origin, $sep + 3, length($origin) - $sep - 3));
+    my str $host = lc($c->header("Host"));
+    if ($ohost eq $host || $ohost . ":80" eq $host || $ohost . ":443" eq $host
+        || $host . ":80" eq $ohost || $host . ":443" eq $ohost) {
+        return 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+func tm_is_hex(str $s, int $len) int {
+    if (length($s) != $len) { return 0; }
+    return ($s =~ /^[0-9a-f]+$/) ? 1 : 0;
+}
+
+func tm_token(scalar $c) str {
+    my str $token = tm_cookie_value($c, "terminale_auth");
+    if (tm_is_hex($token, 64) == 0) { return ""; }
+    return $token;
+}
+
+# A sign-in is a file t_<token>: expiry, created, address, browser (one per line)
+func tm_token_fields(str $file) array {
+    my array @f = split("\n", slurp($file));
+    while (scalar(@f) < 4) { push(@f, ""); }
+    return @f;
+}
+
+func tm_authed(scalar $c) int {
+    my str $token = tm_token($c);
+    if (length($token) == 0) { return 0; }
+    my str $file = $g_tm_dir . "/auth/t_" . $token;
+    if (!core::is_file($file)) { return 0; }
+    my array @f = tm_token_fields($file);
+    if (($f[0] + 0) < core::time()) {
+        core::unlink($file);
+        return 0;
+    }
+    return 1;
+}
+
+# printable, single-line, bounded: safe for the log and for JSON
+func tm_clean(str $s, int $max) str {
+    my str $out = "";
+    my int $i = 0;
+    my int $n = length($s);
+    while ($i < $n && $i < $max) {
+        my str $ch = substr($s, $i, 1);
+        if (ord($ch) < 32 || ord($ch) == 127) { $out = $out . " "; } else { $out = $out . $ch; }
+        $i = $i + 1;
+    }
+    return $out;
+}
+
+func tm_log_login(scalar $c, str $result) void {
+    my scalar $fh = core::open($g_tm_dir . "/auth/login.log", "a");
+    if (defined($fh)) {
+        core::fwrite($fh, core::time() . "\t" . tm_clean($c->remote_addr(), 64) . "\t" . $result . "\t"
+                          . tm_clean($c->header("User-Agent"), 200) . "\n");
+        core::close($fh);
+    }
+}
+
+# Remove expired sign-ins and stale lockout counters; keep the log bounded.
+func tm_sweep() void {
+    my int $now = core::time();
+    my str $dir = $g_tm_dir . "/auth";
+    foreach my str $name (split("\n", tm_list_dir($dir, "t_"))) {
+        if (length($name) != 66) { next; }
+        my array @f = tm_token_fields($dir . "/" . $name);
+        if (($f[0] + 0) < $now) { core::unlink($dir . "/" . $name); }
+    }
+    foreach my str $name (split("\n", tm_list_dir($dir, "fail_"))) {
+        if ($now - core::file_mtime($dir . "/" . $name) > 600) { core::unlink($dir . "/" . $name); }
+    }
+    my str $log = $dir . "/login.log";
+    if (core::is_file($log) && core::file_size($log) > 262144) {
+        my array @lines = split("\n", slurp($log));
+        my int $keep = scalar(@lines) > 500 ? scalar(@lines) - 500 : 0;
+        my str $tail = "";
+        while ($keep < scalar(@lines)) { $tail = $tail . $lines[$keep] . "\n"; $keep = $keep + 1; }
+        spew($log, $tail);
+    }
+}
+
+my int $g_tm_proxy_warned = 0;
+
+func tm_fail_file(scalar $c) str {
+    my str $ip = $c->remote_addr();
+    my str $safe = "";
+    my int $i = 0;
+    while ($i < length($ip) && $i < 64) {
+        my str $ch = substr($ip, $i, 1);
+        if ($ch =~ /^[0-9A-Za-z]$/) { $safe = $safe . $ch; } else { $safe = $safe . "_"; }
+        $i = $i + 1;
+    }
+    return $g_tm_dir . "/auth/fail_" . $safe;
+}
+
+# Seconds this client is still locked out (5 failures in 5 minutes)
+func tm_locked_for(scalar $c) int {
+    my str $file = tm_fail_file($c);
+    if (!core::is_file($file)) { return 0; }
+    my array @p = split(" ", tm_trim(slurp($file)));
+    if (scalar(@p) < 2) { return 0; }
+    my int $count = $p[0] + 0;
+    my int $first = $p[1] + 0;
+    my int $now = core::time();
+    if ($now - $first > 300) {
+        core::unlink($file);
+        return 0;
+    }
+    if ($count >= 5) { return 300 - ($now - $first); }
+    return 0;
+}
+
+func tm_note_failure(scalar $c) void {
+    my str $file = tm_fail_file($c);
+    my int $count = 0;
+    my int $first = core::time();
+    if (core::is_file($file)) {
+        my array @p = split(" ", tm_trim(slurp($file)));
+        if (scalar(@p) >= 2 && core::time() - ($p[1] + 0) <= 300) {
+            $count = $p[0] + 0;
+            $first = $p[1] + 0;
+        }
+    }
+    spew($file, ($count + 1) . " " . $first . "\n");
+}
+
+func tm_login(scalar $c) str {
+    if (tm_origin_ok($c) == 0) { return tm_json(403, "{\"error\":\"bad origin\"}"); }
+    # Behind a reverse proxy every client appears to come from the proxy
+    # unless Cannoli is told to trust it: one attacker could then lock
+    # everybody out. Say so once.
+    if ($g_tm_proxy_warned == 0 && length($c->header("X-Forwarded-For")) > 0
+        && ($c->remote_addr() eq "127.0.0.1" || $c->remote_addr() eq "::1")) {
+        $g_tm_proxy_warned = 1;
+        say(STDERR, "terminale: requests arrive through a proxy but the client address is the proxy's; "
+                    . "set server.trusted_proxies in Cannoli's config so the login lockout is per client");
+    }
+    my int $locked = tm_locked_for($c);
+    if ($locked > 0) {
+        tm_log_login($c, "locked");
+        return tm_resp(429, "application/json", "{\"error\":\"Too many failed attempts. Try again in " . $locked . " seconds.\"}",
+                       "Retry-After:" . $locked . "\n");
+    }
+    my str $user = $c->param("username");
+    my str $pass = $c->param("password");
+    # evaluate every check whatever the username, so timing says nothing
+    my int $user_ok = tm_ct_eq($user, $g_tm_user);
+    my int $pass_ok = 0;
+    if (length($g_tm_hash) > 0) {
+        $pass_ok = tm_crypt_check($pass, $g_tm_hash);
+    } else {
+        $pass_ok = tm_ct_eq($pass, $g_tm_pass);
+    }
+    my int $code_ok = 1;
+    my int $step = 0;
+    if (length($g_tm_totp) > 0) {
+        $step = tm_totp_step($g_tm_totp, tm_trim($c->param("code")));
+        $code_ok = $step > 0 ? 1 : 0;
+        # a code works once: remember the newest step used
+        my str $last_file = $g_tm_dir . "/auth/totp_last";
+        if ($code_ok == 1 && core::is_file($last_file) && (tm_trim(slurp($last_file)) + 0) >= $step) { $code_ok = 0; }
+    }
+    if ($user_ok != 1 || $pass_ok != 1 || length($pass) == 0 || $code_ok != 1) {
+        tm_note_failure($c);
+        tm_log_login($c, ($user_ok == 1 && $pass_ok == 1) ? "bad-code" : "failed");
+        return tm_json(401, length($g_tm_totp) > 0 ? "{\"error\":\"Wrong username, password or code.\"}"
+                                                    : "{\"error\":\"Wrong username or password.\"}");
+    }
+    if ($step > 0) { spew($g_tm_dir . "/auth/totp_last", $step . "\n"); }
+    core::unlink(tm_fail_file($c));
+    my str $token = tm_random_hex(32);
+    if (tm_is_hex($token, 64) == 0) { return tm_json(500, "{\"error\":\"no entropy\"}"); }
+    my int $now = core::time();
+    spew($g_tm_dir . "/auth/t_" . $token, ($now + $g_tm_login_ttl) . "\n" . $now . "\n" . tm_clean($c->remote_addr(), 64) . "\n"
+                                           . tm_clean($c->header("User-Agent"), 200) . "\n");
+    core::chmod($g_tm_dir . "/auth/t_" . $token, 384);   # 0600
+    tm_log_login($c, "ok");
+    tm_sweep();
+    my str $cookie = "Set-Cookie:terminale_auth=" . $token . "; Path=/; Max-Age=" . $g_tm_login_ttl . "; HttpOnly; SameSite=Strict";
+    if ($c->is_secure() == 1) { $cookie = $cookie . "; Secure"; }
+    return tm_resp(200, "application/json", "{\"ok\":true}", $cookie . "\n");
+}
+
+# Who is signed in, and the recent sign-in attempts
+func tm_list_logins(scalar $c) str {
+    my str $mine = tm_token($c);
+    my str $dir = $g_tm_dir . "/auth";
+    my int $now = core::time();
+    my str $active = "";
+    foreach my str $name (split("\n", tm_list_dir($dir, "t_"))) {
+        if (length($name) != 66) { next; }
+        my array @f = tm_token_fields($dir . "/" . $name);
+        if (($f[0] + 0) < $now) { next; }
+        if (length($active) > 0) { $active = $active . ","; }
+        # the id is a prefix of the token: enough to pick one, useless to steal it
+        $active = $active . "{\"id\":\"" . substr($name, 2, 12) . "\",\"created\":" . ($f[1] + 0) . ",\"expires\":" . ($f[0] + 0)
+                . ",\"address\":\"" . tm_json_escape($f[2]) . "\",\"browser\":\"" . tm_json_escape($f[3]) . "\",\"current\":"
+                . (("t_" . $mine) eq $name ? "true" : "false") . "}";
+    }
+    my str $recent = "";
+    my str $log = $dir . "/login.log";
+    if (core::is_file($log)) {
+        my array @lines = split("\n", slurp($log));
+        my int $i = scalar(@lines) - 1;
+        my int $shown = 0;
+        while ($i >= 0 && $shown < 25) {
+            my array @f = split("\t", $lines[$i]);
+            if (scalar(@f) >= 3) {
+                if ($shown > 0) { $recent = $recent . ","; }
+                $recent = $recent . "{\"time\":" . ($f[0] + 0) . ",\"address\":\"" . tm_json_escape($f[1]) . "\",\"result\":\""
+                        . tm_json_escape($f[2]) . "\",\"browser\":\"" . tm_json_escape(scalar(@f) >= 4 ? $f[3] : "") . "\"}";
+                $shown = $shown + 1;
+            }
+            $i = $i - 1;
+        }
+    }
+    return tm_json(200, "{\"totp\":" . (length($g_tm_totp) > 0 ? "true" : "false") . ",\"active\":[" . $active . "],\"recent\":[" . $recent . "]}");
+}
+
+# Sign out one browser (id=...) or every browser but this one (others=1)
+func tm_revoke_logins(scalar $c) str {
+    if (tm_origin_ok($c) == 0) { return tm_json(403, "{\"error\":\"bad origin\"}"); }
+    my str $mine = tm_token($c);
+    my str $id = $c->param("id");
+    my int $others = $c->param("others") eq "1" ? 1 : 0;
+    if ($others == 0 && tm_is_hex($id, 12) == 0) { return tm_json(400, "{\"error\":\"bad id\"}"); }
+    my str $dir = $g_tm_dir . "/auth";
+    my int $n = 0;
+    foreach my str $name (split("\n", tm_list_dir($dir, "t_"))) {
+        if (length($name) != 66) { next; }
+        my int $hit = 0;
+        if ($others == 1 && ("t_" . $mine) ne $name) { $hit = 1; }
+        if ($others == 0 && substr($name, 2, 12) eq $id) { $hit = 1; }
+        if ($hit == 1) { core::unlink($dir . "/" . $name); $n = $n + 1; }
+    }
+    return tm_json(200, "{\"ok\":true,\"revoked\":" . $n . "}");
+}
+
+func tm_logout(scalar $c) str {
+    if (tm_origin_ok($c) == 0) { return tm_json(403, "{\"error\":\"bad origin\"}"); }
+    my str $token = tm_cookie_value($c, "terminale_auth");
+    if (tm_is_hex($token, 64) == 1) {
+        core::unlink($g_tm_dir . "/auth/t_" . $token);
+    }
+    return tm_resp(200, "application/json", "{\"ok\":true}",
+                   "Set-Cookie:terminale_auth=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\n");
+}
+
+# ---------------------------------------------------------------------------
+# Sessions
+# ---------------------------------------------------------------------------
+
+func tm_sock_path(str $id) str {
+    return $g_tm_dir . "/sessions/s_" . $id . ".sock";
+}
+
+# Ask a session host for its metadata: "created\tcols\trows\tclients\ttitle",
+# or "" if it is gone (its stale socket is then removed).
+func tm_query(str $id) str {
+    my str $path = tm_sock_path($id);
+    my int $fd = tm_connect($path);
+    if ($fd < 0) {
+        core::unlink($path);
+        return "";
+    }
+    my str $meta = "";
+    if (tm_send_frame($fd, "Q", "") == 1) {
+        my str $buf = "";
+        my int $tries = 0;
+        while ($tries < 400 && length($meta) == 0) {
+            if (tm_poll($fd, 500) == 0) { last; }
+            my scalar $d = tm_recv($fd);
+            if (!defined($d)) { next; }
+            if (core::byte_length($d) == 0) { last; }
+            $buf = $buf . $d;
+            # skip the attach marker and scrollback frames until the M reply
+            while (core::byte_length($buf) >= 5) {
+                my int $len = (core::get_byte($buf, 1) % 256) * 16777216 + (core::get_byte($buf, 2) % 256) * 65536
+                            + (core::get_byte($buf, 3) % 256) * 256 + (core::get_byte($buf, 4) % 256);
+                if (core::byte_length($buf) < 5 + $len) { last; }
+                if (core::byte_substr($buf, 0, 1) eq "M") {
+                    $meta = core::byte_substr($buf, 5, $len);
+                    if (length($meta) == 0) { $meta = "0\t80\t24\t0\t\t"; }
+                    last;
+                }
+                $buf = core::byte_substr($buf, 5 + $len, core::byte_length($buf) - 5 - $len);
+            }
+            $tries = $tries + 1;
+        }
+    }
+    tm_close($fd);
+    return $meta;
+}
+
+func tm_session_json(str $id, str $meta) str {
+    my array @f = split("\t", $meta);
+    my str $cwd = scalar(@f) >= 5 ? $f[4] : "";
+    my str $title = scalar(@f) >= 6 ? $f[5] : "";
+    return "{\"id\":\"" . $id . "\",\"created\":" . ($f[0] + 0) . ",\"cols\":" . ($f[1] + 0) . ",\"rows\":" . ($f[2] + 0)
+         . ",\"clients\":" . ($f[3] + 0) . ",\"cwd\":\"" . tm_json_escape($cwd) . "\",\"title\":\"" . tm_json_escape($title) . "\"}";
+}
+
+func tm_live_ids() array {
+    my array @ids = ();
+    foreach my str $id (split("\n", tm_list_ids($g_tm_dir . "/sessions"))) {
+        if (tm_is_hex($id, 16) == 1) { push(@ids, $id); }
+    }
+    return @ids;
+}
+
+func tm_list_sessions() str {
+    my str $out = "";
+    foreach my str $id (tm_live_ids()) {
+        my str $meta = tm_query($id);
+        if (length($meta) > 0) {
+            if (length($out) > 0) { $out = $out . ","; }
+            $out = $out . tm_session_json($id, $meta);
+        }
+    }
+    return tm_json(200, "{\"user\":\"" . tm_json_escape(tm_user_name()) . "\",\"sessions\":[" . $out . "]}");
+}
+
+func tm_create_session(scalar $c) str {
+    if (tm_origin_ok($c) == 0) { return tm_json(403, "{\"error\":\"bad origin\"}"); }
+    my int $live = 0;
+    foreach my str $id (tm_live_ids()) {
+        if (length(tm_query($id)) > 0) { $live = $live + 1; }
+    }
+    if ($live >= $g_tm_max_sessions) {
+        return tm_json(429, "{\"error\":\"Session limit reached (" . $g_tm_max_sessions . ").\"}");
+    }
+    my int $cols = $c->param("cols") + 0;
+    my int $rows = $c->param("rows") + 0;
+    if ($cols < 2 || $cols > 1000) { $cols = 80; }
+    if ($rows < 1 || $rows > 500) { $rows = 24; }
+    my str $id = tm_random_hex(8);
+    if (tm_is_hex($id, 16) == 0) { return tm_json(500, "{\"error\":\"no entropy\"}"); }
+    if (tm_spawn(tm_sock_path($id), $cols, $rows, $g_tm_shell, $g_tm_idle) != 1) {
+        return tm_json(500, "{\"error\":\"Could not start a shell.\"}");
+    }
+    return tm_json(200, tm_session_json($id, core::time() . "\t" . $cols . "\t" . $rows . "\t0\t" . tm_home_dir() . "\tshell"));
+}
+
+func tm_kill_session(scalar $c, str $id) str {
+    if (tm_origin_ok($c) == 0) { return tm_json(403, "{\"error\":\"bad origin\"}"); }
+    my int $fd = tm_connect(tm_sock_path($id));
+    if ($fd < 0) { return tm_json(404, "{\"error\":\"no such session\"}"); }
+    tm_send_frame($fd, "K", "");
+    tm_close($fd);
+    return tm_json(200, "{\"ok\":true}");
+}
+
+# ---------------------------------------------------------------------------
+# Files: browse, download and upload, as the user the shells run as. Paths
+# are absolute, or relative to the session's current directory.
+# ---------------------------------------------------------------------------
+
+func tm_session_cwd_of(str $id) str {
+    if (tm_is_hex($id, 16) == 1) {
+        my array @f = split("\t", tm_query($id));
+        if (scalar(@f) >= 5 && length($f[4]) > 0) { return $f[4]; }
+    }
+    return tm_home_dir();
+}
+
+func tm_resolve_path(scalar $c) str {
+    my str $path = $c->param("path");
+    if (length($path) == 0 || substr($path, 0, 1) ne "/") {
+        my str $base = tm_session_cwd_of($c->param("session"));
+        $path = length($path) > 0 ? $base . "/" . $path : $base;
+    }
+    my str $real = core::realpath($path);
+    if (!defined($real) || length($real) == 0) { return ""; }
+    return $real;
+}
+
+func tm_list_path(scalar $c) str {
+    my str $dir = tm_resolve_path($c);
+    if (length($dir) == 0 || !core::is_dir($dir)) { return tm_json(404, "{\"error\":\"No such directory.\"}"); }
+    my scalar $raw = tm_list_files($dir);
+    if (!defined($raw)) { return tm_json(403, "{\"error\":\"Cannot read that directory.\"}"); }
+    my str $out = "";
+    foreach my str $line (split("\n", $raw)) {
+        my array @f = split("\t", $line);
+        if (scalar(@f) < 4) { next; }
+        if (length($out) > 0) { $out = $out . ","; }
+        $out = $out . "{\"name\":\"" . tm_json_escape($f[3]) . "\",\"dir\":" . ($f[0] eq "d" ? "true" : "false")
+             . ",\"size\":" . ($f[1] + 0) . ",\"mtime\":" . ($f[2] + 0) . "}";
+    }
+    return tm_json(200, "{\"path\":\"" . tm_json_escape($dir) . "\",\"entries\":[" . $out . "]}");
+}
+
+func tm_download(scalar $c) str {
+    my str $file = tm_resolve_path($c);
+    if (length($file) == 0 || !core::is_file($file)) { return tm_json(404, "{\"error\":\"No such file.\"}"); }
+    my int $size = core::file_size($file);
+    if ($size > $g_tm_max_download) {
+        return tm_json(413, "{\"error\":\"File is larger than the download limit (" . $g_tm_max_download . " bytes).\"}");
+    }
+    my scalar $fh = core::open($file, "r");
+    if (!defined($fh)) { return tm_json(403, "{\"error\":\"Cannot read that file.\"}"); }
+    core::close($fh);
+    # plain ASCII name, plus the real one percent-encoded (RFC 6266)
+    my str $base = $file;
+    my array @parts = split("/", $file);
+    if (scalar(@parts) > 0) { $base = $parts[scalar(@parts) - 1]; }
+    my str $ascii = "";
+    my str $encoded = "";
+    my int $i = 0;
+    my int $n = core::byte_length($base);
+    while ($i < $n) {
+        my int $b = core::get_byte($base, $i) % 256;
+        if (($b >= 48 && $b <= 57) || ($b >= 65 && $b <= 90) || ($b >= 97 && $b <= 122) || $b == 45 || $b == 46 || $b == 95) {
+            $ascii = $ascii . core::byte($b);
+            $encoded = $encoded . core::byte($b);
+        } else {
+            $ascii = $ascii . "_";
+            $encoded = $encoded . sprintf("%%%02X", $b);
+        }
+        $i = $i + 1;
+    }
+    return tm_resp(200, "application/octet-stream", slurp($file),
+                   "Content-Disposition:attachment; filename=\"" . $ascii . "\"; filename*=UTF-8''" . $encoded . "\n");
+}
+
+func tm_upload(scalar $c) str {
+    if (tm_origin_ok($c) == 0) { return tm_json(403, "{\"error\":\"bad origin\"}"); }
+    if ($c->has_file("file") != 1) { return tm_json(400, "{\"error\":\"No file in the request.\"}"); }
+    my str $dir = tm_resolve_path($c);
+    if (length($dir) == 0 || !core::is_dir($dir)) { return tm_json(404, "{\"error\":\"No such directory.\"}"); }
+    # keep only the last path component of whatever name the browser sent
+    my str $name = $c->file_name("file");
+    my array @parts = split("[/\\\\]", $name);
+    $name = scalar(@parts) > 0 ? tm_clean($parts[scalar(@parts) - 1], 200) : "";
+    if (length($name) == 0 || $name eq "." || $name eq "..") { $name = "upload"; }
+    my str $target = $dir . "/" . $name;
+    my int $k = 1;
+    while ((core::is_file($target) || core::is_dir($target)) && $k < 1000) {
+        my int $dot = -1;
+        my int $j = length($name) - 1;
+        while ($j > 0) { if (substr($name, $j, 1) eq ".") { $dot = $j; last; } $j = $j - 1; }
+        if ($dot > 0) { $target = $dir . "/" . substr($name, 0, $dot) . " (" . $k . ")" . substr($name, $dot, length($name) - $dot); }
+        else { $target = $dir . "/" . $name . " (" . $k . ")"; }
+        $k = $k + 1;
+    }
+    my str $data = $c->file_content("file");
+    spew($target, $data);
+    if (!core::is_file($target) || core::file_size($target) != core::byte_length($data)) {
+        core::unlink($target);
+        return tm_json(500, "{\"error\":\"Could not write the file (permissions or disk space).\"}");
+    }
+    return tm_json(200, "{\"ok\":true,\"path\":\"" . tm_json_escape($target) . "\",\"size\":" . core::byte_length($data) . "}");
+}
+
+# ---------------------------------------------------------------------------
+# Settings (theme, font, ...): one JSON file, so they follow the user to any
+# browser. The browser owns the format; the server only stores it.
+# ---------------------------------------------------------------------------
+
+func tm_get_settings() str {
+    my str $file = $g_tm_dir . "/settings.json";
+    if (!core::is_file($file)) { return tm_json(200, "{}"); }
+    my str $json = tm_trim(slurp($file));
+    if (length($json) < 2 || substr($json, 0, 1) ne "{") { $json = "{}"; }
+    return tm_json(200, $json);
+}
+
+func tm_save_settings(scalar $c) str {
+    if (tm_origin_ok($c) == 0) { return tm_json(403, "{\"error\":\"bad origin\"}"); }
+    my str $json = tm_trim($c->param("settings"));
+    my int $n = core::byte_length($json);
+    if ($n < 2 || $n > 16384 || substr($json, 0, 1) ne "{" || substr($json, length($json) - 1, 1) ne "}"
+        || !defined(Cannoli::Request::json_parse($json))) {
+        return tm_json(400, "{\"error\":\"invalid settings\"}");
+    }
+    my str $file = $g_tm_dir . "/settings.json";
+    my str $tmp = $file . ".tmp." . core::getpid();
+    spew($tmp, $json . "\n");
+    core::chmod($tmp, 384);   # 0600
+    if (core::rename($tmp, $file) != 0) {
+        core::unlink($tmp);
+        return tm_json(500, "{\"error\":\"could not save settings\"}");
+    }
+    return tm_json(200, "{\"ok\":true}");
+}
+
+# ---------------------------------------------------------------------------
+# WebSocket <-> session host relay
+#
+# Browser messages are binary: one type byte + payload.
+#   to the host:  I input, R "cols rows", T title, K kill
+#   flow control: P pause output, p resume (the browser's terminal is behind)
+# Host frames are forwarded as type byte + payload: S attach, O output, X exit.
+# One wait covers both directions (an epoll fd over the two sockets), parking
+# the green task in loop workers and polling in classic workers.
+# ---------------------------------------------------------------------------
+
+# Has this worker been asked to finish (recycling, reload, shutdown)? Then
+# the relay closes with 1012 "service restart": the browser reconnects at
+# once to another worker and the session carries on. (Older Cannoli has no
+# worker_draining(); then terminals simply keep their worker.)
+my int $g_tm_can_drain = 1;
+
+func tm_draining(scalar $c) int {
+    if ($g_tm_can_drain == 0) { return 0; }
+    my int $d = 0;
+    try {
+        $d = $c->worker_draining();
+    } catch ($e) {
+        $g_tm_can_drain = 0;
+    }
+    return $d;
+}
+
+func tm_wait(int $ep, int $ms) void {
+    my int $r = core::coro_yield_io($ep, "r", $ms);
+    if ($r <= 0) {
+        tm_poll($ep, $ms);
+    }
+}
+
+func tm_attach(scalar $c, str $id) str {
+    if (tm_origin_ok($c) == 0) {
+        return tm_json(403, "{\"error\":\"bad origin\"}");
+    }
+    my int $hfd = tm_connect(tm_sock_path($id));
+    if ($hfd < 0) {
+        return tm_json(404, "{\"error\":\"no such session\"}");
+    }
+    my scalar $ws = $c->ws_accept("", "");   # same-origin browsers only
+    if (!defined($ws)) {
+        tm_close($hfd);
+        return tm_json(400, "{\"error\":\"WebSocket upgrade refused\"}");
+    }
+    $c->ws_max_message(300000);
+
+    my int $cfd = (exists(%{$c}, "_ssl") && $c->{"_ssl"} == 1) ? $c->{"_ssl_fd"} : $c->{"_fd"};
+    my int $ep = tm_ep_new($cfd, $hfd);
+    my str $hbuf = "";
+    my int $paused = 0;
+    my int $alive = 1;
+    my int $last_ping = core::mono_ms();
+    my int $close_code = 1000;
+
+    while ($alive == 1 && $ep >= 0) {
+        # browser -> host
+        while ($alive == 1 && (core::byte_length($ws->{"_buffer"}) > 0 || tm_poll($cfd, 0) == 1)) {
+            my scalar $m = $c->ws_recv();
+            if (!defined($m)) { $alive = 0; last; }
+            my str $data = $m->{"data"};
+            my int $dl = core::byte_length($data);
+            if ($dl < 1) { next; }
+            my str $t = core::byte_substr($data, 0, 1);
+            if ($t eq "P") {
+                if ($paused == 0) { $paused = 1; tm_ep_set($ep, $hfd, 0); }
+            } elsif ($t eq "p") {
+                if ($paused == 1) { $paused = 0; tm_ep_set($ep, $hfd, 1); }
+            } elsif ($t eq "I" || $t eq "R" || $t eq "T" || $t eq "K") {
+                if (tm_send_frame($hfd, $t, core::byte_substr($data, 1, $dl - 1)) != 1) { $alive = 0; }
+            }
+        }
+
+        # host -> browser
+        my int $rounds = 0;
+        while ($alive == 1 && $paused == 0 && $rounds < 8) {
+            my scalar $d = tm_recv($hfd);
+            if (!defined($d)) { last; }
+            if (core::byte_length($d) == 0) {
+                $c->ws_send_binary("X-1");   # the host vanished
+                $alive = 0;
+                last;
+            }
+            $hbuf = $hbuf . $d;
+            my int $off = 0;
+            my int $have = core::byte_length($hbuf);
+            while ($have - $off >= 5) {
+                my int $len = (core::get_byte($hbuf, $off + 1) % 256) * 16777216 + (core::get_byte($hbuf, $off + 2) % 256) * 65536
+                            + (core::get_byte($hbuf, $off + 3) % 256) * 256 + (core::get_byte($hbuf, $off + 4) % 256);
+                if ($have - $off < 5 + $len) { last; }
+                my str $type = core::byte_substr($hbuf, $off, 1);
+                if ($c->ws_send_binary($type . core::byte_substr($hbuf, $off + 5, $len)) < 0) { $alive = 0; last; }
+                if ($type eq "X") { $alive = 0; last; }
+                $off = $off + 5 + $len;
+            }
+            if ($off > 0) { $hbuf = core::byte_substr($hbuf, $off, $have - $off); }
+            $rounds = $rounds + 1;
+        }
+        if ($alive == 0) { last; }
+
+        # more already waiting? then don't sleep
+        if ($rounds >= 8) { next; }
+        tm_wait($ep, 5000);
+        if (tm_draining($c) == 1) { $close_code = 1012; last; }
+        if (core::mono_ms() - $last_ping > 20000) {
+            if ($c->ws_ping("") < 0) { $alive = 0; }
+            $last_ping = core::mono_ms();
+        }
+    }
+
+    tm_close($ep);
+    tm_close($hfd);
+    $c->ws_close($close_code, "");
+    return "x";
+}
+
+# ---------------------------------------------------------------------------
+# Static files and pages
+# ---------------------------------------------------------------------------
+
+func tm_static(scalar $c, str $name) str {
+    my str $ctype = "";
+    if ($name eq "xterm.js" || $name eq "addon-fit.js" || $name eq "addon-webgl.js" || $name eq "addon-web-links.js" || $name eq "app.js" || $name eq "themes.js" || $name eq "addon-search.js") {
+        $ctype = "text/javascript; charset=utf-8";
+    } elsif ($name eq "xterm.css" || $name eq "app.css") {
+        $ctype = "text/css; charset=utf-8";
+    } elsif ($name eq "favicon.svg") {
+        $ctype = "image/svg+xml";
+    } elsif ($name eq "manifest.webmanifest") {
+        $ctype = "application/manifest+json";
+    } else {
+        return "";
+    }
+    my str $file = $g_tm_static . "/" . $name;
+    if (!core::is_file($file)) { return ""; }
+    my str $extra = "Cache-Control:private, max-age=31536000, immutable\nVary:Accept-Encoding\n";
+    if (index(lc($c->header("Accept-Encoding")), "gzip") >= 0 && core::is_file($file . ".gz")
+        && core::file_mtime($file . ".gz") >= core::file_mtime($file)) {
+        return tm_resp(200, $ctype, slurp($file . ".gz"), $extra . "Content-Encoding:gzip\n");
+    }
+    return tm_resp(200, $ctype, slurp($file), $extra);
+}
+
+func tm_page(str $file) str {
+    my str $html = slurp($g_tm_static . "/" . $file);
+    $html = join($g_tm_version, split("\\{\\{v\\}\\}", $html));
+    $html = join(length($g_tm_totp) > 0 ? "" : "hidden", split("\\{\\{totp\\}\\}", $html));
+    my str $csp = "Content-Security-Policy:default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                . "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\n";
+    return tm_resp(200, "text/html; charset=utf-8", $html, $csp);
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+func cannoli_dispatch(scalar $c) str {
+    if ($g_tm_ready != 1) { return ""; }
+    my str $full = $c->path();
+    my str $p = $c->path_info();
+    if (length($p) == 0) { $p = $full; }
+    my str $method = $c->method();
+
+    # mounted under a prefix ("library./term = terminale.so"): the page uses
+    # relative URLs, so it must be opened with a trailing slash
+    if ($p eq "/" && substr($full, length($full) - 1, 1) ne "/") {
+        return tm_resp(302, "text/plain", "", "Location:" . $full . "/\n");
+    }
+
+    if ($p eq "/") {
+        if ($method ne "GET" && $method ne "HEAD") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:GET\n"); }
+        return tm_page(tm_authed($c) == 1 ? "index.html" : "login.html");
+    }
+    if ($p eq "/login") {
+        if ($method ne "POST") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:POST\n"); }
+        return tm_login($c);
+    }
+    if ($p eq "/logout") {
+        if ($method ne "POST") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:POST\n"); }
+        return tm_logout($c);
+    }
+    if (length($p) > 8 && substr($p, 0, 8) eq "/static/") {
+        my str $name = substr($p, 8, length($p) - 8);
+        # the login page needs its stylesheet and icon; the rest needs a login
+        if ($name ne "app.css" && $name ne "favicon.svg" && $name ne "login.js" && $name ne "manifest.webmanifest" && tm_authed($c) != 1) {
+            return tm_resp(401, "text/plain", "Unauthorized\n");
+        }
+        if ($name eq "login.js") {
+            if (!core::is_file($g_tm_static . "/login.js")) { return ""; }
+            return tm_resp(200, "text/javascript; charset=utf-8", slurp($g_tm_static . "/login.js"),
+                           "Cache-Control:private, max-age=31536000, immutable\n");
+        }
+        return tm_static($c, $name);
+    }
+
+    my int $is_api = (length($p) >= 5 && substr($p, 0, 5) eq "/api/") ? 1 : 0;
+    my int $is_ws = (length($p) > 4 && substr($p, 0, 4) eq "/ws/") ? 1 : 0;
+    if ($is_api == 0 && $is_ws == 0) { return ""; }
+    if (tm_authed($c) != 1) {
+        return tm_json(401, "{\"error\":\"not logged in\"}");
+    }
+
+    if ($p eq "/api/sessions") {
+        if ($method eq "GET") { return tm_list_sessions(); }
+        if ($method eq "POST") { return tm_create_session($c); }
+        return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:GET, POST\n");
+    }
+    if ($p eq "/api/logins") {
+        if ($method ne "GET") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:GET\n"); }
+        return tm_list_logins($c);
+    }
+    if ($p eq "/api/logins/revoke") {
+        if ($method ne "POST") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:POST\n"); }
+        return tm_revoke_logins($c);
+    }
+    if ($p eq "/api/files") {
+        if ($method ne "GET") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:GET\n"); }
+        return tm_list_path($c);
+    }
+    if ($p eq "/api/download") {
+        if ($method ne "GET") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:GET\n"); }
+        return tm_download($c);
+    }
+    if ($p eq "/api/upload") {
+        if ($method ne "POST") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:POST\n"); }
+        return tm_upload($c);
+    }
+    if ($p eq "/api/settings") {
+        if ($method eq "GET") { return tm_get_settings(); }
+        if ($method eq "POST") { return tm_save_settings($c); }
+        return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:GET, POST\n");
+    }
+    if ($p =~ /^\/api\/sessions\/([0-9a-f]{16})\/kill$/) {
+        my str $kid = $1;
+        if ($method ne "POST") { return tm_resp(405, "text/plain", "Method Not Allowed\n", "Allow:POST\n"); }
+        return tm_kill_session($c, $kid);
+    }
+    if ($p =~ /^\/ws\/([0-9a-f]{16})$/) {
+        my str $wid = $1;
+        return tm_attach($c, $wid);
+    }
+    return tm_json(404, "{\"error\":\"not found\"}");
+}
