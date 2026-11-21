@@ -731,13 +731,11 @@ Test files:
 - `test_fuzz.strada` / `test_fuzz_http.sh` - parser fuzzing / malformed requests against live servers
 - `test_privdrop.sh` - privilege drop (needs root; skipped otherwise)
 - `tools/soak.sh` - long load test with worker RSS sampling (not part of the suite)
-- `test_terminale.sh` - builds `terminale/terminale.so` and runs `terminale/t/test.sh`
 
-**Terminale** (`terminale/`): web terminal module (`terminale.so`, see its
-README). Each session is a detached C process owning a PTY, reached over a
-Unix socket; the module relays it over WebSocket. `$c->worker_draining()`
-(`Cannoli::Server::is_draining`) tells such long-lived handlers to end their
-connection when the worker recycles.
+`$c->worker_draining()` (`Cannoli::Server::is_draining`) tells long-lived
+handlers (WebSockets, streams) to end their connection when the worker
+recycles, reloads or shuts down. Terminale, the web terminal module that
+uses it, lives in its own repository (strada-lang/terminale).
 
 **Scoreboard:** `sb_*` functions in `server.strada` keep server-wide counters,
 worker slots and a per-address table in one MAP_SHARED mapping created by the

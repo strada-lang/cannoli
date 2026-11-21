@@ -589,16 +589,15 @@ Return value conventions:
 - `STATUS:code:content` for custom status
 - `REDIRECT:url` for redirects
 
-## Terminale (web terminal module)
+## Long-lived handlers and worker recycling
 
-[`terminale/`](terminale/README.md) is a loadable module that serves a
-multi-tab terminal in the browser, with sessions that keep running when the
-browser closes: `cd terminale && ./start.sh -u me`.
+A handler that keeps its connection open (WebSockets, streaming) can ask
+`$c->worker_draining()` whether its worker is recycling, reloading or
+shutting down, and end the connection so the worker can exit; clients
+reconnect to a fresh worker.
 
-Long-lived handlers such as its WebSocket relay can ask
-`$c->worker_draining()` whether their worker is recycling, reloading or
-shutting down, and end the connection so the worker can exit (clients
-reconnect to a fresh worker).
+[Terminale](https://github.com/strada-lang/terminale), a web terminal with
+tabs and persistent sessions, is a Cannoli module built this way.
 
 ## Examples
 
