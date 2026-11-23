@@ -23,9 +23,20 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/strada-lang/strada-lang.git "$RUNNER_TEMP/strada"
           cd "$RUNNER_TEMP/strada"
-          ./configure          # a plain "make" from a clean clone fails to link Strada's tools
-          make                 # not -j: the Strada Makefile is not parallel-safe
-          sudo make install
+          # On failure the end of the log becomes an error annotation, so
+          # the cause shows on the run's summary page.
+          step() {
+            name="$1"; shift
+            if ! "$@" > "$RUNNER_TEMP/$name.log" 2>&1; then
+              tail -n 60 "$RUNNER_TEMP/$name.log"
+              msg=$(grep -v '^[[:space:]]*$' "$RUNNER_TEMP/$name.log" | tail -n 25 | cut -c1-300 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
+              echo "::error title=Strada $name failed::$msg"
+              exit 1
+            fi
+          }
+          step configure ./configure   # a plain "make" from a clean clone fails to link Strada's tools
+          step make make               # not -j: the Strada Makefile is not parallel-safe
+          step install sudo make install
 
       - name: Build Cannoli
         run: make
