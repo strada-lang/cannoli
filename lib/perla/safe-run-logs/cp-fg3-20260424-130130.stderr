@@ -1,1 +1,0 @@
-cannoli_perla: dlopen /home/mflickin/p/cannoli/lib/perla/Demo.pm.so failed: /home/mflickin/p/cannoli/lib/perla/Demo.pm.so: undefined symbol: perla_call_stack

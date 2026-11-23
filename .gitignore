@@ -1,0 +1,20 @@
+# Build output
+/cannoli
+/cannoli.c
+/build/
+*.o
+*.so
+*.deps
+
+# Generated C (Strada -> C)
+/lib/perl/cannoli_perl_strada.c
+/lib/perla/cannoli_perla.c
+/lib/perla/cannoli_perla.c.c
+/lib/perla/safe-run-logs/
+
+# Editor and run-time leftovers
+\#*\#
+*~
+*.log
+*.pid
+/tmp_ssl/

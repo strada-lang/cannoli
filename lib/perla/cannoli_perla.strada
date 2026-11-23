@@ -14,6 +14,10 @@
 #     so=/path/Demo.pm.so;init=perla_mod_init_Demo;handler=perla_sub_Demo_hello \
 #     --dev -p 8080
 #
+# STATUS: experimental prototype, not maintained and not built or tested
+# with the rest of Cannoli. Use lib/perl (the embedded-interpreter library)
+# to run Perl handlers.
+#
 # This is MVP 1: the handler doesn't receive the Cannoli request object
 # yet — it just gets called with no args and returns a string. Request
 # marshalling ($c -> perla-compiled-handler) is the next milestone.

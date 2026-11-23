@@ -15,164 +15,101 @@
  along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
-# myapp.strada - Example Cannoli application as a shared library
+# myapp.strada - an example Cannoli handler library
 #
-# This demonstrates how to create a dynamic handler library for Cannoli in Strada.
+# A library exports cannoli_dispatch($c). It builds the response on the
+# Cannoli object and returns $c->done(), or "" to leave the request to the
+# next library, the router, or the 404 page.
 #
-# Compile with:
-#   ../stradac examples/myapp.strada examples/myapp_lib.c
-#   gcc -shared -fPIC -o examples/myapp.so examples/myapp_lib.c \
-#       ../runtime/strada_runtime.c -I../runtime -ldl -lm
-#
-# Use with:
+# Build and run (from the cannoli directory):
+#   strada --shared examples/myapp.strada -o examples/myapp.so
 #   ./cannoli --library ./examples/myapp.so --dev -p 8080
+#   ./cannoli -c examples/myapp.conf                  # the same, from a config file
+#   ./cannoli -c examples/multi_lib.conf              # mounted under /app (path_info)
 #
-# NOTE: No main() function - this is a library only
+# NOTE: no main() function - this is a library only
 
-# Helper: check if path starts with prefix
-func starts_with(str $path, str $prefix) int {
-    my int $prefix_len = length($prefix);
-    if (length($path) < $prefix_len) {
-        return 0;
-    }
-    return substr($path, 0, $prefix_len) eq $prefix;
-}
+my str $g_greeting = "Hello";
 
-# Helper: get path remainder after prefix
-func get_path_info(str $path, str $prefix) str {
-    my int $prefix_len = length($prefix);
-    if (length($path) <= $prefix_len) {
-        return "";
-    }
-    return substr($path, $prefix_len, length($path) - $prefix_len);
-}
-
-# Helper: check if path matches a pattern with numeric capture
-# Returns the captured value or empty string
-func match_user_id(str $path) str {
-    # Pattern: /user/{id} where id is numeric
-    if (!starts_with($path, "/user/")) {
-        return "";
-    }
-    my str $remainder = get_path_info($path, "/user/");
-    # Check if remainder is all digits
-    if (length($remainder) == 0) {
-        return "";
-    }
-    my int $i = 0;
-    while ($i < length($remainder)) {
-        my str $ch = substr($remainder, $i, 1);
-        if ($ch lt "0" || $ch gt "9") {
-            return "";
-        }
-        $i = $i + 1;
-    }
-    return $remainder;
-}
-
-# The dispatch function - called by Cannoli for each request
-# Returns: response body (auto-detects JSON/HTML), empty string for 404,
-#          "STATUS:xxx:content" for custom status, "REDIRECT:url" for redirects
-func strada_dispatch(str $method, str $path, str $path_info, str $body) str {
-    # ===== EXACT ROUTES =====
-
-    # GET / - Home page
-    if ($method eq "GET" && $path eq "/") {
-        my str $html = "<!DOCTYPE html>\n";
-        $html = $html . "<html><head><title>My Strada App</title>\n";
-        $html = $html . "<style>\n";
-        $html = $html . "body { font-family: sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }\n";
-        $html = $html . "h1 { color: #333; }\n";
-        $html = $html . "a { color: #0066cc; }\n";
-        $html = $html . ".route { margin: 10px 0; }\n";
-        $html = $html . "</style></head>\n<body>\n";
-        $html = $html . "<h1>Welcome to My Strada App!</h1>\n";
-        $html = $html . "<p>This handler library is written entirely in Strada.</p>\n";
-        $html = $html . "<h2>Routes:</h2>\n";
-        $html = $html . "<ul>\n";
-        $html = $html . "<li class=\"route\"><a href=\"/hello\">/hello</a> - Simple text response</li>\n";
-        $html = $html . "<li class=\"route\"><a href=\"/api/status\">/api/status</a> - JSON status</li>\n";
-        $html = $html . "<li class=\"route\"><a href=\"/user/42\">/user/{id}</a> - User by ID</li>\n";
-        $html = $html . "<li class=\"route\"><a href=\"/api/users/123/profile\">/api/users/...</a> - Prefix match with path_info</li>\n";
-        $html = $html . "<li class=\"route\"><a href=\"/files/docs/readme.txt\">/files/...</a> - File path</li>\n";
-        $html = $html . "<li class=\"route\"><a href=\"/echo?msg=Hello\">/echo?msg=...</a> - Query echo</li>\n";
-        $html = $html . "</ul>\n";
-        $html = $html . "<h2>POST Routes:</h2>\n";
-        $html = $html . "<p>POST /api/echo - Echoes request body as JSON</p>\n";
-        $html = $html . "</body></html>\n";
-        return $html;
-    }
-
-    # GET /hello
-    if ($method eq "GET" && $path eq "/hello") {
-        return "Hello from the Strada library!";
-    }
-
-    # GET /api/status
-    if ($method eq "GET" && $path eq "/api/status") {
-        return "{\"status\":\"ok\",\"language\":\"Strada\",\"features\":[\"prefix-match\",\"path-info\"]}";
-    }
-
-    # ===== PATTERN ROUTES =====
-
-    # /user/{id} - User by numeric ID
-    if ($method eq "GET") {
-        my str $user_id = match_user_id($path);
-        if (length($user_id) > 0) {
-            return "{\"user_id\":\"" . $user_id . "\",\"name\":\"User " . $user_id . "\"}";
+# Optional: called once at startup with the text after "myapp.so:" in the
+# library spec (./cannoli -l "./examples/myapp.so:greeting=Ciao").
+# Returning 0 stops the server from starting.
+func cannoli_init(str $config) int {
+    foreach my str $part (split(";", $config)) {
+        if (length($part) > 9 && substr($part, 0, 9) eq "greeting=") {
+            $g_greeting = substr($part, 9, length($part) - 9);
         }
     }
+    return 1;
+}
 
-    # ===== PREFIX ROUTES =====
+func cannoli_dispatch(scalar $c) str {
+    # Mounted under a prefix ("[library] /app = myapp.so"), path_info is the
+    # part after the prefix; loaded with --library it is empty.
+    my str $path = $c->path_info();
+    if (length($path) == 0) { $path = $c->path(); }
 
-    # /api/users/* - RESTful API with path_info
-    if ($method eq "GET" && starts_with($path, "/api/users")) {
-        my str $remainder = get_path_info($path, "/api/users");
-        return "{\"route\":\"/api/users\",\"path_info\":\"" . $remainder . "\",\"method\":\"" . $method . "\"}";
+    # GET / - an HTML page
+    if ($c->is_get() && $path eq "/") {
+        $c->render_html("<!DOCTYPE html>\n<html><head><title>My Strada App</title></head>\n<body>\n"
+            . "<h1>" . Cannoli::Response::html_escape($g_greeting) . " from a Strada library</h1>\n<ul>\n"
+            . "<li><a href=\"hello?name=World\">hello?name=World</a> - text</li>\n"
+            . "<li><a href=\"api/status\">api/status</a> - JSON</li>\n"
+            . "<li><a href=\"user/42\">user/42</a> - a path parameter</li>\n"
+            . "<li><a href=\"old-page\">old-page</a> - a redirect</li>\n"
+            . "<li><a href=\"stream\">stream</a> - a chunked response</li>\n"
+            . "</ul>\n<p>POST api/echo echoes a JSON body.</p>\n</body></html>\n");
+        return $c->done();
     }
 
-    # /files/* - File path handling
-    if (starts_with($path, "/files/")) {
-        my str $file_path = get_path_info($path, "/files");
-        return "File requested: " . $file_path . "\n(In a real app, this would serve the file)";
+    # GET /hello?name=... - plain text. User input is only ever a body here:
+    # render_text() never lets it choose the status, headers or content type.
+    if ($c->is_get() && $path eq "/hello") {
+        my str $name = $c->param("name");
+        $c->render_text($g_greeting . ", " . (length($name) > 0 ? $name : "stranger") . "!\n");
+        return $c->done();
     }
 
-    # /echo - Query parameter echo (parse from path or use path_info)
-    if ($method eq "GET" && starts_with($path, "/echo")) {
-        # Simple query string handling
-        my int $qpos = index($path, "?");
-        if ($qpos > 0) {
-            my str $query = substr($path, $qpos + 1, length($path) - $qpos - 1);
-            # Look for msg= parameter
-            my int $msg_pos = index($query, "msg=");
-            if ($msg_pos >= 0) {
-                my str $msg_value = substr($query, $msg_pos + 4, length($query) - $msg_pos - 4);
-                # Find end of value (next & or end)
-                my int $amp_pos = index($msg_value, "&");
-                if ($amp_pos > 0) {
-                    $msg_value = substr($msg_value, 0, $amp_pos);
-                }
-                return "Echo: " . $msg_value;
-            }
-        }
-        return "Echo: (no message provided)";
+    # GET /api/status - JSON from a data structure
+    if ($c->is_get() && $path eq "/api/status") {
+        $c->set_header("Cache-Control", "no-store");
+        $c->render_json({"status" => "ok", "language" => "Strada", "request_id" => $c->request_id()});
+        return $c->done();
     }
 
-    # POST /api/echo - Echo request body
-    if ($method eq "POST" && $path eq "/api/echo") {
-        return "{\"received\":true,\"body_length\":" . length($body) . ",\"body\":\"" . $body . "\"}";
+    # GET /user/{id}
+    if ($c->is_get() && $path =~ /^\/user\/([0-9]+)$/) {
+        my str $id = substr($path, 6, length($path) - 6);
+        $c->render_json({"user_id" => $id, "name" => "User " . $id});
+        return $c->done();
     }
 
-    # POST /api/data - Accept JSON data
-    if ($method eq "POST" && $path eq "/api/data") {
-        return "STATUS:201:Created - received " . length($body) . " bytes";
+    # POST /api/echo - status, cookie and JSON body
+    if ($c->is_post() && $path eq "/api/echo") {
+        $c->status(201);
+        $c->set_cookie("last_echo", "" . core::time(), "/", 3600);
+        $c->render_json({"received" => core::byte_length($c->body()), "json" => $c->json_body()});
+        return $c->done();
     }
 
-    # Redirect example
+    # GET /old-page - redirect
     if ($path eq "/old-page") {
-        return "REDIRECT:/";
+        $c->redirect("hello?name=redirected", 0);
+        return $c->done();
     }
 
-    # 404 - Not found (empty string)
-    return "";
+    # GET /stream - a response sent in pieces
+    if ($c->is_get() && $path eq "/stream") {
+        $c->content_type("text/plain");
+        $c->start_chunked();
+        my int $i = 1;
+        while ($i <= 5) {
+            if ($c->write_chunk("line " . $i . "\n") < 0) { last; }   # client went away
+            $i = $i + 1;
+        }
+        $c->end_chunked();
+        return $c->done();
+    }
+
+    return "";   # not ours: next library, router, or 404
 }
