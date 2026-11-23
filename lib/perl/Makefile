@@ -1,96 +1,59 @@
-# Makefile for cannoli Perl dispatch library (Strada + C hybrid)
+# Makefile for the Cannoli Perl dispatch library
 #
-# This builds:
-#   1. libperl_bridge.so - Minimal C bridge for Perl API
-#   2. cannoli_perl.so   - Main dispatch logic (Strada + C wrapper)
+# Builds cannoli_perl.so: the Strada side (cannoli_perl.strada) and the
+# embedded-interpreter bridge (perl_bridge.c) in one shared object.
+#
+#   make                 build
+#   make test            build and run t/test_perl.sh against ../../cannoli
+#   make PERL=/usr/bin/perl   embed a different perl
+#   make clean
 
 # Paths
-STRADA_ROOT = /usr/local
+STRADA_ROOT ?= /usr/local
 STRADA_RUNTIME = $(STRADA_ROOT)/lib/strada/runtime
 STRADAC = $(STRADA_ROOT)/bin/stradac
 
-# Perl interpreter to embed. Defaults to the bzperl build so the bridge links
-# /opt/bzperl's libperl (matching the bizowie runtime). Override with:
-#   make PERL=/usr/bin/perl
-PERL ?= /opt/bzperl/bin/perl
+# Perl interpreter to embed. Defaults to the bzperl build when it is
+# installed (so the library links /opt/bzperl's libperl, matching the
+# bizowie runtime), otherwise the perl on PATH.
+PERL ?= $(shell test -x /opt/bzperl/bin/perl && echo /opt/bzperl/bin/perl || echo perl)
 
-# Get Perl compile flags
 PERL_CCOPTS := $(shell $(PERL) -MExtUtils::Embed -e ccopts 2>/dev/null)
 PERL_LDOPTS := $(shell $(PERL) -MExtUtils::Embed -e ldopts 2>/dev/null)
 
 CC = gcc
-CFLAGS = -Wall -Wextra -fPIC -O2 -I$(STRADA_RUNTIME) $(PERL_CCOPTS)
-LDFLAGS_BRIDGE = -shared $(PERL_LDOPTS)
-LDFLAGS_STRADA = -shared -L$(STRADA_RUNTIME) -rdynamic
-
-# Targets
-BRIDGE_TARGET = libperl_bridge.so
-STRADA_TARGET = cannoli_perl.so
+CFLAGS = -Wall -Wextra -fPIC -O2
+TARGET = cannoli_perl.so
 
 .PHONY: all clean test check-perl check-strada
 
-all: check-perl check-strada $(BRIDGE_TARGET) $(STRADA_TARGET)
+all: check-perl check-strada $(TARGET)
 
 check-perl:
 	@$(PERL) -MExtUtils::Embed -e 'print "Perl: $$^V ($(PERL))\n"' 2>/dev/null || \
 		(echo "Error: Perl development headers not found for $(PERL). Install libperl-dev / the matching -dev headers"; exit 1)
 
 check-strada:
-	@test -f $(STRADAC) || (echo "Error: Strada compiler not found at $(STRADAC). Run 'make' in root first."; exit 1)
+	@test -f $(STRADAC) || (echo "Error: Strada compiler not found at $(STRADAC)"; exit 1)
 
-# Build the C bridge for Perl API
-$(BRIDGE_TARGET): perl_bridge.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS_BRIDGE)
-	@echo "Built: $(BRIDGE_TARGET)"
+# The interpreter bridge: plain C against the Perl headers only
+perl_bridge.o: perl_bridge.c perl_bridge.h
+	$(CC) $(CFLAGS) $(PERL_CCOPTS) -c -o $@ perl_bridge.c
 
-# Compile Strada to C
+# The Strada side: Strada -> C -> object, against the Strada runtime only
 cannoli_perl_strada.c: cannoli_perl.strada
 	$(STRADAC) $< $@
 
-# Build the dispatch .so. cannoli_dispatch is now a Strada func (takes the
-# single Cannoli object $c), so the old C wrapper (cannoli_dispatch.c) is gone.
-# We do NOT link the Strada runtime into the .so: a Strada .so deliberately
-# leaves runtime symbols undefined and resolves them from the host cannoli
-# binary (which is built -rdynamic). Bundling a second runtime copy gives two
-# independent string/arena pools and crashes on cross-pool refcounting.
-$(STRADA_TARGET): cannoli_perl_strada.c $(BRIDGE_TARGET)
-	$(CC) $(CFLAGS) -shared -o $@ cannoli_perl_strada.c -ldl -lm
-	@echo "Built: $(STRADA_TARGET)"
-	@echo ""
-	@echo "Usage:"
-	@echo "  cannoli --library ./lib/perl/$(STRADA_TARGET):handler=MyApp::handle --dev"
-	@echo ""
-	@echo "Options (semicolon-separated after colon):"
-	@echo "  handler=Sub::Name   Perl sub to call (required)"
-	@echo "  script=/path/to.pl  Load a Perl script"
-	@echo "  lib=/path           Add to @INC"
-	@echo "  use=Module::Name    Load a module"
+cannoli_perl_strada.o: cannoli_perl_strada.c perl_bridge.h
+	$(CC) -fPIC -O2 -w -I$(STRADA_RUNTIME) -I. -c -o $@ cannoli_perl_strada.c
+
+$(TARGET): cannoli_perl_strada.o perl_bridge.o
+	$(CC) -shared -o $@ cannoli_perl_strada.o perl_bridge.o $(PERL_LDOPTS) -ldl -lm
+	@echo "Built: $(TARGET)"
+	@echo "Usage: cannoli --library $(CURDIR)/$(TARGET):script=app.pl;handler=MyApp::handle"
+
+test: all
+	bash ../../t/test_perl.sh
 
 clean:
-	rm -f $(BRIDGE_TARGET) $(STRADA_TARGET) cannoli_perl_strada.c *.o
-
-# Example test
-test: $(STRADA_TARGET)
-	@echo "Creating test handler..."
-	@echo 'package TestApp;' > /tmp/test_perl_handler.pl
-	@echo 'use strict;' >> /tmp/test_perl_handler.pl
-	@echo 'sub handle {' >> /tmp/test_perl_handler.pl
-	@echo '    my ($$method, $$path, $$path_info, $$body) = @_;' >> /tmp/test_perl_handler.pl
-	@echo '    if ($$path eq "/") {' >> /tmp/test_perl_handler.pl
-	@echo '        return "{\"message\":\"Hello from Perl!\",\"status\":\"ok\"}";' >> /tmp/test_perl_handler.pl
-	@echo '    }' >> /tmp/test_perl_handler.pl
-	@echo '    elsif ($$path eq "/hello") {' >> /tmp/test_perl_handler.pl
-	@echo '        return "Hello, World! (from Perl)";' >> /tmp/test_perl_handler.pl
-	@echo '    }' >> /tmp/test_perl_handler.pl
-	@echo '    elsif ($$path eq "/info") {' >> /tmp/test_perl_handler.pl
-	@echo '        return "{\"method\":\"$$method\",\"path\":\"$$path\",\"path_info\":\"$$path_info\",\"perl_version\":\"$$^V\"}";' >> /tmp/test_perl_handler.pl
-	@echo '    }' >> /tmp/test_perl_handler.pl
-	@echo '    elsif ($$path =~ m{^/user/(\d+)}) {' >> /tmp/test_perl_handler.pl
-	@echo '        return "{\"user_id\":$$1,\"name\":\"User $$1\"}";' >> /tmp/test_perl_handler.pl
-	@echo '    }' >> /tmp/test_perl_handler.pl
-	@echo '    return "";' >> /tmp/test_perl_handler.pl
-	@echo '}' >> /tmp/test_perl_handler.pl
-	@echo '1;' >> /tmp/test_perl_handler.pl
-	@echo ""
-	@echo "Test handler created at /tmp/test_perl_handler.pl"
-	@echo "Run: cannoli --library ./lib/perl/$(STRADA_TARGET):script=/tmp/test_perl_handler.pl;handler=TestApp::handle --dev"
+	rm -f $(TARGET) libperl_bridge.so cannoli_perl_strada.c *.o

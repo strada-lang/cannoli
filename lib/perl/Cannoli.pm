@@ -37,6 +37,8 @@ sub new {
         _params       => undef,  # Lazily parsed
         _variables    => {},     # Request variables/stash
         _document_root => $args{document_root} // '',
+        _scheme       => $args{scheme} // 'http',
+        _request_id   => $args{request_id} // '',
 
         # Response data
         _res_status   => 200,
@@ -44,6 +46,7 @@ sub new {
         _res_headers  => {},
         _res_body     => '',
         _res_redirect => undef,
+        _responded    => 0,      # set by anything that builds the response
         _allow_ranges => 0,
         _internal_redirect => undef,
     }, $class;
@@ -62,6 +65,9 @@ sub query_string { $_[0]->{_query_string} }
 sub body         { $_[0]->{_body} }
 sub remote_addr  { $_[0]->{_remote_addr} }
 sub request_content_type { $_[0]->{_content_type} }
+sub scheme       { $_[0]->{_scheme} }
+sub is_secure    { $_[0]->{_scheme} eq 'https' ? 1 : 0 }
+sub request_id   { $_[0]->{_request_id} }
 
 # Get all request headers as hash ref
 sub headers {
@@ -366,6 +372,7 @@ sub status {
     my ($self, $code) = @_;
     if (defined $code) {
         $self->{_res_status} = int($code);
+        $self->{_responded} = 1;
         return $self;  # Allow chaining
     }
     return $self->{_res_status};
@@ -376,19 +383,37 @@ sub content_type {
     my ($self, $type) = @_;
     if (defined $type) {
         $self->{_res_content_type} = $type;
+        $self->{_responded} = 1;
         return $self;
     }
     return $self->{_res_content_type};
 }
 
-# Set a response header
+# Set a response header (replaces any value set before)
 sub set_header {
     my ($self, $name, $value) = @_;
     $self->{_res_headers}{$name} = $value;
+    $self->{_responded} = 1;
     return $self;
 }
 
-# Get response headers
+# Add a response header, keeping values set before (Set-Cookie, Link, ...)
+sub add_header {
+    my ($self, $name, $value) = @_;
+    my $have = $self->{_res_headers}{$name};
+    if (!defined $have) {
+        $self->{_res_headers}{$name} = $value;
+    } elsif (ref $have eq 'ARRAY') {
+        push @$have, $value;
+    } else {
+        $self->{_res_headers}{$name} = [$have, $value];
+    }
+    $self->{_responded} = 1;
+    return $self;
+}
+
+# Get response headers (a value is a string, or an array ref when the
+# header was added more than once)
 sub response_headers {
     my ($self) = @_;
     return $self->{_res_headers};
@@ -398,6 +423,7 @@ sub response_headers {
 sub write {
     my ($self, $content) = @_;
     $self->{_res_body} .= $content if defined $content;
+    $self->{_responded} = 1;
     return $self;
 }
 
@@ -408,6 +434,7 @@ sub print { shift->write(@_) }
 sub body_set {
     my ($self, $content) = @_;
     $self->{_res_body} = $content // '';
+    $self->{_responded} = 1;
     return $self;
 }
 
@@ -417,11 +444,25 @@ sub response_body {
     return $self->{_res_body};
 }
 
+# Leave the request to the next library (or to Cannoli's 404), dropping
+# anything set so far. A handler that sets nothing declines implicitly.
+sub decline {
+    my ($self) = @_;
+    $self->{_res_status} = 200;
+    $self->{_res_content_type} = '';
+    $self->{_res_headers} = {};
+    $self->{_res_body} = '';
+    $self->{_res_redirect} = undef;
+    $self->{_responded} = 0;
+    return $self;
+}
+
 # Send redirect
 sub redirect {
     my ($self, $url, $code) = @_;
     $self->{_res_redirect} = $url;
     $self->{_res_status} = $code // 302;
+    $self->{_responded} = 1;
     return $self;
 }
 
@@ -481,7 +522,7 @@ sub set_cookie {
     $cookie .= "; Secure" if $opts{secure};
     $cookie .= "; HttpOnly" if $opts{httponly};
     $cookie .= "; SameSite=$opts{samesite}" if $opts{samesite};
-    $self->set_header('Set-Cookie', $cookie);
+    $self->add_header('Set-Cookie', $cookie);   # one header per cookie
     return $self;
 }
 
@@ -500,50 +541,41 @@ sub _header_line {
 }
 
 #
-# Internal: Build response string for bridge
+# Internal: build the response for the bridge.
+#
+# Always the framed form
+#   RESPONSE:status:headers_len:headers:body      (headers: "Name:value\n")
+# with lengths in octets, or '' when the handler declined. The body is
+# never returned bare: Cannoli would then have to guess what it is.
 #
 sub _build_response {
     my ($self) = @_;
+    return '' unless $self->{_responded};
 
-    my $status = $self->{_res_status};
+    my $status = $self->{_res_status} || 200;
     my $body = $self->{_res_body};
+    $body = '' unless defined $body;
 
-    # Handle redirect while preserving explicit 3xx status and custom headers
+    my @lines;
     if (defined $self->{_res_redirect}) {
-        my $rd_status = ($status && $status >= 300 && $status < 400) ? $status : 302;
-        if ($rd_status == 302 && !keys %{$self->{_res_headers}} && $self->{_res_redirect} !~ /[\r\n\0]/) {
-            return "REDIRECT:" . $self->{_res_redirect};
-        }
-        my @rd_headers = _header_line('Location', $self->{_res_redirect});
-        for my $name (keys %{$self->{_res_headers}}) {
-            push @rd_headers, _header_line($name, $self->{_res_headers}{$name});
-        }
-        my $rd_hdr_str = join("\n", @rd_headers);
-        use bytes;
-        return "RESPONSE:$rd_status:" . length($rd_hdr_str) . ":$rd_hdr_str:";
+        $status = 302 unless $status >= 300 && $status < 400;
+        push @lines, _header_line('Location', $self->{_res_redirect});
+        $body = '';
+    } elsif (length($self->{_res_content_type})) {
+        push @lines, _header_line('Content-Type', $self->{_res_content_type});
     }
-
-    # If no body written, return empty for 404 handling
-    return '' if $status == 200 && length($body) == 0;
-
-    # Build header string
-    my @header_parts;
-    if (length($self->{_res_content_type})) {
-        push @header_parts, _header_line('Content-Type', $self->{_res_content_type});
+    for my $name (sort keys %{$self->{_res_headers}}) {
+        my $value = $self->{_res_headers}{$name};
+        push @lines, _header_line($name, $_) for (ref $value eq 'ARRAY' ? @$value : ($value));
     }
-    for my $name (keys %{$self->{_res_headers}}) {
-        push @header_parts, _header_line($name, $self->{_res_headers}{$name});
-    }
-    my $headers_str = join("\n", @header_parts);
+    # "\n" after every line (also the last): the frame's header block may
+    # then end in a value that itself ends in ":".
+    my $headers = join('', map { "$_\n" } @lines);
 
-    # Format: RESPONSE:status:headers_len:headers:body (length in octets)
-    if (@header_parts || $status != 200) {
-        use bytes;
-        return "RESPONSE:$status:" . length($headers_str) . ":$headers_str:$body";
-    }
-
-    # Simple case: just body (status 200, no custom headers)
-    return $body;
+    # Text with wide characters goes out as UTF-8; byte strings as they are.
+    utf8::encode($headers) if utf8::is_utf8($headers);
+    utf8::encode($body) if utf8::is_utf8($body);
+    return "RESPONSE:$status:" . length($headers) . ":$headers:$body";
 }
 
 #

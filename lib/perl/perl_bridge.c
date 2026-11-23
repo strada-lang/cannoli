@@ -16,63 +16,44 @@
 */
 
 /*
- * perl_bridge.c - Minimal C bridge for Perl embedding
+ * perl_bridge.c - embeds a Perl interpreter for the Cannoli Perl library.
  *
- * This provides low-level Perl API access for use from Strada.
- * Build as a shared library: libperl_bridge.so
+ * Plain C: it knows nothing about Strada values. cannoli_perl.strada hands
+ * it (pointer, length) pairs and gets a malloc'd buffer with a length back,
+ * so request bodies and responses are binary-safe in both directions and
+ * nothing is left allocated after a request.
  *
- * Functions accept StradaValue* to avoid FFI string conversion issues.
+ * Linked into cannoli_perl.so together with the Strada side.
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <dlfcn.h>
+#include <libgen.h>
 
 #include <EXTERN.h>
 #include <perl.h>
 
-/* Forward declaration - Strada runtime provides this */
-extern const char* strada_to_str(void *sv);
+#include "perl_bridge.h"
 
-/* Helper to safely get C string from StradaValue */
-static const char* sv_to_cstr(void *sv) {
-    if (!sv) return NULL;
-    return strada_to_str(sv);
-}
-
-/* Global Perl interpreter */
 static PerlInterpreter *my_perl = NULL;
+static pid_t pb_owner_pid = 0;      /* process the interpreter last ran in */
+static char pb_err[1024] = "";
 
-/* Handler subroutine name (set by Strada during init) */
-static char *handler_sub = NULL;
+const char *pb_last_error(void) { return pb_err; }
 
-/* Path to Cannoli.pm module */
-static char *cannoli_pm_path = NULL;
-
-/* Set handler name (called from Strada init) */
-void perl_bridge_set_handler(void *handler_sv) {
-    const char *h = sv_to_cstr(handler_sv);
-    if (handler_sub) free(handler_sub);
-    handler_sub = h ? strdup(h) : NULL;
+static void pb_set_err(const char *what) {
+    const char *detail = (my_perl && SvTRUE(ERRSV)) ? SvPV_nolen(ERRSV) : "";
+    snprintf(pb_err, sizeof(pb_err), "%s%s%s", what, *detail ? ": " : "", detail);
+    size_t n = strlen(pb_err);
+    while (n > 0 && (pb_err[n - 1] == '\n' || pb_err[n - 1] == '\r')) pb_err[--n] = '\0';
 }
 
-/* Set Cannoli.pm path (called from Strada init) */
-void perl_bridge_set_cannoli_path(void *path_sv) {
-    const char *p = sv_to_cstr(path_sv);
-    if (cannoli_pm_path) free(cannoli_pm_path);
-    cannoli_pm_path = p ? strdup(p) : NULL;
-}
-
-/* Get handler name */
-const char* perl_bridge_get_handler(void) {
-    return handler_sub;
-}
-
-/* xs_init bootstraps the statically-linked XS modules into the embedded
- * interpreter. DynaLoader MUST be registered here, otherwise the interpreter
- * reports "dynamic loading not available in this perl" and cannot load any XS
- * module (IO, Cwd, DBI, ...). This is the standard perlembed pattern. */
+/* xs_init registers DynaLoader, without which the embedded interpreter
+ * cannot load any XS module (IO, Cwd, DBI, ...). Standard perlembed. */
 EXTERN_C void boot_DynaLoader(pTHX_ CV *cv);
 
 static void xs_init(pTHX) {
@@ -82,36 +63,77 @@ static void xs_init(pTHX) {
     newXS("DynaLoader::boot_DynaLoader", boot_DynaLoader, file);
 }
 
-/* Initialize the Perl interpreter (unused param for Strada FFI compatibility) */
-int perl_bridge_init(const char *unused) {
-    (void)unused;  /* Silence warning */
-    if (my_perl) {
-        return 1;  /* Already initialized */
+/* Directory of the shared object this code lives in ("" if unknown). */
+const char *pb_self_dir(void) {
+    static char dir[4096] = "";
+    if (!dir[0]) {
+        Dl_info info;
+        if (dladdr((void *)pb_self_dir, &info) && info.dli_fname) {
+            char tmp[4096];
+            char *real = realpath(info.dli_fname, NULL);
+            snprintf(tmp, sizeof(tmp), "%s", real ? real : info.dli_fname);
+            free(real);
+            snprintf(dir, sizeof(dir), "%s", dirname(tmp));
+        }
     }
+    return dir;
+}
 
-    /* libperl is a NEEDED dependency of this bridge, but its symbols are loaded
-     * into local scope. XS modules (IO.so, DBI, ...) that DynaLoader dlopens
-     * later need libperl's interpreter symbols (PL_ppaddr, Perl_*) in the
-     * GLOBAL scope, or they fail with "undefined symbol: PL_ppaddr". Re-open
-     * libperl with RTLD_GLOBAL|RTLD_NOLOAD to promote its already-loaded
-     * symbols to global visibility. */
-    if (!dlopen("libperl.so", RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD)) {
-        dlopen("libperl.so", RTLD_NOW | RTLD_GLOBAL);  /* fallback: load+global */
+/* Code run once, before any application code is compiled:
+ *  - exit() inside a handler must end the request, not the worker process
+ *    (and with it every other request that worker would have served), so
+ *    CORE::GLOBAL::exit throws an exception the bridge recognises. In any
+ *    other process -- a child the handler forked -- exit() must really
+ *    exit: unwinding there would return the child into the worker's
+ *    request loop as a second server on the same sockets.
+ *  - Cannoli::Bridge::load runs a script file by path (the path arrives in
+ *    a variable; it is never pasted into Perl source). */
+static const char pb_boot[] =
+    "package Cannoli::Exit; sub code { $_[0]{code} }\n"
+    "package Cannoli::Bridge;\n"
+    "our ($arg, $handler, $pid);\n"
+    "BEGIN { $pid = $$; *CORE::GLOBAL::exit = sub {\n"
+    "    CORE::exit(@_ ? $_[0] : 0) if $$ != $pid;\n"
+    "    die bless({ code => (@_ ? $_[0] : 0) }, 'Cannoli::Exit') }; }\n"
+    "sub load {\n"
+    "    my $p = $arg;\n"
+    "    die \"cannot read $p\\n\" unless -f $p && -r _;\n"
+    "    $p = \"./$p\" unless $p =~ m{^\\.{0,2}/};\n"
+    "    do $p;\n"
+    "    die $@ if $@;\n"
+    "    1;\n"
+    "}\n"
+    "sub req { my $p = $arg; require $p; 1 }\n"
+    "sub child {\n"
+    "    $pid = $$;\n"
+    "    srand();\n"
+    "    (my $pkg = $handler) =~ s/::[^:]+$//;\n"
+    "    if (my $hook = $pkg->can('child_init')) { $hook->(); }\n"
+    "    1;\n"
+    "}\n"
+    "1;\n";
+
+int pb_init(void) {
+    if (my_perl) return 1;
+
+    /* XS modules that DynaLoader dlopens later resolve the interpreter's
+     * symbols (PL_*, Perl_*) from the global scope, but libperl came in as
+     * a dependency of this library, in local scope. Re-open the very file
+     * that is already loaded with RTLD_GLOBAL to promote it. */
+    Dl_info info;
+    if (dladdr((void *)perl_alloc, &info) && info.dli_fname) {
+        dlopen(info.dli_fname, RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD);
     }
 
     int argc = 3;
-    char *argv[] = { "", "-e", "0", NULL };
+    static char *argv[] = { "cannoli", "-e", "0", NULL };
     char **argv_ptr = argv;
-    char *env[] = { NULL };
-    char **env_ptr = env;
+    extern char **environ;
+    char **env_ptr = environ;
 
     PERL_SYS_INIT3(&argc, &argv_ptr, &env_ptr);
     my_perl = perl_alloc();
-    if (!my_perl) {
-        fprintf(stderr, "perl_bridge: Failed to allocate interpreter\n");
-        return 0;
-    }
-
+    if (!my_perl) { snprintf(pb_err, sizeof(pb_err), "could not allocate a Perl interpreter"); return 0; }
     perl_construct(my_perl);
     PL_exit_flags |= PERL_EXIT_DESTRUCT_END;
 
@@ -119,369 +141,249 @@ int perl_bridge_init(const char *unused) {
         perl_destruct(my_perl);
         perl_free(my_perl);
         my_perl = NULL;
-        fprintf(stderr, "perl_bridge: Failed to parse\n");
+        snprintf(pb_err, sizeof(pb_err), "could not start the Perl interpreter");
         return 0;
     }
-
     perl_run(my_perl);
+    pb_owner_pid = getpid();
+
+    eval_pv(pb_boot, FALSE);
+    if (SvTRUE(ERRSV)) { pb_set_err("bridge setup failed"); return 0; }
     return 1;
 }
 
-/* Check if Perl is initialized */
-int perl_bridge_is_init(void) {
-    return my_perl != NULL;
-}
-
-/* Shutdown the Perl interpreter */
-void perl_bridge_shutdown(void) {
-    if (my_perl) {
-        perl_destruct(my_perl);
-        perl_free(my_perl);
-        PERL_SYS_TERM();
-        my_perl = NULL;
-    }
-    if (handler_sub) {
-        free(handler_sub);
-        handler_sub = NULL;
-    }
-    if (cannoli_pm_path) {
-        free(cannoli_pm_path);
-        cannoli_pm_path = NULL;
-    }
-}
-
-/* Add a path to @INC (accepts StradaValue*) */
-int perl_bridge_add_inc(void *path_sv) {
-    const char *path = sv_to_cstr(path_sv);
-    if (!my_perl || !path) return 0;
-
+int pb_add_inc(const char *path) {
+    if (!my_perl || !path || !*path) return 0;
     AV *inc = GvAVn(PL_incgv);
     if (!inc) return 0;
-    av_push(inc, newSVpv(path, 0));
+    av_unshift(inc, 1);
+    av_store(inc, 0, newSVpv(path, 0));
     return 1;
 }
 
-/* Use a Perl module (accepts StradaValue*) */
-int perl_bridge_use(void *module_sv) {
-    const char *module = sv_to_cstr(module_sv);
-    if (!my_perl || !module) return 0;
+/* Call Cannoli::Bridge::<fn>() with $Cannoli::Bridge::arg = arg. */
+static int pb_call_boot(const char *fn, const char *arg, const char *what) {
+    if (!my_perl) return 0;
+    if (arg) sv_setpv(get_sv("Cannoli::Bridge::arg", GV_ADD), arg);
+    char name[64];
+    snprintf(name, sizeof(name), "Cannoli::Bridge::%s", fn);
+    dSP;
+    ENTER; SAVETMPS;
+    PUSHMARK(SP);
+    PUTBACK;
+    int count = call_pv(name, G_SCALAR | G_EVAL);
+    SPAGAIN;
+    if (count > 0) (void)POPs;
+    int ok = !SvTRUE(ERRSV);
+    if (!ok) pb_set_err(what);
+    PUTBACK;
+    FREETMPS; LEAVE;
+    return ok;
+}
 
-    char code[2048];
+/* Load Cannoli.pm from an explicit path, or from @INC when path is NULL. */
+int pb_load_cannoli(const char *path) {
+    if (!my_perl) return 0;
+    if (path && *path) return pb_call_boot("req", path, "could not load Cannoli.pm");
+    eval_pv("require Cannoli; 1;", FALSE);
+    if (SvTRUE(ERRSV)) { pb_set_err("could not load Cannoli.pm"); return 0; }
+    return 1;
+}
+
+static int pb_is_module_name(const char *s) {
+    if (!s || !*s) return 0;
+    for (const char *p = s; *p; p++) {
+        char ch = *p;
+        int word = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_' || (p > s && ch >= '0' && ch <= '9');
+        if (word) continue;
+        if (ch == ':' && p[1] == ':' && p > s && p[2] != '\0' && p[2] != ':') { p++; continue; }
+        return 0;
+    }
+    return 1;
+}
+
+int pb_use(const char *module) {
+    if (!my_perl) return 0;
+    if (!pb_is_module_name(module)) {
+        snprintf(pb_err, sizeof(pb_err), "'%.200s' is not a module name", module ? module : "");
+        return 0;
+    }
+    char code[512];
     snprintf(code, sizeof(code), "use %s; 1;", module);
     eval_pv(code, FALSE);
-
-    if (SvTRUE(ERRSV)) {
-        fprintf(stderr, "perl_bridge: use error: %s\n", SvPV_nolen(ERRSV));
-        return 0;
-    }
+    if (SvTRUE(ERRSV)) { pb_set_err("use failed"); return 0; }
     return 1;
 }
 
-/* Load a Perl script with 'do' (accepts StradaValue*) */
-int perl_bridge_do(void *script_sv) {
-    const char *script = sv_to_cstr(script_sv);
-    if (!my_perl) {
-        fprintf(stderr, "perl_bridge_do: Perl not initialized!\n");
-        return 0;
-    }
-    if (!script) {
-        fprintf(stderr, "perl_bridge_do: script is NULL!\n");
-        return 0;
-    }
+int pb_do(const char *script) {
+    if (!script || !*script) return 0;
+    return pb_call_boot("load", script, "could not load the script");
+}
 
-    char code[4096];
-    snprintf(code, sizeof(code), "do '%s'; die $@ if $@; 1;", script);
-    eval_pv(code, FALSE);
-
-    if (SvTRUE(ERRSV)) {
-        fprintf(stderr, "perl_bridge: do error: %s\n", SvPV_nolen(ERRSV));
+/* The handler must exist once everything is loaded: a typo is a startup
+ * error, not a 500 on every request. */
+int pb_set_handler(const char *name) {
+    if (!my_perl || !name || !*name) return 0;
+    if (!get_cv(name, 0)) {
+        snprintf(pb_err, sizeof(pb_err), "handler %.200s is not defined", name);
         return 0;
     }
+    sv_setpv(get_sv("Cannoli::Bridge::handler", GV_ADD), name);
     return 1;
 }
 
-/* Load Cannoli.pm module */
-int perl_bridge_load_cannoli(void *path_sv) {
-    const char *path = sv_to_cstr(path_sv);
-    if (!my_perl) return 0;
-
-    /* Store the path */
-    if (cannoli_pm_path) free(cannoli_pm_path);
-    cannoli_pm_path = path ? strdup(path) : NULL;
-
-    /* Load Cannoli.pm */
-    char code[4096];
-    if (path && strlen(path) > 0) {
-        snprintf(code, sizeof(code), "require '%s'; 1;", path);
-    } else {
-        snprintf(code, sizeof(code), "use Cannoli; 1;");
-    }
-    eval_pv(code, FALSE);
-
-    if (SvTRUE(ERRSV)) {
-        fprintf(stderr, "perl_bridge: load Cannoli error: %s\n", SvPV_nolen(ERRSV));
-        return 0;
-    }
-    return 1;
-}
-
-/* Parse headers string into Perl hash
- * Format: "header-name:value\nheader-name:value\n..."
- */
-static HV* parse_headers_to_hv(const char *headers_str) {
+/* "name: value\r\n" lines -> { lowercased-name => value } */
+static HV *pb_headers_hv(pTHX_ pb_str h) {
     HV *hv = newHV();
-    if (!headers_str || !*headers_str) return hv;
-
-    const char *p = headers_str;
-    while (*p) {
-        /* Find colon */
-        const char *colon = strchr(p, ':');
-        if (!colon) break;
-
-        /* Find end of line */
-        const char *eol = strchr(colon, '\n');
-        if (!eol) eol = p + strlen(p);
-
-        /* Extract name (lowercase) and value */
-        size_t name_len = colon - p;
-        char *name = malloc(name_len + 1);
-        for (size_t i = 0; i < name_len; i++) {
-            name[i] = (p[i] >= 'A' && p[i] <= 'Z') ? p[i] + 32 : p[i];
+    const char *p = h.p, *end = h.p + h.n;
+    while (p < end) {
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        if (!eol) eol = end;
+        const char *colon = memchr(p, ':', (size_t)(eol - p));
+        if (colon && colon > p) {
+            size_t name_len = (size_t)(colon - p);
+            char *name = malloc(name_len + 1);
+            if (name) {
+                for (size_t i = 0; i < name_len; i++) name[i] = (p[i] >= 'A' && p[i] <= 'Z') ? (char)(p[i] + 32) : p[i];
+                name[name_len] = '\0';
+                const char *v = colon + 1;
+                while (v < eol && (*v == ' ' || *v == '\t')) v++;
+                const char *ve = eol;
+                while (ve > v && (ve[-1] == '\r' || ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+                (void)hv_store(hv, name, (I32)name_len, newSVpvn(v, (STRLEN)(ve - v)), 0);
+                free(name);
+            }
         }
-        name[name_len] = '\0';
-
-        /* Skip colon and leading space */
-        const char *val_start = colon + 1;
-        while (*val_start == ' ') val_start++;
-
-        size_t val_len = eol - val_start;
-        /* Trim trailing \r */
-        while (val_len > 0 && (val_start[val_len-1] == '\r' || val_start[val_len-1] == '\n')) {
-            val_len--;
-        }
-
-        /* Store in hash */
-        hv_store(hv, name, name_len, newSVpvn(val_start, val_len), 0);
-        free(name);
-
-        /* Move to next line */
-        p = (*eol) ? eol + 1 : eol;
+        p = eol < end ? eol + 1 : end;
     }
     return hv;
 }
 
-/* Call handler with Cannoli object (new interface)
- * Returns response string (caller must free)
- */
-char* perl_bridge_call_handler(
-    void *sub_name_sv,
-    void *method_sv,
-    void *path_sv,
-    void *path_info_sv,
-    void *query_string_sv,
-    void *body_sv,
-    void *headers_sv,
-    void *remote_addr_sv,
-    void *content_type_sv
-) {
-    const char *sub_name = sv_to_cstr(sub_name_sv);
-    const char *method = sv_to_cstr(method_sv);
-    const char *path = sv_to_cstr(path_sv);
-    const char *path_info = sv_to_cstr(path_info_sv);
-    const char *query_string = sv_to_cstr(query_string_sv);
-    const char *body = sv_to_cstr(body_sv);
-    const char *headers_str = sv_to_cstr(headers_sv);
-    const char *remote_addr = sv_to_cstr(remote_addr_sv);
-    const char *content_type = sv_to_cstr(content_type_sv);
+static void pb_push_pair(pTHX_ SV ***spp, const char *key, pb_str v) {
+    SV **sp = *spp;
+    XPUSHs(sv_2mortal(newSVpv(key, 0)));
+    XPUSHs(sv_2mortal(newSVpvn(v.p ? v.p : "", v.p ? v.n : 0)));
+    *spp = sp;
+}
 
-    if (!my_perl || !sub_name) return strdup("");
+/* 1 if $@ is the exception thrown by the exit() override. */
+static int pb_is_exit(pTHX) {
+    SV *err = ERRSV;
+    return SvROK(err) && sv_derived_from(err, "Cannoli::Exit");
+}
+
+static char *pb_dup_err(pTHX_ size_t *out_len) {
+    STRLEN len;
+    const char *err = SvPV(ERRSV, len);
+    while (len > 0 && (err[len - 1] == '\n' || err[len - 1] == '\r')) len--;
+    char *copy = malloc(len + 1);
+    if (!copy) { *out_len = 0; return NULL; }
+    memcpy(copy, err, len);
+    copy[len] = '\0';
+    *out_len = len;
+    return copy;
+}
+
+/*
+ * Run the handler for one request.
+ *
+ * Returns a malloc'd buffer of *out_len bytes (the caller frees it):
+ *   *failed == 0: the framed response built by Cannoli.pm, or an empty
+ *                 buffer when the handler declined the request
+ *   *failed == 1: the handler (or Cannoli.pm) died; the buffer is the
+ *                 error text, for the log -- never for the client
+ */
+char *pb_call(const char *handler, const pb_request *rq, size_t *out_len, int *failed) {
+    *out_len = 0;
+    *failed = 0;
+    if (!my_perl || !handler) return NULL;
+
+    /* First request in a forked worker: the interpreter was set up in the
+     * master, so every worker starts with the same random seed (and the
+     * same open handles). Reseed, and let the application reconnect. */
+    if (getpid() != pb_owner_pid) {
+        pb_owner_pid = getpid();
+        if (!pb_call_boot("child", NULL, "child_init failed")) {
+            fprintf(stderr, "cannoli_perl: %s\n", pb_err);
+        }
+    }
 
     dSP;
     ENTER;
     SAVETMPS;
 
-    /* Parse headers into hash */
-    HV *headers_hv = parse_headers_to_hv(headers_str);
-
-    /* Create Cannoli object: Cannoli->new(...) */
+    /* Cannoli->new(...) */
     PUSHMARK(SP);
     XPUSHs(sv_2mortal(newSVpv("Cannoli", 0)));
-    XPUSHs(sv_2mortal(newSVpv("method", 0)));
-    XPUSHs(sv_2mortal(newSVpv(method ? method : "GET", 0)));
-    XPUSHs(sv_2mortal(newSVpv("path", 0)));
-    XPUSHs(sv_2mortal(newSVpv(path ? path : "/", 0)));
-    XPUSHs(sv_2mortal(newSVpv("path_info", 0)));
-    XPUSHs(sv_2mortal(newSVpv(path_info ? path_info : "", 0)));
-    XPUSHs(sv_2mortal(newSVpv("query_string", 0)));
-    XPUSHs(sv_2mortal(newSVpv(query_string ? query_string : "", 0)));
-    XPUSHs(sv_2mortal(newSVpv("body", 0)));
-    XPUSHs(sv_2mortal(newSVpv(body ? body : "", 0)));
+    pb_push_pair(aTHX_ &sp, "method", rq->method);
+    pb_push_pair(aTHX_ &sp, "path", rq->path);
+    pb_push_pair(aTHX_ &sp, "path_info", rq->path_info);
+    pb_push_pair(aTHX_ &sp, "query_string", rq->query_string);
+    pb_push_pair(aTHX_ &sp, "body", rq->body);
+    pb_push_pair(aTHX_ &sp, "remote_addr", rq->remote_addr);
+    pb_push_pair(aTHX_ &sp, "content_type", rq->content_type);
+    pb_push_pair(aTHX_ &sp, "scheme", rq->scheme);
+    pb_push_pair(aTHX_ &sp, "request_id", rq->request_id);
     XPUSHs(sv_2mortal(newSVpv("headers", 0)));
-    XPUSHs(sv_2mortal(newRV_noinc((SV*)headers_hv)));
-    XPUSHs(sv_2mortal(newSVpv("remote_addr", 0)));
-    XPUSHs(sv_2mortal(newSVpv(remote_addr ? remote_addr : "", 0)));
-    XPUSHs(sv_2mortal(newSVpv("content_type", 0)));
-    XPUSHs(sv_2mortal(newSVpv(content_type ? content_type : "", 0)));
+    XPUSHs(sv_2mortal(newRV_noinc((SV *)pb_headers_hv(aTHX_ rq->headers))));
     PUTBACK;
 
     int count = call_method("new", G_SCALAR | G_EVAL);
     SPAGAIN;
-
-    if (SvTRUE(ERRSV) || count < 1) {
-        if (SvTRUE(ERRSV)) {
-            fprintf(stderr, "perl_bridge: Cannoli->new error: %s\n", SvPV_nolen(ERRSV));
-        }
-        PUTBACK;
-        FREETMPS;
-        LEAVE;
-        return strdup("STATUS:500:Failed to create Cannoli object");
+    SV *obj = NULL;
+    if (count > 0) {
+        SV *top = POPs;
+        if (!SvTRUE(ERRSV) && SvROK(top)) obj = SvREFCNT_inc(top);
     }
-
-    SV *cannoli_obj = POPs;
-    SvREFCNT_inc(cannoli_obj);  /* Keep it alive */
     PUTBACK;
-
-    /* Call the handler: handler($cannoli_obj) */
-    PUSHMARK(SP);
-    XPUSHs(cannoli_obj);
-    PUTBACK;
-
-    count = call_pv(sub_name, G_SCALAR | G_EVAL);
-    SPAGAIN;
 
     char *result = NULL;
+    if (!obj) {
+        *failed = 1;
+        if (SvTRUE(ERRSV)) result = pb_dup_err(aTHX_ out_len);
+        else { result = strdup("Cannoli->new did not return an object"); *out_len = result ? strlen(result) : 0; }
+        FREETMPS; LEAVE;
+        return result;
+    }
 
-    if (SvTRUE(ERRSV)) {
-        /* Handler threw an error */
-        STRLEN len;
-        const char *err = SvPV(ERRSV, len);
-        result = malloc(len + 32);
-        snprintf(result, len + 32, "STATUS:500:%s", err);
-        fprintf(stderr, "perl_bridge: handler error: %s\n", err);
+    /* handler($c) -- its return value is not used */
+    PUSHMARK(SP);
+    XPUSHs(obj);
+    PUTBACK;
+    count = call_pv(handler, G_SCALAR | G_EVAL);
+    SPAGAIN;
+    if (count > 0) (void)POPs;
+    PUTBACK;
+
+    if (SvTRUE(ERRSV) && !pb_is_exit(aTHX)) {
+        *failed = 1;
+        result = pb_dup_err(aTHX_ out_len);
     } else {
-        /* Discard handler return value */
-        if (count > 0) POPs;
-        PUTBACK;
-
-        /* Extract response: $cannoli_obj->_build_response() */
+        /* $c->_build_response() */
         PUSHMARK(SP);
-        XPUSHs(cannoli_obj);
+        XPUSHs(obj);
         PUTBACK;
-
         count = call_method("_build_response", G_SCALAR | G_EVAL);
         SPAGAIN;
-
+        SV *ret = count > 0 ? POPs : NULL;
         if (SvTRUE(ERRSV)) {
+            *failed = 1;
+            result = pb_dup_err(aTHX_ out_len);
+        } else if (ret && SvOK(ret)) {
             STRLEN len;
-            const char *err = SvPV(ERRSV, len);
-            result = malloc(len + 32);
-            snprintf(result, len + 32, "STATUS:500:%s", err);
-        } else if (count > 0) {
-            SV *ret = POPs;
-            if (SvOK(ret)) {
-                STRLEN len;
-                const char *str = SvPV(ret, len);
-                result = malloc(len + 1);
+            const char *str = SvPVbyte(ret, len);
+            result = malloc(len + 1);
+            if (result) {
                 memcpy(result, str, len);
                 result[len] = '\0';
+                *out_len = len;
             }
         }
+        PUTBACK;
     }
 
-    SvREFCNT_dec(cannoli_obj);
-    PUTBACK;
+    SvREFCNT_dec(obj);
     FREETMPS;
     LEAVE;
-
-    return result ? result : strdup("");
-}
-
-/* Legacy call4 function - kept for backward compatibility */
-char* perl_bridge_call4(void *sub_name_sv,
-                        void *arg1_sv, void *arg2_sv,
-                        void *arg3_sv, void *arg4_sv) {
-    const char *sub_name = sv_to_cstr(sub_name_sv);
-    const char *arg1 = sv_to_cstr(arg1_sv);
-    const char *arg2 = sv_to_cstr(arg2_sv);
-    const char *arg3 = sv_to_cstr(arg3_sv);
-    const char *arg4 = sv_to_cstr(arg4_sv);
-
-    if (!my_perl || !sub_name) return strdup("");
-
-    dSP;
-    ENTER;
-    SAVETMPS;
-    PUSHMARK(SP);
-
-    /* Push 4 string arguments */
-    XPUSHs(sv_2mortal(newSVpv(arg1 ? arg1 : "", 0)));
-    XPUSHs(sv_2mortal(newSVpv(arg2 ? arg2 : "", 0)));
-    XPUSHs(sv_2mortal(newSVpv(arg3 ? arg3 : "", 0)));
-    XPUSHs(sv_2mortal(newSVpv(arg4 ? arg4 : "", 0)));
-
-    PUTBACK;
-    int count = call_pv(sub_name, G_SCALAR | G_EVAL);
-    SPAGAIN;
-
-    char *result = NULL;
-
-    if (SvTRUE(ERRSV)) {
-        STRLEN len;
-        const char *err = SvPV(ERRSV, len);
-        result = malloc(len + 16);
-        snprintf(result, len + 16, "STATUS:500:%s", err);
-    } else if (count > 0) {
-        SV *ret = POPs;
-        if (SvOK(ret)) {
-            STRLEN len;
-            const char *str = SvPV(ret, len);
-            result = malloc(len + 1);
-            memcpy(result, str, len);
-            result[len] = '\0';
-        }
-    }
-
-    PUTBACK;
-    FREETMPS;
-    LEAVE;
-
-    return result ? result : strdup("");
-}
-
-/* Evaluate Perl code and return result as string (caller must free) */
-char* perl_bridge_eval(const char *code) {
-    if (!my_perl || !code) return strdup("");
-
-    SV *result = eval_pv(code, FALSE);
-
-    if (SvTRUE(ERRSV)) {
-        STRLEN len;
-        const char *err = SvPV(ERRSV, len);
-        char *error_str = malloc(len + 16);
-        snprintf(error_str, len + 16, "ERROR:%s", err);
-        return error_str;
-    }
-
-    if (result && SvOK(result)) {
-        STRLEN len;
-        const char *str = SvPV(result, len);
-        char *ret = malloc(len + 1);
-        memcpy(ret, str, len);
-        ret[len] = '\0';
-        return ret;
-    }
-
-    return strdup("");
-}
-
-/* Get the last Perl error */
-char* perl_bridge_get_error(void) {
-    if (!my_perl) return strdup("Perl not initialized");
-
-    if (SvTRUE(ERRSV)) {
-        STRLEN len;
-        const char *err = SvPV(ERRSV, len);
-        return strdup(err);
-    }
-    return strdup("");
+    return result;
 }
