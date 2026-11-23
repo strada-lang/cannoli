@@ -16,7 +16,8 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential zlib1g-dev libssl-dev libperl-dev \
+          # libreadline-dev: Strada's strada-jit tool does not compile without it
+          sudo apt-get install -y build-essential zlib1g-dev libssl-dev libperl-dev libreadline-dev \
             curl netcat-openbsd python3 openssl apache2-utils xxd
 
       - name: Build and install Strada
