@@ -69,7 +69,15 @@ func Cannoli_new(hash %req) scalar {
     if (exists(%req, "_client")) {
         $self{"_client"} = $req{"_client"};
     }
+    if (exists(%req, "body_file")) { $self{"_body_file"} = $req{"body_file"}; }
     if (exists(%req, "_conn_buffer")) { $self{"_conn_buffer"} = $req{"_conn_buffer"}; }
+    if (exists(%req, "_conn")) {
+        $self{"_conn"} = $req{"_conn"};
+        $self{"_server"} = $req{"_server"};
+    }
+    # Library interface version (2: the response is taken from $c; see
+    # Cannoli::Server::library_response). Libraries can test for it.
+    $self{"_abi"} = 2;
     if (exists(%req, "_ssl")) {
         $self{"_ssl"} = $req{"_ssl"};
         $self{"_ssl_conn"} = $req{"_ssl_conn"};
@@ -90,6 +98,14 @@ func Cannoli_new(hash %req) scalar {
 #
 # Request Accessors
 #
+
+# Path of the file holding the request body, when the server was told not
+# to load large bodies into memory (server.body_in_memory = 0); "" when the
+# body is in $c->body(). The file is removed after the request.
+func Cannoli_body_file(scalar $self) str {
+    if (exists(%{$self}, "_body_file")) { return "" . $self->{"_body_file"}; }
+    return "";
+}
 
 func Cannoli_method(scalar $self) str {
     return $self->{"_method"};
@@ -702,6 +718,47 @@ func Cannoli_sendfile(scalar $self, str $filepath) scalar {
 # Chunked Transfer Encoding Methods
 #
 
+# The string a library handler returns to say "handled; the response is on
+# $c" (any other non-empty string works too, but may be used as the body
+# when the handler wrote none).
+func Cannoli_done_marker() str {
+    return core::byte(1) . "cannoli:done";
+}
+
+func Cannoli_done(scalar $self) str {
+    return ::done_marker();
+}
+
+# Tell the server this handler is meant to run for a long time without
+# sending anything (a WebSocket, a slow event stream), so the stuck-worker
+# check (server.handler_timeout) leaves it alone. ws_accept() calls it.
+func Cannoli_long_running(scalar $self) scalar {
+    if (exists(%{$self}, "_server")) { Cannoli::Server::long_lived($self->{"_server"}); }
+    return $self;
+}
+
+# 1 if the handler has put anything of a response on this object.
+func Cannoli_has_response(scalar $self) int {
+    if (exists(%{$self}, "_ws_active") && $self->{"_ws_active"} == 1) { return 1; }
+    if ($self->is_chunked() == 1) { return 1; }
+    if ($self->{"_res_status"} != 200) { return 1; }
+    if (length($self->{"_res_content_type"}) > 0) { return 1; }
+    if (length($self->{"_res_redirect"}) > 0) { return 1; }
+    if (core::byte_length("" . $self->{"_res_body"}) > 0) { return 1; }
+    if (scalar(keys(%{$self->{"_res_headers"}})) > 0) { return 1; }
+    if (exists(%{$self}, "_res_touched")) { return 1; }
+    return 0;
+}
+
+# Hand over a complete response as one string, in the format
+#   RESPONSE:status:headers_len:headers:body   (headers: "Name:value\n...")
+# (also STATUS:code:body and REDIRECT:url). Only for strings the library
+# built itself: the framing is trusted.
+func Cannoli_framed_response(scalar $self, str $framed) str {
+    $self->{"_res_framed"} = $framed;
+    return ::done_marker();
+}
+
 # Start a chunked response - sends headers immediately
 # After calling this, use Cannoli_write_chunk() to send data, then Cannoli_end_chunked() to finish
 func Cannoli_start_chunked(scalar $self) scalar {
@@ -724,31 +781,27 @@ func Cannoli_start_chunked(scalar $self) scalar {
         $i = $i + 1;
     }
 
-    # Check if SSL or regular socket
-    if (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
-        # SSL chunked - need to send headers via SSL write
-        my int $ssl_conn = $self->{"_ssl_conn"};
+    Cannoli::Response::header(%res, "Transfer-Encoding", "chunked");
+    Cannoli::Response::remove_header(%res, "Content-Length");
+    $self->{"_chunked"} = 1;
 
-        Cannoli::Response::header(%res, "Transfer-Encoding", "chunked");
-        Cannoli::Response::remove_header(%res, "Content-Length");
-        my str $headers = Cannoli::Response::build_headers(%res);
-        Cannoli::TLS::write_all($ssl_conn, $headers);
-
-        $self->{"_chunked"} = 1;
+    if (exists(%{$self}, "_conn")) {
+        # Through the server's connection layer: bounded by write_timeout,
+        # parks in a loop worker, and carries the standard headers.
+        Cannoli::Server::stream_headers($self->{"_server"}, %res, exists(%{$self}, "_request_id") ? ("" . $self->{"_request_id"}) : "");
+        Cannoli::Server::stream_send($self->{"_server"}, $self->{"_conn"}, Cannoli::Response::build_headers(%res));
+    } elsif (exists(%{$self}, "_ssl") && $self->{"_ssl"} == 1) {
+        Cannoli::TLS::write_all($self->{"_ssl_conn"}, Cannoli::Response::build_headers(%res));
         $self->{"_chunked_ssl"} = 1;
     } else {
-        # Regular socket chunked
-        my int $fd = $self->{"_fd"};
-        %res = Cannoli::Response::chunked_start(%res, $fd);
-        $self->{"_chunked"} = 1;
-        $self->{"_chunked_res"} = \%res;
+        core::write_fd($self->{"_fd"}, Cannoli::Response::build_headers(%res));
     }
 
     return $self;
 }
 
-# Write a chunk of data
-# Returns bytes written, or -1 on error
+# Write a chunk of data. Returns the bytes written, or -1 once the client
+# is gone or has stopped reading (the handler should stop producing).
 func Cannoli_write_chunk(scalar $self, str $data) int {
     my int $byte_len = core::byte_length($data);
     if ($byte_len == 0) {
@@ -759,27 +812,26 @@ func Cannoli_write_chunk(scalar $self, str $data) int {
     my str $hex_len = Cannoli::Response::to_hex($byte_len);
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
 
-    if (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
-        # SSL write
-        return Cannoli::TLS::write_all($self->{"_ssl_conn"}, $chunk);
-    } else {
-        # Regular socket write
-        my int $fd = $self->{"_fd"};
-        return core::write_fd($fd, $chunk);
+    if (exists(%{$self}, "_conn")) {
+        if (Cannoli::Server::stream_send($self->{"_server"}, $self->{"_conn"}, $chunk) == 0) { return -1; }
+        return $byte_len;
     }
+    if (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
+        return Cannoli::TLS::write_all($self->{"_ssl_conn"}, $chunk);
+    }
+    return core::write_fd($self->{"_fd"}, $chunk);
 }
 
 # End the chunked response - sends terminating chunk
 func Cannoli_end_chunked(scalar $self) scalar {
     my str $terminator = "0\r\n\r\n";
 
-    if (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
-        # SSL write
+    if (exists(%{$self}, "_conn")) {
+        Cannoli::Server::stream_send($self->{"_server"}, $self->{"_conn"}, $terminator);
+    } elsif (exists(%{$self}, "_chunked_ssl") && $self->{"_chunked_ssl"} == 1) {
         Cannoli::TLS::write_all($self->{"_ssl_conn"}, $terminator);
     } else {
-        # Regular socket write
-        my int $fd = $self->{"_fd"};
-        core::write_fd($fd, $terminator);
+        core::write_fd($self->{"_fd"}, $terminator);
     }
 
     return $self;
@@ -829,6 +881,7 @@ func Cannoli_ws_accept(scalar $self, str $protocol = "", str $allowed_origins = 
     my scalar $ws = Cannoli::WebSocket::accept(%req, $protocol);
     if (defined($ws)) {
         $self->{"_ws_active"} = 1;
+        $self->long_running();
         $self->{"_ws_status"} = 101;
         $self->{"_ws"} = $ws;
     }

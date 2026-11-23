@@ -145,21 +145,12 @@ func Cannoli_Session_new() scalar {
     return \%session;
 }
 
-# Load a session by ID
-func Cannoli_Session_load(str $id) scalar {
-    if (::is_valid_id($id) == 0) {
-        return undef;
-    }
-    ::init();
-    if ($g_session_dir_ok != 1) { return undef; }
-
+# Read the stored copy of a session: {created, modified, data} or undef.
+func Cannoli_Session_read_stored(str $id) scalar {
     my str $path = ::file_path($id);
-
     if (core::is_file($path) == 0) {
         return undef;
     }
-
-    # Read and parse session file
     my str $content = slurp($path);
     if (length($content) == 0) {
         return undef;
@@ -168,54 +159,88 @@ func Cannoli_Session_load(str $id) scalar {
     # Parse session data (simple key=value format)
     my hash %session = ();
     $session{"id"} = $id;
-    $session{"data"} = {};
+    $session{"created"} = 0;
+    $session{"modified"} = 0;
+    my hash %data = ();
 
     my array @lines = split("\n", $content);
-    my int $i = 0;
-    my int $in_data = 0;
-
-    while ($i < scalar(@lines)) {
-        my str $line = $lines[$i];
-
-        if (length($line) == 0) {
-            $i = $i + 1;
-            next;
-        }
-
-        # Parse key=value
+    foreach my str $line (@lines) {
+        if (length($line) == 0) { next; }
         my int $eq_pos = index($line, "=");
         if ($eq_pos > 0) {
             my str $key = substr($line, 0, $eq_pos);
             my str $value = substr($line, $eq_pos + 1, length($line) - $eq_pos - 1);
-
             if ($key eq "_created") {
                 $session{"created"} = $value + 0;
             } elsif ($key eq "_modified") {
                 $session{"modified"} = $value + 0;
             } else {
-                # User data
-                my scalar $data = $session{"data"};
-                my str $decoded_key = ::decode_value($key);
-                $data->{$decoded_key} = ::decode_value($value);
+                $data{::decode_value($key)} = ::decode_value($value);
             }
         }
-
-        $i = $i + 1;
     }
+    $session{"data"} = \%data;
+    return \%session;
+}
+
+# The stored form of every value in $data: what save() compares against to
+# find out what this request changed.
+func Cannoli_Session_snapshot(scalar $data) scalar {
+    my hash %snap = ();
+    foreach my str $key (keys(%{$data})) {
+        my scalar $v = $data->{$key};
+        if (defined($v)) { $snap{$key} = ::encode_value($v); }
+    }
+    return \%snap;
+}
+
+# Load a session by ID
+func Cannoli_Session_load(str $id) scalar {
+    if (::is_valid_id($id) == 0) {
+        return undef;
+    }
+    ::init();
+    if ($g_session_dir_ok != 1) { return undef; }
+
+    my scalar $session = ::read_stored($id);
+    if (!defined($session)) { return undef; }
 
     # Check TTL
     my int $now = core::time();
-    my int $modified = $session{"modified"} + 0;
+    my int $modified = $session->{"modified"} + 0;
     if ($now - $modified > $g_session_ttl) {
         # Session expired
         ::destroy($id);
         return undef;
     }
-
-    return \%session;
+    $session->{"_loaded"} = ::snapshot($session->{"data"});
+    return $session;
 }
 
-# Save a session to file
+# Take / release the lock that serialises session writes across workers.
+# It is held only for the read-merge-write in save() (no waiting on a
+# client while holding it), so a plain blocking lock is safe in loop
+# workers too.
+func Cannoli_Session_lock() scalar {
+    my scalar $fh = core::open($g_session_dir . "/.lock", "a");
+    if (defined($fh)) { core::flock(core::fileno($fh), 2); }
+    return $fh;
+}
+
+func Cannoli_Session_unlock(scalar $fh) void {
+    if (defined($fh)) {
+        core::flock(core::fileno($fh), 8);
+        core::close($fh);
+    }
+}
+
+# Save a session to file.
+#
+# Two requests on the same session may run at once (two tabs, parallel
+# XHRs). Each loaded its own copy, so writing a whole copy back would drop
+# whatever the other one changed. save() therefore writes only what this
+# request changed (compared with what it loaded) on top of the copy that is
+# stored now, under a lock.
 func Cannoli_Session_save(scalar $session) int {
     ::init();
     if ($g_session_dir_ok != 1) { return 0; }
@@ -229,25 +254,36 @@ func Cannoli_Session_save(scalar $session) int {
     # Update modified time
     $session->{"modified"} = core::time();
 
-    # Build file content
+    my scalar $data = $session->{"data"};
+    my scalar $mine = ::snapshot($data);
+    my scalar $loaded = exists(%{$session}, "_loaded") ? $session->{"_loaded"} : {};
+
+    my scalar $lock = ::lock();
+    my hash %merged = ();
+    my scalar $stored = ::read_stored($id);
+    if (defined($stored)) {
+        my scalar $sd = $stored->{"data"};
+        foreach my str $k (keys(%{$sd})) {
+            # deleted here: it was loaded but is gone from this copy
+            if (exists(%{$loaded}, $k) && !exists(%{$mine}, $k)) { next; }
+            $merged{$k} = ::encode_value($sd->{$k});
+        }
+    }
+    foreach my str $k (keys(%{$mine})) {
+        if (!exists(%{$loaded}, $k) || $loaded->{$k} ne $mine->{$k} || !defined($stored)) {
+            $merged{$k} = $mine->{$k};   # set or changed here (or nothing stored yet)
+        }
+        # unchanged here: the stored value stands, including "deleted by
+        # another request"
+    }
+
     my str $content = "";
     $content = $content . "_created=" . $session->{"created"} . "\n";
     $content = $content . "_modified=" . $session->{"modified"} . "\n";
-
-    # Save data fields
-    my scalar $data = $session->{"data"};
-    my array @keys = keys(%{$data});
-    my int $i = 0;
-
-    while ($i < scalar(@keys)) {
-        my str $key = $keys[$i];
-        my scalar $raw_val = $data->{$key};
-        if (defined($raw_val) && $key ne "_created" && $key ne "_modified") {
-            my str $enc_key = ::encode_value($key);
-            my str $value = ::encode_value($raw_val);
-            $content = $content . $enc_key . "=" . $value . "\n";
+    foreach my str $k (sort(keys(%merged))) {
+        if ($k ne "_created" && $k ne "_modified") {
+            $content = $content . ::encode_value($k) . "=" . $merged{$k} . "\n";
         }
-        $i = $i + 1;
     }
 
     # Write atomically via temporary file with 0600 permissions
@@ -255,7 +291,27 @@ func Cannoli_Session_save(scalar $session) int {
     spew($tmp_path, $content);
     core::chmod($tmp_path, 384);  # 0600
     core::rename($tmp_path, $path);
+    ::unlock($lock);
+
+    $session->{"_loaded"} = $mine;
+    ::maybe_cleanup();
     return 1;
+}
+
+# Expired sessions are removed as a side effect of saving: at most once per
+# $g_cleanup_interval seconds per session directory, whichever worker gets
+# there first (the marker file's mtime is the shared clock).
+my int $g_cleanup_interval = 300;
+my int $g_cleanup_checked = 0;
+
+func Cannoli_Session_maybe_cleanup() void {
+    my int $now = core::time();
+    if ($now - $g_cleanup_checked < 30) { return; }
+    $g_cleanup_checked = $now;
+    my str $marker = $g_session_dir . "/.cleanup";
+    if (core::is_file($marker) == 1 && $now - core::file_mtime($marker) < $g_cleanup_interval) { return; }
+    spew($marker, "" . $now);
+    ::cleanup();
 }
 
 # Give a session a new ID (data kept), removing the stored copy under the
@@ -398,7 +454,8 @@ func Cannoli_Session_decode_value(str $s) str {
     return $result;
 }
 
-# Clean up expired sessions (call periodically)
+# Clean up expired sessions and abandoned temporary files. Returns the
+# number of sessions removed.
 func Cannoli_Session_cleanup() int {
     if (core::is_dir($g_session_dir) == 0) {
         return 0;
@@ -408,38 +465,19 @@ func Cannoli_Session_cleanup() int {
     my int $cleaned = 0;
 
     my array @files = core::readdir($g_session_dir);
-    my int $i = 0;
-
-    while ($i < scalar(@files)) {
-        my str $file = $files[$i];
-
-        # Only process session files
-        if (substr($file, 0, 5) eq "sess_") {
-            my str $path = $g_session_dir . "/" . $file;
-
-            # Check modification time via file content
-            my str $content = slurp($path);
-            my int $modified = 0;
-
-            # Find _modified= line
-            my int $pos = index($content, "_modified=");
-            if ($pos >= 0) {
-                my str $rest = substr($content, $pos + 10, 20);
-                my int $nl = index($rest, "\n");
-                if ($nl > 0) {
-                    my str $ts = substr($rest, 0, $nl);
-                    $modified = $ts + 0;
-                }
-            }
-
-            # Remove if expired
-            if ($modified > 0 && $now - $modified > $g_session_ttl) {
-                core::unlink($path);
-                $cleaned = $cleaned + 1;
-            }
+    foreach my str $file (@files) {
+        if (substr($file, 0, 5) ne "sess_") { next; }
+        my str $path = $g_session_dir . "/" . $file;
+        # a session file's mtime is its last save
+        my int $age = $now - core::file_mtime($path);
+        if (index($file, ".tmp.") > 0) {
+            if ($age > 3600) { core::unlink($path); }
+            next;
         }
-
-        $i = $i + 1;
+        if ($age > $g_session_ttl) {
+            core::unlink($path);
+            $cleaned = $cleaned + 1;
+        }
     }
 
     return $cleaned;

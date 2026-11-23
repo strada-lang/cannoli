@@ -132,6 +132,7 @@ func Cannoli_App_run(scalar $app) int {
     my int $fastcgi = Cannoli::Config::get_bool(%config, "fastcgi.enabled", 0);
 
     if ($fastcgi == 1) {
+        if (Cannoli::Server::libraries_ok($server_ref) == 0) { return 1; }
         my str $socket = Cannoli::Config::get_str(%config, "fastcgi.socket", "127.0.0.1:9000");
         my int $workers = Cannoli::Config::get_int(%config, "server.workers", 5);
         return Cannoli::FastCGI::run($socket, $app->{"router"}, $workers,

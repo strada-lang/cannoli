@@ -437,7 +437,12 @@ body_min_rate = 1024 # after `timeout` seconds a body must average >= this many 
 write_timeout = 30   # a response write that makes no progress for this long is dropped
 keep_alive = true
 keep_alive_timeout = 2  # idle seconds between requests on a kept-alive connection
+keep_alive_requests = 100  # requests served on one connection before it is closed (0: no limit)
+handler_timeout = 60    # a worker whose handler makes no progress for this long is killed and replaced (0: never)
 max_body_size = 10485760
+body_spool_size = 1048576  # a larger request body is received into a temporary file, not memory (0: never)
+body_spool_dir = /var/tmp  # where (default: $TMPDIR or /tmp)
+body_in_memory = true      # false: hand a spooled body to the handler as a file ($c->body_file()), body empty
 max_header_size = 8192
 shutdown_timeout = 10   # grace for stopping (SIGTERM) or retiring (SIGHUP) workers before SIGKILL
 pid_file = /run/cannoli.pid
@@ -471,10 +476,47 @@ listing = true
 
 [app]
 library = lib1.so, lib2.so
+library_prefixes = false   # true: old library interface (STATUS:/REDIRECT:/RESPONSE: in the returned string)
 
 [log]
 level = info
+access_file = /var/log/cannoli/access.log
+error_file = /var/log/cannoli/error.log
+rotate_size = 50M    # rotate a log file when it reaches this size (0: off, the default)
+rotate_keep = 5      # old files kept (access.log.1 ... access.log.5)
 ```
+
+A `#` starts a comment at the beginning of a line, or after whitespace
+following a value; a `#` inside a value (`color = a#b`, a password hash, a
+URL fragment) is kept, and a quoted value is taken verbatim.
+
+Request paths are normalised before routing: escapes of unreserved
+characters are decoded (`/%61dmin` is `/admin`), `.` and `..` segments are
+resolved and repeated slashes merged, so one resource has one spelling.
+Other escapes (`%2F`, `%20`, ...) are left as sent, a trailing slash is
+significant, and the original is in `$req{"raw_path"}`.
+
+`handler_timeout`: in a classic worker the clock runs while a handler does
+(streamed chunks count as progress); in a loop worker it watches the event
+loop itself, so only a handler that blocks the whole worker trips it.
+WebSocket handlers are exempt, and `$c->long_running()` exempts any other
+handler that is meant to sit idle. While clients are waiting for a classic
+worker, responses are sent with `Connection: close` so that persistent
+connections cannot keep every worker to themselves.
+
+Request bodies over `body_spool_size` are written to a private temporary
+file as they arrive, so slow uploads do not each hold their body in memory
+while it trickles in. By default the file is read just before the handler
+runs and removed, and handlers see the body as before. With
+`body_in_memory = false` the body stays on disk: `$c->body()` is empty,
+`$c->body_file()` is the path (removed after the request), and form or
+multipart parsing of that body is left to the handler. Chunked request
+bodies and FastCGI requests are always read into memory.
+
+Rejected requests (400, 408, 413, 431, 417) are written to the access log
+with the reason in place of the request line, and to the error log at
+`warn`. Log rotation is done by the master; `logrotate` with plain renames
+works too, since the files are reopened for every line.
 
 Set `server.keep_alive = false` or pass `--no-keep-alive` to always close each response.
 `static.cache_max_age = N` adds `Cache-Control: public, max-age=N` to static
@@ -486,6 +528,13 @@ gzipped on the fly between 256B and 1MB (`static.gzip`, default on), with
 `Vary: Accept-Encoding` and a per-encoding ETag. Range requests get the
 uncompressed bytes.
 
+Templates are cached, and reread when the file's modification time or
+size changes. The router's `rate_limit` middleware counts in the shared
+scoreboard, so its limit holds across all workers.
+
+Two requests on one session may overlap: each save writes only what that
+request changed on top of the stored copy, and expired session files are
+removed as sessions are saved (at most every five minutes).
 Sessions are stored under `/tmp/cannoli_sessions` (or the directory given to
 `Cannoli::Session::configure`) only if it is a private directory owned by the
 server user; otherwise a per-user `...-<uid>` directory is used. Call
@@ -564,30 +613,85 @@ Command-line options override the config file regardless of their order.
 
 ## Dynamic Library Interface
 
-Create handlers in C/Strada that compile to shared libraries:
+A handler library is a shared object that exports `cannoli_dispatch`. It
+receives the Cannoli object for the request, builds the response on it and
+returns a non-empty string to say "handled" (`$c->done()`), or `""` to leave
+the request to the next library, the router, or the 404 page.
 
-```c
-// myapp.c
-char* cannoli_dispatch(const char* method, const char* path,
-                       const char* path_info, const char* body) {
-    if (strcmp(path, "/api/hello") == 0) {
-        return strdup("{\"message\":\"Hello from C!\"}");
+```strada
+# myapp.strada
+func cannoli_init(str $config) int {      # optional; 0 stops the server from starting
+    return 1;
+}
+
+func cannoli_dispatch(scalar $c) str {
+    if ($c->path() eq "/api/hello") {
+        $c->render_json({"message" => "Hello " . $c->param("name")});
+        return $c->done();
     }
-    return strdup("");  // 404
+    if ($c->path() eq "/old") {
+        $c->redirect("/api/hello", 0);
+        return $c->done();
+    }
+    return "";                             # not mine
 }
 ```
 
 Build and run:
 ```bash
-gcc -shared -fPIC -o myapp.so myapp.c
+strada --shared myapp.strada -o myapp.so
 ./cannoli --library ./myapp.so --dev
+./cannoli --library "./myapp.so:key=value;other=value"   # options for cannoli_init
 ```
 
-Return value conventions:
-- Response body (auto-detects JSON/HTML)
-- Empty string for 404
-- `STATUS:code:content` for custom status
-- `REDIRECT:url` for redirects
+How the response is chosen when `cannoli_dispatch` returns a non-empty string:
+
+1. `$c->framed_response("RESPONSE:status:headers_len:headers:body")` was
+   called: that complete response (headers as `Name:value\n` lines). For
+   libraries that build the whole response themselves.
+2. The handler set anything on `$c` (`status`, `set_header`, `render_*`,
+   `redirect`, `set_cookie`, a chunked stream, a WebSocket): `$c` is the
+   response. If it wrote no body, the returned string is the body.
+3. Otherwise the returned string is the body: `application/json` when it
+   starts with `{` or `[`, else `text/plain`, both with
+   `X-Content-Type-Options: nosniff`.
+
+A returned string is never searched for directives and never served as HTML
+because it starts with `<`. Earlier versions treated `STATUS:code:...`,
+`REDIRECT:url` and `RESPONSE:...` at the start of the returned string as
+instructions, so a handler that returned text containing user input could be
+made to redirect, pick a status or add headers. Libraries that rely on those
+prefixes keep working with `library_prefixes = true` under `[app]`; new code
+should use `$c`. `$c->{"_abi"}` is 2 on servers with this interface, for
+libraries that must run on both.
+
+A library that fails to load, or whose `cannoli_init` returns 0, stops the
+server from starting.
+
+Other optional exports: `cannoli_after_request($c, $elapsed_ms)`,
+`cannoli_worker_exit()`, `cannoli_tick()`.
+
+### Perl handlers
+
+`lib/perl` embeds a Perl interpreter (`cd lib/perl && make`, then
+`make test`):
+
+```bash
+./cannoli --library "./lib/perl/cannoli_perl.so:script=app.pl;handler=MyApp::handle"
+```
+
+```perl
+package MyApp;
+sub handle {
+    my ($c) = @_;
+    return $c->render_json({ hello => $c->param('name') }) if $c->path eq '/api/hello';
+    return;                                # sets nothing: declined (404)
+}
+sub child_init { }                         # optional: runs once in each worker (reconnect here)
+1;
+```
+
+See `lib/perl/README.md`.
 
 ## Long-lived handlers and worker recycling
 
@@ -606,6 +710,11 @@ See the `examples/` directory:
 - `headers_demo.strada` - HTTP headers demonstration
 - `static_server.strada` - Static file server
 - `api_app.strada` - REST API example
+- `perl/` - a Perl application (`examples/perl/run.sh`)
+
+- `myapp.strada` - a handler library (`cannoli_dispatch($c)`): text, JSON,
+  redirect, cookie, chunked stream; `myapp.conf` loads it, `multi_lib.conf`
+  mounts it under a prefix
 
 ## Architecture
 

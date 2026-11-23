@@ -22,26 +22,28 @@ This document provides comprehensive internal documentation for the Cannoli web 
 
 ```
 /home/mflickin/p/cannoli/
-├── src/                          # Core source files (~9,000 lines)
-│   ├── main.strada              # Entry point, CLI parsing
-│   ├── server.strada            # Preforking HTTP server (~1,100 lines)
-│   ├── router.strada            # URL routing engine (~866 lines)
-│   ├── request.strada           # HTTP request parsing (~1,055 lines)
-│   ├── response.strada          # HTTP response building (~542 lines)
-│   ├── cannoli_obj.strada       # OOP request/response wrapper (~1,537 lines)
-│   ├── tls.strada               # TLS transport over Strada's ssl module (~90 lines)
-│   ├── app.strada               # Application framework API (~240 lines)
-│   ├── config.strada            # Configuration file parser (~298 lines)
-│   ├── log.strada               # Logging system (~498 lines)
-│   ├── session.strada           # Session management (~361 lines)
-│   ├── template.strada          # Template rendering engine (~884 lines)
-│   ├── static.strada            # Static file serving (~192 lines)
-│   ├── fastcgi.strada           # FastCGI protocol (~451 lines)
-│   ├── validation.strada        # Input validation helpers (~470 lines)
-│   └── mime.strada              # MIME type mapping (~44 lines)
+├── src/                          # Core source files (~14,100 lines)
+│   ├── main.strada              # Entry point, CLI parsing (~590 lines)
+│   ├── server.strada            # Preforking HTTP server, connection layer, scoreboard (~3,500 lines)
+│   ├── router.strada            # URL routing engine, middleware (~910 lines)
+│   ├── request.strada           # HTTP request parsing, path normalisation (~1,180 lines)
+│   ├── response.strada          # HTTP response building (~700 lines)
+│   ├── cannoli_obj.strada       # OOP request/response wrapper (~1,770 lines)
+│   ├── websocket.strada         # WebSocket protocol (~750 lines)
+│   ├── tls.strada               # TLS transport over Strada's ssl module (~190 lines)
+│   ├── app.strada               # Application framework API (~260 lines)
+│   ├── config.strada            # Configuration file parser + validation (~480 lines)
+│   ├── log.strada               # Logging, rotation (~570 lines)
+│   ├── session.strada           # Session management (~480 lines)
+│   ├── template.strada          # Template rendering engine (~940 lines)
+│   ├── static.strada            # Static file serving (~590 lines)
+│   ├── fastcgi.strada           # FastCGI protocol (~660 lines)
+│   ├── validation.strada        # Input validation helpers (~500 lines)
+│   └── mime.strada              # MIME type mapping (~46 lines)
 ├── lib/                          # Extensions
 │   ├── compress.strada          # Compression utilities
-│   └── perl/                    # Perl integration
+│   ├── perl/                    # Perl handlers (embedded interpreter; `make`, `make test`)
+│   └── perla/                   # Experimental Perla prototype (not maintained)
 ├── examples/                     # Example applications
 ├── t/                            # Test suite
 ├── build/                        # Build artifacts
@@ -230,7 +232,8 @@ cannoli_obj.strada (OOP wrapper)
 | `Server_run` | `(scalar $server) int` | Start preforking server |
 | `Server_run_single` | `(scalar $server) int` | Run single-process (dev mode) |
 | `Server_set_router` | `(scalar $server, scalar $router) void` | Attach router |
-| `Server_handle_request` | `(scalar $server, int $client_fd, hash %req) void` | Process one request |
+| `Server_dispatch` | `(scalar $server, scalar $req_ref) scalar` | Route one request (admin, libraries, router) |
+| `Server_library_response` | `(scalar $server, scalar $c, str $ret, str $method) hash` | Turn a library handler's result into a response |
 | `Server_spawn_worker` | `(scalar $server) int` | Fork a worker process |
 
 **Connection layer:** plain and TLS connections share one path. A conn hash
@@ -241,6 +244,31 @@ incremental `decode_chunked_step`, 100-continue); `handle_connection` runs
 `dispatch` inside try/catch (a throw = 500, not a dead worker) and
 `finish_headers` adds Date / `[headers]` / X-Request-Id. Errors before a full
 request is read go through `send_read_error` + `conn_linger_close`.
+
+**Library interface (version 2, `$c->{"_abi"}`).** `cannoli_dispatch($c)`
+returns `""` (declined) or a non-empty string (handled, normally
+`$c->done()`). `library_response` picks the response: an explicit
+`$c->framed_response("RESPONSE:...")`; else `$c`'s own state when the handler
+set any (`$c->has_response()`); else the returned string as a body
+(JSON if it starts with `{`/`[`, otherwise text/plain, nosniff). A returned
+string is never parsed for `STATUS:` / `REDIRECT:` / `RESPONSE:` unless
+`app.library_prefixes = 1` (the old interface: user-controlled text could
+steer the response). A library that fails to load or init stops startup.
+
+**Watchdog.** `sb_watch` / `touch` / `sb_stuck`: a classic worker is watched
+from the start of a handler to its end, a loop worker always (heartbeat
+from its watchdog task); the master SIGKILLs a watched worker with no
+progress for `server.handler_timeout`. `$c->long_running()` (called by
+`ws_accept`) exempts a classic-worker handler. `$c->start_chunked` /
+`write_chunk` go through `stream_send` (deadline-bounded `conn_send`).
+Keep-alive: `server.keep_alive_requests` per connection, and a classic
+worker closes after the response while `others_waiting()`.
+
+**FastCGI mode** (`fastcgi.strada`) shares the scoreboard: workers
+`sb_claim`, dispatch runs under `sb_watch`, the FastCGI master kills stuck
+workers and rotates logs; paths are normalised; the listener is
+non-blocking (two workers waking for one connection must not block in
+accept).
 
 **Signal handling:**
 - `SIGTERM/SIGINT`: Graceful shutdown (workers SIGKILLed after `shutdown_timeout`)
@@ -303,7 +331,9 @@ request is read go through `send_read_error` + `conn_linger_close`.
 
 ### 4. request.strada (Request Parsing)
 
-**Purpose:** Parse raw HTTP requests into structured hash.
+**Purpose:** Parse raw HTTP requests into structured hash. `path` is
+normalised (`normalize_path`: unreserved escapes decoded, dot segments
+resolved, slashes merged); the spelling as sent is in `raw_path`.
 
 **Request hash structure:**
 ```strada
@@ -505,6 +535,10 @@ level = info
 **Default config keys:**
 - `server.host`, `server.port`, `server.workers`, `server.max_requests`, `server.timeout`
 - `server.header_timeout`, `server.body_min_rate`, `server.write_timeout`, `server.keep_alive_timeout`, `server.shutdown_timeout`
+- `server.handler_timeout` (stuck-worker kill, 0 = off), `server.keep_alive_requests`
+- `server.body_spool_size` / `body_spool_dir` / `body_in_memory`: Content-Length bodies over the size are received into a 0600 temp file (`spool_*` in server.strada), loaded before dispatch unless `body_in_memory = 0` (then `$req{"body_file"}` / `$c->body_file()`); chunked and FastCGI bodies stay in memory
+- `app.library_prefixes` (old library return-string interface), `log.rotate_size`, `log.rotate_keep`
+- Values may be followed by ` # comment`; a `#` inside a value is kept (`Config::strip_comment`)
 - `server.pid_file`, `server.user`, `server.group`, `server.trusted_proxies`, `server.request_id`, `server.tokens`
 - `server.health_path`, `server.max_connections_per_ip`, `server.rate_limit`, `server.rate_limit_window`
 - `ssl.min_version`, `ssl.ciphers`, `ssl.ciphersuites`; `static.cache_max_age`, `static.gzip`, `static.precompressed`
@@ -552,6 +586,12 @@ level = info
 **Purpose:** File-based session storage.
 
 **Session storage:** `/tmp/cannoli_sessions/sess_<id>`
+
+`Session::save` merges: under a short `flock` on `<dir>/.lock` it rereads
+the stored copy and applies only what this request changed (compared with
+the `_loaded` snapshot), so overlapping requests do not lose each other's
+writes. Expired files are swept from `save` at most every 5 minutes per
+directory (`.cleanup` marker).
 
 **Key functions:**
 
@@ -723,6 +763,8 @@ Test files:
 - `test_router.strada` - URL routing
 - `test_request.strada` - Request parsing
 - `test_hardening.strada` - Framing/strictness, chunked decoding, cookies, templates, middleware, ranges
+- `test_review.strada` / `test_review.sh` - path normalisation, config comments, session merging, template reload, log rotation, shared rate counter / library return values, stuck-worker watchdog, streaming to a stalled client, keep-alive fairness, rejected-request logging
+- `test_perl.sh` - the Perl library (skipped until `cd lib/perl && make`)
 - `test_hardening.sh` / `test_hardening_loop.sh` - Live timeouts, smuggling inputs, 100-continue, pid file (classic / loop workers)
 - `test_tls.sh` - classic+loop x HTTP+HTTPS smoke test (skips without openssl / SSL lib)
 - `test_websocket.sh` - WebSockets from a library over ws/wss, classic + loop (echo, idle, close, protocol errors)
@@ -773,18 +815,21 @@ prefix -- the ssl module has no API for it yet).
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| server.strada | ~1,100 | Server core |
-| request.strada | ~1,055 | Request parsing |
-| cannoli_obj.strada | ~1,537 | OOP wrapper |
-| router.strada | ~866 | URL routing |
-| template.strada | ~884 | Template engine |
-| response.strada | ~542 | Response building |
-| log.strada | ~498 | Logging |
-| validation.strada | ~470 | Validation |
-| fastcgi.strada | ~451 | FastCGI |
-| session.strada | ~361 | Sessions |
-| config.strada | ~298 | Config |
-| app.strada | ~240 | App framework |
-| main.strada | ~449 | Entry point |
-| static.strada | ~192 | Static files |
-| **Total** | **~9,000** | |
+| server.strada | ~3,500 | Preforking HTTP server, connection layer, scoreboard |
+| cannoli_obj.strada | ~1,770 | OOP request/response wrapper |
+| request.strada | ~1,180 | HTTP request parsing, path normalisation |
+| template.strada | ~940 | Template rendering engine |
+| router.strada | ~910 | URL routing engine, middleware |
+| websocket.strada | ~750 | WebSocket protocol |
+| response.strada | ~700 | HTTP response building |
+| fastcgi.strada | ~660 | FastCGI protocol |
+| main.strada | ~590 | Entry point, CLI parsing |
+| static.strada | ~590 | Static file serving |
+| log.strada | ~570 | Logging, rotation |
+| validation.strada | ~500 | Input validation helpers |
+| session.strada | ~480 | Session management |
+| config.strada | ~480 | Configuration file parser + validation |
+| app.strada | ~260 | Application framework API |
+| tls.strada | ~190 | TLS transport over Strada's ssl module |
+| mime.strada | ~46 | MIME type mapping |
+| **Total** | **~14,100** | |

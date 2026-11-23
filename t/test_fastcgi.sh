@@ -28,6 +28,8 @@ MPID=$!
 wait_up "$SOCK"
 R=$(python3 "$C" "$SOCK" /hello)
 [ "$R" = "Hello, World!" ] && pass "Unix socket (stale file replaced)" || fail "unix: $R"
+R=$(python3 "$C" "$SOCK" /./%68ello)
+[ "$R" = "Hello, World!" ] && pass "path normalised as for HTTP (/./%68ello)" || fail "normalised path: $R"
 [ "$(stat -c %a "$SOCK")" = 660 ] && pass "socket mode 0660" || fail "mode $(stat -c %a "$SOCK")"
 "$BIN" --fastcgi --socket "$SOCK" --demo -w 1 > "$S/second.log" 2>&1
 grep -q "already listening" "$S/second.log" && pass "second server refused" || fail "second server: $(tail -1 "$S/second.log")"

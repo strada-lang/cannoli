@@ -1,0 +1,201 @@
+# t/test_review.strada - unit tests for the fixes from the code review:
+# path normalisation, config comments, session merging and cleanup,
+# template reloading, log rotation, the router rate limiter.
+
+my int $g_failed = 0;
+
+func check(int $cond, str $name) void {
+    if ($cond) {
+        say("  PASS: " . $name);
+    } else {
+        say("  FAIL: " . $name);
+        $g_failed = $g_failed + 1;
+    }
+}
+
+func np(str $p) str { return Cannoli::Request::normalize_path($p); }
+
+func test_paths() void {
+    say("Testing path normalisation...");
+    check(np("/echo") eq "/echo", "plain path untouched");
+    check(np("//echo") eq "/echo", "double slash merged");
+    check(np("/./echo") eq "/echo", "dot segment removed");
+    check(np("/a/../echo") eq "/echo", "dot-dot resolved");
+    check(np("/../../echo") eq "/echo", "dot-dot never climbs above the root");
+    check(np("/%65cho") eq "/echo", "escaped unreserved character decoded");
+    check(np("/%2e%2e/%2E%2E/etc/passwd") eq "/etc/passwd", "escaped dot-dot resolved");
+    check(np("/a%2Fb") eq "/a%2Fb", "escaped slash stays escaped");
+    check(np("/a%00b") eq "/a%00b", "escaped NUL stays escaped");
+    check(np("/a%20b%25") eq "/a%20b%25", "other escapes untouched");
+    check(np("/echo/") eq "/echo/", "trailing slash kept");
+    check(np("/a/b/..") eq "/a/", "trailing dot-dot leaves a directory");
+    check(np("/a/%zz") eq "/a/%zz", "invalid escape left alone");
+    check(np("*") eq "*", "asterisk-form untouched");
+    check(np("/") eq "/" && np("//") eq "/" && np("/.") eq "/", "root forms");
+    my hash %req = Cannoli::Request::parse("GET //a/./%62?x=%2e HTTP/1.1\r\nHost: h\r\n\r\n");
+    check($req{"path"} eq "/a/b" && $req{"raw_path"} eq "//a/./%62" && $req{"query_string"} eq "x=%2e", "parse(): path normalised, raw_path and query kept");
+}
+
+func test_config_comments() void {
+    say("Testing config comments...");
+    my str $dir = "/tmp/cannoli_review_" . core::getpid();
+    core::mkdir($dir, 448);
+    my str $f = $dir . "/c.conf";
+    spew($f, "[server]\nport = 8123   # the port\nhost = 127.0.0.1\t# tab then comment\n[x]\nhash = \$6\$ab#cd\nurl = http://h/p#frag\nq = \"a # b\"  # c\nsq = 'it # is'\nempty = # nothing\nplain = v\ncolor=#fff\n");
+    my hash %c = Cannoli::Config::parse_file($f);
+    check($c{"server.port"} eq "8123", "inline comment after a value: '" . $c{"server.port"} . "'");
+    check($c{"server.host"} eq "127.0.0.1", "comment after a tab");
+    check($c{"x.hash"} eq "\$6\$ab#cd", "# inside a value kept");
+    check($c{"x.url"} eq "http://h/p#frag", "URL fragment kept");
+    check($c{"x.q"} eq "a # b", "quoted value keeps ' #', comment after the quote dropped");
+    check($c{"x.sq"} eq "it # is", "single-quoted value");
+    check($c{"x.empty"} eq "", "value that is only a comment");
+    check($c{"x.plain"} eq "v", "plain value");
+    check($c{"x.color"} eq "", "a value starting with # is a comment");
+    check(scalar(@{Cannoli::Config::validate(%c)}) == 0, "the config validates");
+    core::unlink($f);
+    core::rmdir($dir);
+}
+
+func test_sessions() void {
+    say("Testing sessions...");
+    my str $dir = "/tmp/cannoli_review_sess_" . core::getpid();
+    Cannoli::Session::configure($dir, "sid", 3600);
+    my scalar $s = Cannoli::Session::new();
+    Cannoli::Session::set($s, "user", "ann");
+    Cannoli::Session::set($s, "gone", "x");
+    Cannoli::Session::save($s);
+    my str $id = Cannoli::Session::id($s);
+
+    # two requests load the same session, each changes something different
+    my scalar $a = Cannoli::Session::load($id);
+    my scalar $b = Cannoli::Session::load($id);
+    Cannoli::Session::set($a, "cart", "3 items");
+    Cannoli::Session::set($b, "theme", "dark");
+    Cannoli::Session::delete($b, "gone");
+    Cannoli::Session::save($a);
+    Cannoli::Session::save($b);
+    my scalar $r = Cannoli::Session::load($id);
+    check(Cannoli::Session::get($r, "cart") eq "3 items", "first request's change survives the second's save");
+    check(Cannoli::Session::get($r, "theme") eq "dark", "second request's change saved");
+    check(Cannoli::Session::get($r, "user") eq "ann", "untouched value kept");
+    check(Cannoli::Session::has($r, "gone") == 0, "deletion saved");
+
+    # a stale copy saved later must not bring the deleted key back or undo a change
+    Cannoli::Session::set($r, "user", "bob");
+    Cannoli::Session::save($r);
+    Cannoli::Session::set($a, "n", "1");
+    Cannoli::Session::save($a);
+    my scalar $r2 = Cannoli::Session::load($id);
+    check(Cannoli::Session::get($r2, "user") eq "bob", "a stale copy does not undo another request's change");
+    check(Cannoli::Session::has($r2, "gone") == 0, "a stale copy does not resurrect a deleted key");
+    check(Cannoli::Session::get($r2, "n") eq "1", "the stale copy's own change is saved");
+
+    # values with separators survive
+    Cannoli::Session::set($r2, "k=1\n", "a=b\nc");
+    Cannoli::Session::save($r2);
+    my scalar $r3 = Cannoli::Session::load($id);
+    check(Cannoli::Session::get($r3, "k=1\n") eq "a=b\nc", "keys and values with = and newline");
+
+    # cleanup: an expired session and an abandoned temp file go, a live one stays
+    my scalar $old = Cannoli::Session::new();
+    Cannoli::Session::save($old);
+    my str $old_path = Cannoli::Session::file_path(Cannoli::Session::id($old));
+    my str $tmp_path = $dir . "/sess_" . ("a" x 64) . ".tmp.1";
+    spew($tmp_path, "x");
+    core::utime($old_path, core::time() - 7200, core::time() - 7200);
+    core::utime($tmp_path, core::time() - 7200, core::time() - 7200);
+    my int $n = Cannoli::Session::cleanup();
+    check($n == 1 && core::is_file($old_path) == 0, "expired session removed (" . $n . ")");
+    check(core::is_file($tmp_path) == 0, "abandoned temporary file removed");
+    check(core::is_file(Cannoli::Session::file_path($id)) == 1, "live session kept");
+    Cannoli::Session::destroy($id);
+    core::unlink($dir . "/.lock");
+    core::unlink($dir . "/.cleanup");
+    core::rmdir($dir);
+}
+
+func test_templates() void {
+    say("Testing template reloading...");
+    my str $dir = "/tmp/cannoli_review_tpl_" . core::getpid();
+    core::mkdir($dir, 448);
+    spew($dir . "/t.html", "one {{x}}");
+    Cannoli::Template::init($dir);
+    check(Cannoli::Template::render("t.html", {"x" => "1"}) eq "one 1", "first render");
+    spew($dir . "/t.html", "second {{x}}");
+    core::utime($dir . "/t.html", core::time() + 5, core::time() + 5);
+    check(Cannoli::Template::render("t.html", {"x" => "1"}) eq "second 1", "edited template picked up without a restart");
+    check(Cannoli::Template::render("t.html", {"x" => "2"}) eq "second 2", "unchanged template served from the cache");
+    core::unlink($dir . "/t.html");
+    core::rmdir($dir);
+}
+
+func test_rotation() void {
+    say("Testing log rotation...");
+    my str $dir = "/tmp/cannoli_review_log_" . core::getpid();
+    core::mkdir($dir, 448);
+    my hash %cfg = Cannoli::Config::defaults();
+    $cfg{"log.access_file"} = $dir . "/access.log";
+    $cfg{"log.error_file"} = $dir . "/error.log";
+    $cfg{"log.rotate_size"} = "1K";
+    $cfg{"log.rotate_keep"} = "2";
+    Cannoli::Log::init(%cfg);
+    check(Cannoli::Log::parse_size("10M") == 10485760 && Cannoli::Log::parse_size("2k") == 2048 && Cannoli::Log::parse_size("x") == 0, "size suffixes");
+    my int $round = 1;
+    while ($round <= 4) {
+        spew($dir . "/access.log", ("round " . $round . "\n") x 200);
+        Cannoli::Log::check_rotation();
+        $round = $round + 1;
+    }
+    check(core::is_file($dir . "/access.log") == 0, "the full log was moved aside");
+    check(index(slurp($dir . "/access.log.1"), "round 4") == 0, "newest old log is .1");
+    check(index(slurp($dir . "/access.log.2"), "round 3") == 0, "previous one is .2");
+    check(core::is_file($dir . "/access.log.3") == 0, "no more than rotate_keep old logs");
+    spew($dir . "/error.log", "small\n");
+    Cannoli::Log::check_rotation();
+    check(core::is_file($dir . "/error.log") == 1, "a log under the size is left alone");
+    foreach my str $f ("access.log.1", "access.log.2", "error.log") { core::unlink($dir . "/" . $f); }
+    core::rmdir($dir);
+    $cfg{"log.access_file"} = "";
+    $cfg{"log.error_file"} = "";
+    $cfg{"log.rotate_size"} = "0";
+    Cannoli::Log::init(%cfg);
+}
+
+func test_rate_counter() void {
+    say("Testing the router rate counter...");
+    # no scoreboard in this process: the per-process fallback
+    my int $c1 = Cannoli::Router::rate_count("1.2.3.4:t", 60)->{"count"};
+    my scalar $e2 = Cannoli::Router::rate_count("1.2.3.4:t", 60);
+    my scalar $o = Cannoli::Router::rate_count("5.6.7.8:t", 60);
+    check($c1 == 1 && $e2->{"count"} == 2 && $o->{"count"} == 1, "counts per key");
+    check($e2->{"reset_at"} > core::time(), "window end in the future");
+    # with a scoreboard: shared counts
+    Cannoli::Server::sb_init();
+    my scalar $s1 = Cannoli::Router::rate_count("9.9.9.9:t", 3600);
+    my int $pid = core::fork();
+    if ($pid == 0) {
+        Cannoli::Router::rate_count("9.9.9.9:t", 3600);
+        core::exit(0);
+    }
+    core::waitpid($pid, 0);
+    my scalar $s2 = Cannoli::Router::rate_count("9.9.9.9:t", 3600);
+    check($s2->{"count"} == $s1->{"count"} + 2, "another process's request is counted (" . $s1->{"count"} . " -> " . $s2->{"count"} . ")");
+    Cannoli::Router::rate_limit_clear("9.9.9.9", "t");
+    check(Cannoli::Router::rate_count("9.9.9.9:t", 3600)->{"count"} == 1, "rate_limit_clear resets the shared count");
+}
+
+func main() int {
+    test_paths();
+    test_config_comments();
+    test_sessions();
+    test_templates();
+    test_rotation();
+    test_rate_counter();
+    if ($g_failed == 0) {
+        say("All review tests passed!");
+        return 0;
+    }
+    say($g_failed . " review test(s) failed");
+    return 1;
+}

@@ -43,9 +43,13 @@ func Cannoli_Config_defaults() hash {
     $config{"server.backlog"} = "128";
     $config{"server.max_body_size"} = "10485760";    # 10MB default
     $config{"server.max_header_size"} = "8192";      # 8KB default
+    $config{"server.body_spool_size"} = "1048576";   # larger bodies are received into a temp file (0 = never)
+    $config{"server.body_in_memory"} = "1";          # 0: hand large bodies to the handler as a file
     $config{"server.header_timeout"} = "20";         # seconds for the whole header block / TLS handshake
     $config{"server.body_min_rate"} = "1024";        # bytes/s floor for request bodies after server.timeout
     $config{"server.shutdown_timeout"} = "10";       # seconds before stopping/retiring workers are killed
+    $config{"server.handler_timeout"} = "60";        # seconds without progress before a stuck worker is killed (0 = never)
+    $config{"server.keep_alive_requests"} = "100";   # requests per connection (0 = no limit)
     $config{"server.pid_file"} = "";
     $config{"server.user"} = "";                     # drop to this user after binding (when started as root)
     $config{"server.group"} = "";
@@ -119,16 +123,7 @@ func Cannoli_Config_parse_file(str $filename) hash {
         my int $eq_pos = index($line, "=");
         if ($eq_pos > 0) {
             my str $key = ::trim(substr($line, 0, $eq_pos));
-            my str $value = ::trim(substr($line, $eq_pos + 1, length($line) - $eq_pos - 1));
-
-            # Remove quotes if present
-            if (length($value) >= 2) {
-                my str $first_ch = substr($value, 0, 1);
-                my str $last_ch = substr($value, length($value) - 1, 1);
-                if (($first_ch eq "\"" && $last_ch eq "\"") || ($first_ch eq "'" && $last_ch eq "'")) {
-                    $value = substr($value, 1, length($value) - 2);
-                }
-            }
+            my str $value = ::strip_comment(::trim(substr($line, $eq_pos + 1, length($line) - $eq_pos - 1)));
 
             # Build full key with section prefix
             my str $full_key = $key;
@@ -143,6 +138,42 @@ func Cannoli_Config_parse_file(str $filename) hash {
     }
 
     return %config;
+}
+
+# A value with its trailing comment and surrounding quotes removed.
+#   port = 8080   # the port        -> 8080
+#   hash = $6$ab#cd                  -> $6$ab#cd   (# not after whitespace)
+#   name = "a # b"  # comment        -> a # b      (quoted: kept verbatim)
+# A "#" starts a comment only at the start of the value or after
+# whitespace, so values that contain one (password hashes, URLs with a
+# fragment, colours) are left alone; quote a value to keep " #" in it.
+func Cannoli_Config_strip_comment(str $value) str {
+    my int $n = length($value);
+    if ($n == 0) { return $value; }
+    my str $q = substr($value, 0, 1);
+    if ($q eq "\"" || $q eq "'") {
+        my int $close = index($value, $q, 1);
+        if ($close > 0) {
+            my str $rest = ::trim(substr($value, $close + 1, $n - $close - 1));
+            if (length($rest) == 0 || substr($rest, 0, 1) eq "#") {
+                return substr($value, 1, $close - 1);
+            }
+        }
+        return $value;
+    }
+    if ($q eq "#") { return ""; }
+    my int $i = 1;
+    while ($i < $n) {
+        my str $ch = substr($value, $i, 1);
+        if ($ch eq "#") {
+            my str $prev = substr($value, $i - 1, 1);
+            if ($prev eq " " || $prev eq "\t") {
+                return ::trim(substr($value, 0, $i));
+            }
+        }
+        $i = $i + 1;
+    }
+    return $value;
 }
 
 # Trim whitespace from string
@@ -255,6 +286,13 @@ func Cannoli_Config_validate(hash %config) scalar {
     ::validate_uint(%config, $errors, "server.body_min_rate", 0, -1);
     ::validate_uint(%config, $errors, "server.write_timeout", 1, 86400);
     ::validate_uint(%config, $errors, "server.shutdown_timeout", 1, 86400);
+    ::validate_uint(%config, $errors, "server.handler_timeout", 0, 86400);
+    ::validate_uint(%config, $errors, "server.body_spool_size", 0, -1);
+    ::validate_uint(%config, $errors, "server.keep_alive_requests", 0, -1);
+    ::validate_uint(%config, $errors, "log.rotate_keep", 1, 1000);
+    if (exists(%config, "log.rotate_size") && uc(trim("" . $config{"log.rotate_size"})) !~ /^[0-9]+[KMG]?$/) {
+        push(@{$errors}, "log.rotate_size must be a size in bytes (K, M or G suffix allowed; 0 = off)");
+    }
     ::validate_uint(%config, $errors, "server.max_connections_per_ip", 0, -1);
     ::validate_uint(%config, $errors, "server.rate_limit", 0, -1);
     ::validate_uint(%config, $errors, "server.rate_limit_window", 1, 3600);
@@ -267,7 +305,7 @@ func Cannoli_Config_validate(hash %config) scalar {
         push(@{$errors}, "ssl.min_version must be 1.2 or 1.3");
     }
 
-    foreach my str $key ("server.http", "server.keep_alive", "server.loop_workers", "server.request_id", "server.tokens", "ssl.enabled", "ssl.only", "fastcgi.enabled", "admin.enabled", "static.listing") {
+    foreach my str $key ("server.http", "server.keep_alive", "server.loop_workers", "server.request_id", "server.tokens", "app.library_prefixes", "server.body_in_memory", "ssl.enabled", "ssl.only", "fastcgi.enabled", "admin.enabled", "static.listing") {
         ::validate_bool(%config, $errors, $key);
     }
 

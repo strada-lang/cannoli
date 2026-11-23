@@ -42,6 +42,19 @@ my int $g_log_to_stderr = 1;
 my int $g_log_to_stdout = 0;  # For access log to stdout
 my str $g_log_format = "%m %p %s %b %Tms";  # Default console format
 
+# "10M" -> 10485760 (K, M, G suffixes; plain bytes otherwise; 0 if invalid)
+func Cannoli_Log_parse_size(str $raw) int {
+    my str $v = uc(trim($raw));
+    if ($v !~ /^[0-9]+[KMG]?$/) { return 0; }
+    my int $mult = 1;
+    my str $last = substr($v, length($v) - 1, 1);
+    if ($last eq "K") { $mult = 1024; }
+    elsif ($last eq "M") { $mult = 1048576; }
+    elsif ($last eq "G") { $mult = 1073741824; }
+    if ($mult > 1) { $v = substr($v, 0, length($v) - 1); }
+    return ($v + 0) * $mult;
+}
+
 # Initialize logging
 func Cannoli_Log_init(hash %config) void {
     $g_error_log_file = Cannoli::Config::get_str(%config, "log.error_file", "");
@@ -58,6 +71,12 @@ func Cannoli_Log_init(hash %config) void {
     } elsif ($level_str eq "debug") {
         $g_log_level = 4;
     }
+
+    # log.rotate_size (bytes, with an optional K/M/G suffix; 0 = off) and
+    # log.rotate_keep (old files kept)
+    $g_rotate_size = ::parse_size(Cannoli::Config::get_str(%config, "log.rotate_size", "0"));
+    my int $keep = Cannoli::Config::get_int(%config, "log.rotate_keep", 5);
+    if ($keep > 0) { $g_rotate_keep = $keep; }
 
     # Check if logging to stdout is enabled (--debug flag)
     my str $to_stdout = Cannoli::Config::get_str(%config, "log.to_stdout", "0");
@@ -329,7 +348,7 @@ func Cannoli_Log_request(hash %req, hash %res) void {
 # ============================================================
 
 # Global rotation settings
-my int $g_rotate_size = 10485760;  # 10MB default
+my int $g_rotate_size = 0;         # bytes; 0 = no rotation (log.rotate_size)
 my int $g_rotate_keep = 5;         # Keep 5 old files
 
 # Configure log rotation
@@ -347,8 +366,8 @@ func Cannoli_Log_file_size(str $path) int {
     if (core::is_file($path) == 0) {
         return 0;
     }
-    my str $content = slurp($path);
-    return length($content);
+    my hash %st = core::stat($path);
+    return exists(%st, "size") ? $st{"size"} + 0 : 0;
 }
 
 # Rotate a log file
@@ -359,24 +378,23 @@ func Cannoli_Log_rotate(str $path) void {
     }
 
     # Check if file needs rotation
+    if ($g_rotate_size <= 0) {
+        return;
+    }
     my int $size = ::file_size($path);
     if ($size < $g_rotate_size) {
         return;
     }
 
-    # Rotate existing numbered files (work backwards)
-    my int $i = $g_rotate_keep - 1;
+    # Shift file.N -> file.N+1, dropping the oldest (file.<keep>)
+    my int $i = $g_rotate_keep;
     while ($i >= 1) {
         my str $old_path = $path . "." . $i;
-        my str $new_path = $path . "." . ($i + 1);
-
         if (core::is_file($old_path) == 1) {
-            if ($i == $g_rotate_keep - 1) {
-                # Delete oldest file
+            if ($i >= $g_rotate_keep) {
                 core::unlink($old_path);
             } else {
-                # Rename to next number
-                core::rename($old_path, $new_path);
+                core::rename($old_path, $path . "." . ($i + 1));
             }
         }
         $i = $i - 1;
@@ -387,8 +405,12 @@ func Cannoli_Log_rotate(str $path) void {
     core::rename($path, $rotated_path);
 }
 
-# Check and rotate all log files if needed
+# Check and rotate all log files if needed. Called from the master only
+# (see Cannoli::Server::housekeeping): every process opens the log for each
+# line it writes, so a rename by one process is picked up by all of them,
+# while rotating from several processes at once would race.
 func Cannoli_Log_check_rotation() void {
+    if ($g_rotate_size <= 0) { return; }
     if (length($g_error_log_file) > 0) {
         ::rotate($g_error_log_file);
     }
@@ -489,7 +511,6 @@ func Cannoli_Log_write_error_enhanced(str $level, str $message) void {
     }
 
     if (length($g_error_log_file) > 0) {
-        ::check_rotation();  # Check rotation before writing
         my scalar $fh = core::open($g_error_log_file, "a");
         if (defined($fh)) {
             core::fwrite($fh, $line);
@@ -514,8 +535,6 @@ func Cannoli_Log_access_enhanced(str $remote_ip, str $method, str $path, str $pr
 
     # Write to file
     if (length($g_access_log_file) > 0) {
-        ::check_rotation();  # Check rotation before writing
-
         my str $line = "";
         if ($g_json_log == 1) {
             $line = ::access_json($remote_ip, $method, $path, $protocol, $status, $size, $referer, $user_agent, $time_ms) . "\n";

@@ -61,6 +61,7 @@ package Cannoli::Template;
 
 # Template cache
 my hash %g_template_cache = ();
+my hash %g_template_stamp = ();   # "mtime:size" of the file each entry was read from
 my str $g_template_dir = "./templates";
 my int $g_cache_enabled = 1;
 
@@ -87,6 +88,7 @@ func Cannoli_Template_set_cache(int $enabled) void {
 # Clear template cache
 func Cannoli_Template_clear_cache() void {
     %g_template_cache = ();
+    %g_template_stamp = ();
 }
 
 func Cannoli_Template_is_tag_boundary(str $template, int $pos) int {
@@ -122,13 +124,21 @@ func Cannoli_Template_load(str $name) str {
         return "";
     }
 
-    # Check cache first
-    if ($g_cache_enabled == 1 && exists(%g_template_cache, $name)) {
-        return $g_template_cache{$name};
-    }
-
     # Build full path
     my str $path = $g_template_dir . "/" . $name;
+
+    # Check cache first. A cached template is used only while the file on
+    # disk is the one that was read (same modification time and size), so
+    # an edited template shows up on the next request without a restart.
+    my str $stamp = "";
+    if ($g_cache_enabled == 1) {
+        my hash %st = core::stat($path);
+        if (exists(%st, "mtime")) { $stamp = $st{"mtime"} . ":" . $st{"size"}; }
+        if (exists(%g_template_cache, $name) && length($stamp) > 0
+            && exists(%g_template_stamp, $name) && $g_template_stamp{$name} eq $stamp) {
+            return $g_template_cache{$name};
+        }
+    }
 
     # Check if file exists and stays within template directory
     if (core::is_file($path) == 0) {
@@ -154,6 +164,7 @@ func Cannoli_Template_load(str $name) str {
     # Cache if enabled
     if ($g_cache_enabled == 1) {
         $g_template_cache{$name} = $content;
+        $g_template_stamp{$name} = $stamp;
     }
 
     return $content;

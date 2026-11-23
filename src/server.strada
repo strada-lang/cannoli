@@ -42,7 +42,13 @@ my int $_g_reload_requested = 0;
 #   - Regex and prefix matching with path_info
 #
 # Library interface:
-#   cannoli_dispatch($c) -> response_body
+#   cannoli_dispatch($c) -> "" (not handled) or a non-empty string (handled)
+#     The response is what the handler set on $c ($c->status, set_header,
+#     render_json, redirect, ...); return $c->done(). A handler that set
+#     nothing on $c and returns a string sends that string as the body
+#     (application/json when it starts with { or [, otherwise text/plain).
+#     $c->framed_response("RESPONSE:status:hdrlen:headers:body") hands over a
+#     complete response in one string. See library_response().
 #   cannoli_after_request($c, $elapsed_ms) -> void  (optional, called after response sent)
 #   $c is a Cannoli object with all request data and response methods
 
@@ -50,6 +56,8 @@ my int $_g_reload_requested = 0;
 # Returns a reference to the server hash
 use Async::Loop;
 use Async::Task;
+
+my int $_g_housekeeping_next = 0;
 
 # Settings that may change on a SIGHUP reload (everything except the
 # listeners, process user, pid file and worker mode).
@@ -67,6 +75,15 @@ func Cannoli_Server_apply_settings(scalar $server_ref, hash %config) void {
     $server_ref->{"keep_alive_timeout"} = Cannoli::Config::get_int(%config, "server.keep_alive_timeout", 2);
     $server_ref->{"max_body_size"} = Cannoli::Config::get_int(%config, "server.max_body_size", 10485760);
     $server_ref->{"max_header_size"} = Cannoli::Config::get_int(%config, "server.max_header_size", 8192);
+    # A request body larger than body_spool_size is received into a
+    # temporary file instead of memory (0 = always memory), so slow uploads
+    # do not each hold their whole body in RAM while they arrive. With
+    # body_in_memory (the default) it is loaded just before the handler
+    # runs, and handlers see no difference; with body_in_memory = 0 the
+    # handler gets the file ($c->body_file()) and an empty body.
+    $server_ref->{"body_spool_size"} = Cannoli::Config::get_int(%config, "server.body_spool_size", 1048576);
+    $server_ref->{"body_spool_dir"} = Cannoli::Config::get_str(%config, "server.body_spool_dir", "");
+    $server_ref->{"body_in_memory"} = Cannoli::Config::get_bool(%config, "server.body_in_memory", 1);
     # Total time allowed for a request's header block (and a TLS handshake):
     # the slowloris bound. server.timeout stays the per-read silence limit.
     $server_ref->{"header_timeout"} = Cannoli::Config::get_int(%config, "server.header_timeout", 20);
@@ -78,6 +95,11 @@ func Cannoli_Server_apply_settings(scalar $server_ref, hash %config) void {
     # Seconds a stopping (shutdown) or retiring (SIGHUP) worker gets to
     # finish before SIGKILL.
     $server_ref->{"shutdown_timeout"} = Cannoli::Config::get_int(%config, "server.shutdown_timeout", 10);
+    # A worker whose handler makes no progress for this long is killed and
+    # replaced (0 = never). See sb_watch.
+    $server_ref->{"handler_timeout"} = Cannoli::Config::get_int(%config, "server.handler_timeout", 60);
+    # Requests served on one connection before it is closed (0 = no limit)
+    $server_ref->{"keep_alive_requests"} = Cannoli::Config::get_int(%config, "server.keep_alive_requests", 100);
     # Proxies whose X-Forwarded-For / X-Forwarded-Proto / X-Request-Id are
     # believed (addresses and IPv4 CIDR blocks, comma-separated).
     $server_ref->{"trusted_proxies"} = Cannoli::Config::get_str(%config, "server.trusted_proxies", "");
@@ -98,6 +120,11 @@ func Cannoli_Server_apply_settings(scalar $server_ref, hash %config) void {
     $server_ref->{"rate_limit"} = Cannoli::Config::get_int(%config, "server.rate_limit", 0);
     $server_ref->{"rate_limit_window"} = Cannoli::Config::get_int(%config, "server.rate_limit_window", 1);
     $server_ref->{"health_path"} = Cannoli::Config::get_str(%config, "server.health_path", "");
+    # app.library_prefixes = 1 restores the old library interface, in which
+    # the string a library returns is searched for STATUS: / REDIRECT: /
+    # RESPONSE: prefixes and a leading "<" means HTML. Off by default: a
+    # handler that returns text containing user input must not be steerable.
+    $server_ref->{"library_prefixes"} = Cannoli::Config::get_bool(%config, "app.library_prefixes", 0);
     # Admin endpoint configuration
     $server_ref->{"admin_enabled"} = Cannoli::Config::get_bool(%config, "admin.enabled", 0);
     $server_ref->{"admin_path"} = Cannoli::Config::get_str(%config, "admin.path", "/__admin");
@@ -161,6 +188,7 @@ func Cannoli_Server_new(hash %config) scalar {
     # Old style: app.library = path1.so,path2.so (chain of responsibility)
     $server{"app_library"} = Cannoli::Config::get_str(%config, "app.library", "");
     $server{"lib_handles"} = [];       # Array of library handles
+    $server{"library_failed"} = 0;     # libraries that failed to load or initialize
     $server{"dispatch_funcs"} = [];    # Array of dispatch functions (old style)
     $server{"after_funcs"} = [];       # Array of after-request functions (old style)
     $server{"library_routes"} = [];    # Array of {prefix, dispatch_func} (new style)
@@ -214,6 +242,7 @@ func Cannoli_Server_new(hash %config) scalar {
                         if (defined($init_ret) && $init_ret) { $init_result = 1; }
                         if ($init_result == 0) {
                             say("  Error: cannoli_init failed");
+                        $server{"library_failed"} = $server{"library_failed"} + 1;
                             $i = $i + 1;
                             next;
                         }
@@ -240,6 +269,7 @@ func Cannoli_Server_new(hash %config) scalar {
                     }
                 } else {
                     say("  Error: Could not load library");
+                        $server{"library_failed"} = $server{"library_failed"} + 1;
                 }
             }
             $i = $i + 1;
@@ -294,6 +324,7 @@ func Cannoli_Server_new(hash %config) scalar {
                     if (defined($init_ret) && $init_ret) { $init_result = 1; }
                     if ($init_result == 0) {
                         say("    Error: cannoli_init failed");
+                        $server{"library_failed"} = $server{"library_failed"} + 1;
                         $j = $j + 1;
                         next;
                     }
@@ -321,6 +352,7 @@ func Cannoli_Server_new(hash %config) scalar {
                 }
             } else {
                 say("    Error: Could not load library");
+                        $server{"library_failed"} = $server{"library_failed"} + 1;
             }
             $j = $j + 1;
         }
@@ -448,6 +480,7 @@ func Cannoli_Server_parse_response(str $response_body) hash {
 
                     # Parse and apply custom headers (Content-Type:value\nHeader:value...)
                     my array @header_lines = split("\n", $headers_str);
+                    my hash %seen_names = ();
                     my int $j = 0;
                     while ($j < scalar(@header_lines)) {
                         my str $line = $header_lines[$j];
@@ -458,7 +491,14 @@ func Cannoli_Server_parse_response(str $response_body) hash {
                         if ($colon > 0) {
                             my str $name = trim(substr($line, 0, $colon));
                             my str $value = trim(substr($line, $colon + 1, length($line) - $colon - 1));
-                            Cannoli::Response::header(%res, $name, $value);
+                            # a name given more than once (Set-Cookie) is
+                            # sent once per value, not collapsed to the last
+                            if (exists(%seen_names, lc($name))) {
+                                Cannoli::Response::add_header(%res, $name, $value);
+                            } else {
+                                Cannoli::Response::header(%res, $name, $value);
+                                $seen_names{lc($name)} = 1;
+                            }
                         }
                         $j = $j + 1;
                     }
@@ -498,6 +538,80 @@ func Cannoli_Server_parse_response(str $response_body) hash {
         %res = Cannoli::Response::text(200, $response_body);
     }
 
+    return %res;
+}
+
+# The response of a library handler that returned the non-empty $ret.
+#   1. $c->framed_response(...) was called: that string, parsed.
+#   2. the handler set response state on $c (or streamed / upgraded): $c is
+#      the response. If it wrote no body, the returned string is the body,
+#      unless that is $c->done().
+#   3. otherwise the returned string is the body and nothing more: it is
+#      never searched for directives (a handler that echoes a query
+#      parameter could otherwise be told to redirect, pick a status or add
+#      headers) and never served as HTML because it begins with "<".
+#      app.library_prefixes = 1 restores the old behaviour.
+func Cannoli_Server_library_response(scalar $server_ref, scalar $c, str $ret, str $method) hash {
+    my hash %res = ();
+    if (exists(%{$c}, "_res_framed")) {
+        %res = ::parse_response("" . $c->{"_res_framed"});
+        return %res;
+    }
+    if ($c->has_response() == 1) {
+        %res = $c->build_response();
+        if ($res{"sent"} == 1) { return %res; }
+        my int $st = $res{"status"} + 0;
+        my str $have = defined($res{"body"}) ? ("" . $res{"body"}) : "";
+        if (core::byte_length($have) == 0 && $ret ne Cannoli::done_marker() && length($c->{"_res_redirect"}) == 0
+            && $st >= 200 && $st != 204 && $st != 304 && !exists(%res, "_file")) {
+            Cannoli::Response::body(%res, $ret);
+            if (Cannoli::Response::has_header(%res, "Content-Type") == 0) {
+                my str $c0 = substr($ret, 0, 1);
+                Cannoli::Response::header(%res, "Content-Type", ($c0 eq "{" || $c0 eq "[") ? "application/json" : "text/plain; charset=utf-8");
+                Cannoli::Response::header(%res, "X-Content-Type-Options", "nosniff");
+            }
+        }
+        return %res;
+    }
+    if ($ret eq Cannoli::done_marker()) {
+        %res = Cannoli::Response::text(200, "");
+        return %res;
+    }
+    if ($server_ref->{"library_prefixes"} == 1) {
+        %res = ::parse_response($ret);
+        return %res;
+    }
+    my str $first = substr($ret, 0, 1);
+    if ($first eq "{" || $first eq "[") {
+        %res = Cannoli::Response::json(200, $ret);
+    } else {
+        %res = Cannoli::Response::text(200, $ret);
+    }
+    Cannoli::Response::header(%res, "X-Content-Type-Options", "nosniff");
+    return %res;
+}
+
+# Write for a handler that streams its response ($c->start_chunked /
+# write_chunk / end_chunked): the same deadline-bounded send as every other
+# response, so a client that stops reading costs server.write_timeout and
+# then the connection, and in a loop worker the task parks instead of
+# blocking the whole worker. Returns 1, or 0 when the client is gone.
+func Cannoli_Server_stream_send(scalar $server_ref, scalar $conn, str $data) int {
+    if ($conn->{"stream_failed"} == 1) { return 0; }
+    my int $blocking = $conn->{"handler_blocking"} == 1 ? 1 : 0;
+    if ($blocking == 1) { ::set_blocking($conn->{"fd"}, 0); }
+    my int $ok = ::conn_send($server_ref, $conn, $data);
+    if ($blocking == 1) { ::set_blocking($conn->{"fd"}, 1); }
+    if ($ok == 0) { $conn->{"stream_failed"} = 1; }
+    ::touch();
+    return $ok;
+}
+
+# Headers every response carries (Date, [headers], X-Request-Id, Server),
+# for a response a handler streams itself.
+func Cannoli_Server_stream_headers(scalar $server_ref, hash %res, str $request_id) hash {
+    Cannoli::Response::header(%res, "Connection", "close");
+    ::finish_headers($server_ref, %res, $request_id);
     return %res;
 }
 
@@ -618,6 +732,65 @@ func Cannoli_Server_conn_send(scalar $server_ref, scalar $conn, str $data) int {
 __C__ {
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
+}
+
+# Request-body spool files: created private (0600, O_EXCL), written as the
+# body arrives, removed when the request is done.
+my int $_g_spool_seq = 0;
+
+func Cannoli_Server_spool_path(scalar $server_ref) str {
+    my str $dir = "" . $server_ref->{"body_spool_dir"};
+    if (length($dir) == 0) {
+        my str $tmp = core::getenv("TMPDIR");
+        $dir = (defined($tmp) && length($tmp) > 0) ? $tmp : "/tmp";
+    }
+    $_g_spool_seq = $_g_spool_seq + 1;
+    return $dir . "/cannoli-body-" . core::getpid() . "-" . $_g_spool_seq . "-" . core::mono_ms();
+}
+
+# Returns an fd, or -1.
+func Cannoli_Server_spool_open(str $path) int {
+    my scalar $fd = -1;
+    __C__ {
+        char *p = strada_to_str(path);
+        int f = p ? open(p, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
+        free(p);
+        fd = strada_new_int(f);
+    }
+    return $fd;
+}
+
+# Append the first $len bytes of $data starting at $offset. 1 = written.
+func Cannoli_Server_spool_write(int $fd, str $data, int $offset, int $len) int {
+    my scalar $ok = 0;
+    __C__ {
+        int f = (int)strada_to_int(fd);
+        long long off = strada_to_int(offset), n = strada_to_int(len);
+        int good = 0;
+        if (f >= 0 && data && !STRADA_IS_TAGGED_INT(data) && data->type == STRADA_STR && data->value.pv) {
+            size_t have = STRADA_STR_BYTELEN(data);
+            if (off >= 0 && n >= 0 && (size_t)(off + n) <= have) {
+                const char *p = data->value.pv + off;
+                size_t left = (size_t)n;
+                good = 1;
+                while (left > 0) {
+                    ssize_t w = write(f, p, left);
+                    if (w < 0) { if (errno == EINTR) continue; good = 0; break; }
+                    p += w; left -= (size_t)w;
+                }
+            }
+        }
+        ok = strada_new_int(good);
+    }
+    return $ok;
+}
+
+func Cannoli_Server_spool_close(int $fd) void {
+    __C__ {
+        int f = (int)strada_to_int(fd);
+        if (f >= 0) close(f);
+    }
 }
 
 # Read up to $len bytes of $path at $offset (binary-safe); "" on error/EOF.
@@ -740,7 +913,7 @@ __C__ {
 #define CSB_IPS 8192
 #define CSB_BUCKETS 12
 static const int csb_bucket_ms[CSB_BUCKETS - 1] = {5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000};
-typedef struct { int32_t pid; int32_t active; int64_t started; uint64_t requests; } csb_slot;
+typedef struct { int32_t pid; int32_t active; int64_t started; uint64_t requests; int64_t beat; int32_t watch; int32_t pad; } csb_slot;
 typedef struct { uint64_t key; int32_t conns; int32_t count; int64_t window; int64_t seen; } csb_ip;
 typedef struct {
     int64_t started;
@@ -752,6 +925,12 @@ typedef struct {
 } csb_t;
 static csb_t *csb = NULL;
 static int csb_my_slot = -1;
+
+static int64_t csb_mono(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;   /* milliseconds */
+}
 
 static uint64_t csb_hash(const char *s) {
     uint64_t h = 1469598103934665603ULL;
@@ -857,6 +1036,8 @@ func Cannoli_Server_sb_claim() void {
                 int32_t z = 0;
                 if (__atomic_compare_exchange_n(&csb->slots[i].pid, &z, me, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
                     csb->slots[i].active = 0;
+                    csb->slots[i].watch = 0;
+                    csb->slots[i].beat = csb_mono();
                     csb->slots[i].requests = 0;
                     csb->slots[i].started = (int64_t)time(NULL);
                     csb_my_slot = i;
@@ -875,11 +1056,74 @@ func Cannoli_Server_sb_release(int $pid) void {
             for (int i = 0; i < CSB_SLOTS; i++) {
                 if (__atomic_load_n(&csb->slots[i].pid, __ATOMIC_ACQUIRE) == p) {
                     __atomic_store_n(&csb->slots[i].active, 0, __ATOMIC_RELAXED);
+                    __atomic_store_n(&csb->slots[i].watch, 0, __ATOMIC_RELEASE);   /* never inherited by the next owner */
                     __atomic_store_n(&csb->slots[i].pid, 0, __ATOMIC_RELEASE);
                 }
             }
         }
     }
+}
+
+# Stuck-worker watchdog. A worker says "watch me" while it must keep making
+# progress (a classic worker: from the start of a handler to its end; a loop
+# worker: always, with a heartbeat from the loop) and touches its slot as it
+# does. The master kills a watched worker whose last touch is older than
+# server.handler_timeout: a handler in an endless loop or a blocking call
+# that never returns then costs one worker for that long, not forever.
+func Cannoli_Server_sb_watch(int $on) void {
+    __C__ {
+        if (csb && csb_my_slot >= 0) {
+            __atomic_store_n(&csb->slots[csb_my_slot].beat, csb_mono(), __ATOMIC_RELAXED);
+            __atomic_store_n(&csb->slots[csb_my_slot].watch, (int32_t)strada_to_int(on), __ATOMIC_RELEASE);
+        }
+    }
+}
+
+func Cannoli_Server_touch() void {
+    __C__ {
+        if (csb && csb_my_slot >= 0) {
+            __atomic_store_n(&csb->slots[csb_my_slot].beat, csb_mono(), __ATOMIC_RELAXED);
+        }
+    }
+}
+
+# A handler that is meant to live long without the server seeing progress
+# (a WebSocket, a slow event stream) in a classic worker: stop watching
+# until it returns. In a loop worker the loop's own heartbeat is watched,
+# so there is nothing to exempt.
+func Cannoli_Server_long_lived(scalar $server_ref) void {
+    if (defined($server_ref) && $server_ref->{"loop_mode"} == 1) { return; }
+    ::sb_watch(0);
+}
+
+# Pids of watched workers that made no progress for $timeout seconds
+# (master). Each is reported once.
+func Cannoli_Server_sb_stuck(int $timeout) array {
+    my array @pids = ();
+    if ($timeout <= 0) { return @pids; }
+    my int $i = 0;
+    while ($i < 256) {
+        my scalar $pid = 0;
+        __C__ {
+            int idx = (int)strada_to_int(i);
+            int64_t lim = strada_to_int(timeout) * 1000;
+            int32_t found = 0;
+            if (csb && idx < CSB_SLOTS) {
+                csb_slot *sl = &csb->slots[idx];
+                int32_t p = __atomic_load_n(&sl->pid, __ATOMIC_ACQUIRE);
+                if (p > 0 && __atomic_load_n(&sl->watch, __ATOMIC_ACQUIRE) == 1
+                    && csb_mono() - __atomic_load_n(&sl->beat, __ATOMIC_RELAXED) > lim) {
+                    __atomic_store_n(&sl->watch, 0, __ATOMIC_RELEASE);
+                    found = p;
+                }
+            }
+            strada_decref(pid);
+            pid = strada_new_int(found);
+        }
+        if ($pid > 0) { push(@pids, $pid); }
+        $i = $i + 1;
+    }
+    return @pids;
 }
 
 # A connection opened (+1) or closed (-1) in this worker.
@@ -985,6 +1229,51 @@ func Cannoli_Server_sb_rate(str $addr, int $limit, int $window) int {
         ok = strada_new_int(allowed);
     }
     return $ok;
+}
+
+# Shared counter for $key in the current $window-second window: counts
+# this call and returns the total, or -1 when there is no scoreboard (or
+# its table is full) and the caller must count for itself.
+func Cannoli_Server_sb_count(str $key, int $window) int {
+    my scalar $n = -1;
+    __C__ {
+        char *a = strada_to_str(key);
+        csb_ip *e = csb_ip_entry(a, 1);
+        free(a);
+        if (e) {
+            int64_t w = strada_to_int(window);
+            if (w < 1) w = 1;
+            int64_t cur = (int64_t)time(NULL) / w;
+            int64_t old = __atomic_load_n(&e->window, __ATOMIC_ACQUIRE);
+            if (old != cur && __atomic_compare_exchange_n(&e->window, &old, cur, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                __atomic_store_n(&e->count, 0, __ATOMIC_RELEASE);
+            }
+            strada_decref(n);
+            n = strada_new_int(__atomic_add_fetch(&e->count, 1, __ATOMIC_ACQ_REL));
+        }
+    }
+    return $n;
+}
+
+# The current count for $key without counting a request (-1: none/unknown).
+func Cannoli_Server_sb_count_peek(str $key) int {
+    my scalar $n = -1;
+    __C__ {
+        char *a = strada_to_str(key);
+        csb_ip *e = csb_ip_entry(a, 0);
+        free(a);
+        if (e) n = strada_new_int(__atomic_load_n(&e->count, __ATOMIC_ACQUIRE));
+    }
+    return $n;
+}
+
+func Cannoli_Server_sb_count_reset(str $key) void {
+    __C__ {
+        char *a = strada_to_str(key);
+        csb_ip *e = csb_ip_entry(a, 0);
+        free(a);
+        if (e) __atomic_store_n(&e->count, 0, __ATOMIC_RELEASE);
+    }
 }
 
 # Prometheus text exposition of the scoreboard.
@@ -1629,6 +1918,67 @@ func Cannoli_Server_read_request(scalar $server_ref, scalar $conn, str $buffer) 
     }
 
     my int $total_needed = $body_offset + $content_len;
+
+    # A large body goes to a spool file as it arrives (see body_spool_size).
+    my int $spool_min = $server_ref->{"body_spool_size"};
+    if ($spool_min > 0 && $content_len > $spool_min) {
+        my str $spool = ::spool_path($server_ref);
+        my int $sfd = ::spool_open($spool);
+        if ($sfd >= 0) {
+            my int $have = core::byte_length($buffer) - $body_offset;
+            my int $take = $have > $content_len ? $content_len : $have;
+            my int $got = 0;
+            my int $spool_ok = 1;
+            if ($take > 0) { $spool_ok = ::spool_write($sfd, $buffer, $body_offset, $take); $got = $take; }
+            my str $after = $have > $content_len ? core::byte_substr($buffer, $total_needed, $have - $content_len) : "";
+            $buffer = "";
+            while ($spool_ok == 1 && $got < $content_len) {
+                my int $sp_deadline = ::body_deadline($server_ref, $body_start, $got);
+                my str $piece = ::conn_recv($server_ref, $conn, $sp_deadline);
+                my int $plen = core::byte_length($piece);
+                if ($plen == 0) {
+                    ::spool_close($sfd);
+                    core::unlink($spool);
+                    if ($conn->{"timed_out"} == 1) { return ::read_error("timeout", 0); }
+                    return undef;
+                }
+                my int $want = $content_len - $got;
+                if ($plen > $want) {
+                    $after = core::byte_substr($piece, $want, $plen - $want);
+                    $plen = $want;
+                }
+                $spool_ok = ::spool_write($sfd, $piece, 0, $plen);
+                $got = $got + $plen;
+            }
+            ::spool_close($sfd);
+            if ($spool_ok == 0) {
+                core::unlink($spool);
+                Cannoli::Log::error("could not write request body to " . $spool);
+                return ::read_error("spool_failed", 0);
+            }
+            my hash %sp_req = ();
+            if ($server_ref->{"body_in_memory"} == 1) {
+                my str $sp_body = ::file_chunk($spool, 0, $content_len);
+                core::unlink($spool);
+                if (core::byte_length($sp_body) != $content_len) {
+                    Cannoli::Log::error("could not read request body back from " . $spool);
+                    return ::read_error("spool_failed", 0);
+                }
+                %sp_req = Cannoli::Request::parse($header_section . "\r\n\r\n" . $sp_body);
+            } else {
+                %sp_req = Cannoli::Request::parse($header_section . "\r\n\r\n");
+                $sp_req{"body"} = "";
+                $sp_req{"body_file"} = $spool;
+                $sp_req{"content_length"} = "" . $content_len;
+            }
+            my hash %sp_result = ();
+            $sp_result{"req"} = \%sp_req;
+            $sp_result{"buffer"} = $after;
+            return \%sp_result;
+        }
+        Cannoli::Log::warn("could not create a spool file in " . $spool . "; reading the body into memory");
+    }
+
     while (core::byte_length($buffer) < $total_needed) {
         my int $deadline = ::body_deadline($server_ref, $body_start, core::byte_length($buffer) - $body_offset);
         my str $chunk = ::conn_recv($server_ref, $conn, $deadline);
@@ -1805,6 +2155,14 @@ func Cannoli_Server_finish_headers(scalar $server_ref, hash %res, str $request_i
     return %res;
 }
 
+# Periodic work in the master (about once a second): log rotation.
+func Cannoli_Server_housekeeping(scalar $server_ref) void {
+    my int $now = core::mono_ms();
+    if ($now < $_g_housekeeping_next) { return; }
+    $_g_housekeeping_next = $now + 10000;
+    try { Cannoli::Log::check_rotation(); } catch ($hk_err) { Cannoli::Log::error("log rotation: " . $hk_err); }
+}
+
 # Send an error response for a request that could not be read, then close
 # without leaving unread input behind.
 func Cannoli_Server_send_read_error(scalar $server_ref, scalar $conn, scalar $read_result) void {
@@ -1820,6 +2178,8 @@ func Cannoli_Server_send_read_error(scalar $server_ref, scalar $conn, scalar $re
         ::sb_event("timeout");
     } elsif ($err eq "expectation_failed") {
         %err_res = Cannoli::Response::error_page(417, "Expectation Failed");
+    } elsif ($err eq "spool_failed") {
+        %err_res = Cannoli::Response::error_page(500, "Internal Server Error");
     } else {
         %err_res = Cannoli::Response::error_page(400, "Bad Request");
     }
@@ -1831,7 +2191,13 @@ func Cannoli_Server_send_read_error(scalar $server_ref, scalar $conn, scalar $re
     } else {
         ::conn_close($server_ref, $conn);
     }
-    Cannoli::Log::debug("rejected request from " . $conn->{"peer"} . ": " . $err);
+    # In the access log like any other response (no request line was
+    # parsed, so the reason stands in for it) and counted in the metrics.
+    my int $rej_status = $err_res{"status"} + 0;
+    Cannoli::Log::access($conn->{"peer"}, "-", $err, "-", $rej_status,
+        core::byte_length(defined($err_res{"body"}) ? ("" . $err_res{"body"}) : ""), "", "", 0);
+    Cannoli::Log::warn("rejected request from " . $conn->{"peer"} . ": " . $err . " (" . $rej_status . ")");
+    ::sb_record($rej_status, 0, 0);
 }
 
 # ===========================================================================
@@ -1909,8 +2275,8 @@ func Cannoli_Server_dispatch(scalar $server_ref, scalar $req_ref) scalar {
 
                 my scalar $result = core::dl_call_sv($route->{"dispatch"}, [$c]);
                 my str $response_body = defined($result) ? ("" . $result) : "";
-                if (length($response_body) > 0) {
-                    %res = ::parse_response($response_body);
+                if (core::byte_length($response_body) > 0) {
+                    %res = ::library_response($server_ref, $c, $response_body, $req{"method"});
                     $handled = 1;
                     $after_func = $route->{"after"};
                 }
@@ -1928,8 +2294,8 @@ func Cannoli_Server_dispatch(scalar $server_ref, scalar $req_ref) scalar {
         while ($i < $num_funcs && $handled == 0) {
             my scalar $result = core::dl_call_sv($dispatch_funcs->[$i], [$c]);
             my str $response_body = defined($result) ? ("" . $result) : "";
-            if (length($response_body) > 0) {
-                %res = ::parse_response($response_body);
+            if (core::byte_length($response_body) > 0) {
+                %res = ::library_response($server_ref, $c, $response_body, $req{"method"});
                 $handled = 1;
                 $after_func = $after_funcs->[$i];
             }
@@ -1946,6 +2312,16 @@ func Cannoli_Server_dispatch(scalar $server_ref, scalar $req_ref) scalar {
     }
 
     return {"res" => \%res, "c" => $c, "after" => $after_func};
+}
+
+# 1 if a connection is waiting to be accepted on one of the listeners.
+func Cannoli_Server_others_waiting(scalar $server_ref) int {
+    my scalar $fds = $server_ref->{"listen_fds"};
+    if (!defined($fds)) { return 0; }
+    my array @polls = ();
+    foreach my int $lfd (@{$fds}) { push(@polls, {"fd" => $lfd, "events" => 1}); }
+    if (scalar(@polls) == 0) { return 0; }
+    return core::poll(\@polls, 0) > 0 ? 1 : 0;
 }
 
 # Serve every request on one connection (plain or TLS), then close it.
@@ -2017,6 +2393,9 @@ func Cannoli_Server_serve_connection(scalar $server_ref, scalar $conn) void {
             $req{"_fd"} = $conn->{"fd"};
             $req{"_client"} = $conn->{"sock"};
         }
+        # The connection itself, for deadline-bounded streaming writes
+        $req{"_conn"} = $conn;
+        $req{"_server"} = $server_ref;
 
         # A handler that throws costs one 500, not the worker (and in a
         # classic worker, not every other connection it would have served).
@@ -2044,8 +2423,11 @@ func Cannoli_Server_serve_connection(scalar $server_ref, scalar $conn) void {
             Cannoli::Response::header(%res, "Retry-After", "" . $server_ref->{"rate_limit_window"});
             $pre = 1;
         }
+        $conn->{"handler_blocking"} = ($handler_blocking == 1 && $pre == 0) ? 1 : 0;
         if ($handler_blocking == 1 && $pre == 0) { ::set_blocking($conn->{"fd"}, 1); }
         if ($pre == 0) {
+        my int $watched = $server_ref->{"loop_mode"} != 1 ? 1 : 0;
+        if ($watched == 1) { ::sb_watch(1); }
         try {
             my scalar $d = ::dispatch($server_ref, \%req);
             %res = %{$d->{"res"}};
@@ -2063,11 +2445,22 @@ func Cannoli_Server_serve_connection(scalar $server_ref, scalar $conn) void {
             $failed = 1;
             ::sb_event("error");
         }
+        if ($watched == 1) { ::sb_watch(0); }
         if ($handler_blocking == 1) { ::set_blocking($conn->{"fd"}, 0); }
+        $conn->{"handler_blocking"} = 0;
         }
 
         my int $keep_alive = ::should_keep_alive($server_ref, %req);
         if ($failed == 1) { $keep_alive = 0; }
+        if ($keep_alive == 1) {
+            my int $ka_cap = $server_ref->{"keep_alive_requests"};
+            if ($ka_cap > 0 && $conn->{"requests"} >= $ka_cap) { $keep_alive = 0; }
+            # A classic worker serves one connection at a time. While other
+            # clients wait in the accept queue, answer this request and
+            # close, so every waiting client gets a turn instead of a few
+            # persistent connections owning all the workers.
+            if ($keep_alive == 1 && $server_ref->{"loop_mode"} != 1 && ::others_waiting($server_ref) == 1) { $keep_alive = 0; }
+        }
 
         # Build and send the response (unless the handler already streamed it)
         my int $send_ok = 1;
@@ -2096,6 +2489,7 @@ func Cannoli_Server_serve_connection(scalar $server_ref, scalar $conn) void {
         my int $elapsed_ms = ($end_time{"sec"} - $start_sec) * 1000 + ($end_time{"usec"} - $start_usec) / 1000;
 
         Cannoli::Log::request_timed(%req, %res, $elapsed_ms);
+        if (exists(%req, "body_file")) { core::unlink("" . $req{"body_file"}); }
         ::record_request($elapsed_ms);
         my int $out_bytes = exists(%res, "_file_length") ? $res{"_file_length"} : core::byte_length(defined($res{"body"}) ? ("" . $res{"body"}) : "");
         ::sb_record($res{"status"} + 0, $out_bytes, $elapsed_ms);
@@ -2218,6 +2612,10 @@ func Cannoli_Server_worker_loop(scalar $server_ref) void {
     if ($http_fd < 0 && $ssl_fd < 0) {
         return;
     }
+    my array @listen_fds = ();
+    if ($http_fd >= 0) { push(@listen_fds, $http_fd); }
+    if ($ssl_fd >= 0) { push(@listen_fds, $ssl_fd); }
+    $server_ref->{"listen_fds"} = \@listen_fds;
 
     while ($max_requests <= 0 || $_g_worker_requests < $max_requests) {
         # Check if master process died (orphaned worker)
@@ -2351,7 +2749,8 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
 
     Cannoli::Log::info("worker " . core::getpid() . ": event-loop mode, " . $acceptors . " acceptors");
     my scalar $loop = Async::Loop::new();
-    my scalar $state = { "served" => 0, "draining" => 0 };
+    my scalar $state = { "served" => 0, "draining" => 0, "open" => 0 };
+    ::sb_watch(1);
 
     # Watchdog task: exit if the master dies; drain gracefully on SIGTERM or
     # after max_requests connections have been handled.
@@ -2364,7 +2763,11 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
             if ($_g_exit_requested == 1) {
                 $state->{"draining"} = 1; $_g_draining = 1;
             }
-            if ($state->{"draining"} == 1) {
+            # Heartbeat for the master's stuck-worker check: this task runs
+            # only while the loop does, so a handler that blocks the whole
+            # worker stops it. Keep beating while connections drain.
+            ::touch();
+            if ($state->{"draining"} == 1 && $state->{"open"} <= 0) {
                 last;
             }
         }
@@ -2379,6 +2782,7 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                     if (!defined($client)) {
                         next;   # timeout tick: re-check draining
                     }
+                    $state->{"open"} = $state->{"open"} + 1;
                     $loop->spawn(fn () {
                         # On an uncaught handler exception the normal close in
                         # handle_client is skipped -- close here or the client
@@ -2391,6 +2795,7 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                             Cannoli::Log::error("handler died: " . $handler_err);
                             ::conn_close($server_ref, $pconn);
                         }
+                        $state->{"open"} = $state->{"open"} - 1;
                         $state->{"served"} = $state->{"served"} + 1;
                         if ($max_requests > 0 && $state->{"served"} >= $max_requests) {
                             $state->{"draining"} = 1; $_g_draining = 1;
@@ -2419,19 +2824,28 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                         core::coro_yield_io($ssl_srv_fd, "r", 1000);
                         next;
                     }
+                    $state->{"open"} = $state->{"open"} + 1;
                     $loop->spawn(fn () {
                         my int $cfd = Cannoli::TLS::fd($ssl_conn);
                         # Handshake within header_timeout so dead clients
                         # can't park a task forever.
                         my int $hs_deadline = core::mono_ms() + $server_ref->{"header_timeout"} * 1000;
                         my int $hs_ok = 0;
-                        while (1) {
-                            my int $st = Cannoli::TLS::handshake_step($ssl_conn);
-                            if ($st == 0) { $hs_ok = 1; last; }
-                            if ($st < 0) { last; }
-                            my int $hs_left = $hs_deadline - core::mono_ms();
-                            if ($hs_left <= 0) { last; }
-                            core::coro_yield_io($cfd, $st == 2 ? "w" : "r", $hs_left);
+                        # (in a try: this task must reach the "open" count
+                        # below whatever happens, or a draining worker
+                        # would wait for it forever)
+                        try {
+                            while (1) {
+                                my int $st = Cannoli::TLS::handshake_step($ssl_conn);
+                                if ($st == 0) { $hs_ok = 1; last; }
+                                if ($st < 0) { last; }
+                                my int $hs_left = $hs_deadline - core::mono_ms();
+                                if ($hs_left <= 0) { last; }
+                                core::coro_yield_io($cfd, $st == 2 ? "w" : "r", $hs_left);
+                            }
+                        } catch ($hs_err) {
+                            Cannoli::Log::error("TLS handshake failed: " . $hs_err);
+                            $hs_ok = 0;
                         }
                         if ($hs_ok == 1) {
                             my scalar $tconn = ::tls_conn($server_ref, $ssl_conn);
@@ -2444,6 +2858,7 @@ func Cannoli_Server_loop_worker_loop(scalar $server_ref) void {
                         } else {
                             Cannoli::TLS::close_conn($ssl_conn);
                         }
+                        $state->{"open"} = $state->{"open"} - 1;
                         $state->{"served"} = $state->{"served"} + 1;
                         if ($max_requests > 0 && $state->{"served"} >= $max_requests) {
                             $state->{"draining"} = 1; $_g_draining = 1;
@@ -2846,6 +3261,7 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
     my str $wd = core::getenv("WATCHDOG_USEC");
     my int $wd_ms = (defined($wd) && $wd =~ /^[0-9]+$/) ? ($wd + 0) / 2000 : 0;
     my int $wd_next = core::mono_ms();
+    my int $stuck_next = core::mono_ms() + 1000;
 
     while ($server_ref->{"running"} == 1) {
         if ($wd_ms > 0 && core::mono_ms() >= $wd_next) {
@@ -2855,6 +3271,16 @@ func Cannoli_Server_master_loop(scalar $server_ref) void {
         if ($_g_reload_requested == 1) {
             $_g_reload_requested = 0;
             ::rotate_workers($server_ref);
+        }
+        if (core::mono_ms() >= $stuck_next) {
+            $stuck_next = core::mono_ms() + 1000;
+            foreach my int $stuck_pid (::sb_stuck($server_ref->{"handler_timeout"})) {
+                Cannoli::Log::error("worker " . $stuck_pid . " made no progress for " . $server_ref->{"handler_timeout"}
+                    . "s (server.handler_timeout): killing it");
+                ::sb_event("error");
+                core::kill($stuck_pid, 9);
+            }
+            ::housekeeping($server_ref);
         }
 
         # Poll known children so SIGHUP remains responsive even when signal()
@@ -3035,8 +3461,21 @@ func Cannoli_Server_prepare_master(scalar $server_ref) int {
 }
 
 # Run the server in preforking mode
+# A library that could not be loaded, or whose cannoli_init failed, stops
+# the server from starting: running without the application it was asked
+# to serve (and answering 404 to everything) helps nobody.
+func Cannoli_Server_libraries_ok(scalar $server_ref) int {
+    my int $failed = $server_ref->{"library_failed"};
+    if ($failed > 0) {
+        say("Error: " . $failed . " librar" . ($failed == 1 ? "y" : "ies") . " failed to load or initialize; not starting");
+        return 0;
+    }
+    return 1;
+}
+
 func Cannoli_Server_run(scalar $server_ref) int {
     $server_ref->{"single_process"} = 0;
+    if (::libraries_ok($server_ref) == 0) { return 1; }
 
     if ($server_ref->{"http"} == 0) {
         # a background-job server: tickers only
@@ -3111,6 +3550,7 @@ func Cannoli_Server_run(scalar $server_ref) int {
 # Run the server in single-process mode (for development)
 func Cannoli_Server_run_single(scalar $server_ref) int {
     $server_ref->{"single_process"} = 1;
+    if (::libraries_ok($server_ref) == 0) { return 1; }
 
     # Create HTTP listening socket (unless ssl_only mode)
     my scalar $server_sock = undef;

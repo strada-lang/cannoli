@@ -42,6 +42,62 @@ func Cannoli_Request_new() hash {
     return %req;
 }
 
+# One canonical spelling for equivalent request paths (RFC 3986 section 6):
+#   - percent-escapes of unreserved characters (letters, digits, - . _ ~)
+#     are decoded:           /%65cho, /%2e%2e/x
+#   - "." and ".." segments are resolved (never above the root)
+#   - repeated slashes are merged:   //echo
+# so "/admin" cannot also be reached as "/./admin", "//admin" or
+# "/%61dmin" behind a check that compares the path as text. Every other
+# escape (%2F, %20, %00, UTF-8 bytes) is left exactly as sent: decoding
+# those could turn data into a path separator or a string terminator. A
+# trailing slash is significant and kept.
+func Cannoli_Request_normalize_path(str $p) str {
+    my int $n = length($p);
+    if ($n == 0 || substr($p, 0, 1) ne "/") { return $p; }
+    if (index($p, "%") < 0 && index($p, "//") < 0 && index($p, "/.") < 0) { return $p; }
+
+    if (index($p, "%") >= 0) {
+        my str $d = "";
+        my int $i = 0;
+        while ($i < $n) {
+            my str $ch = substr($p, $i, 1);
+            if ($ch eq "%" && $i + 2 < $n + 0 && substr($p, $i + 1, 2) =~ /^[0-9A-Fa-f]{2}$/) {
+                my int $v = hex(substr($p, $i + 1, 2));
+                if (($v >= 48 && $v <= 57) || ($v >= 65 && $v <= 90) || ($v >= 97 && $v <= 122)
+                    || $v == 45 || $v == 46 || $v == 95 || $v == 126) {
+                    $d = $d . chr($v);
+                    $i = $i + 3;
+                    next;
+                }
+            }
+            $d = $d . $ch;
+            $i = $i + 1;
+        }
+        $p = $d;
+        $n = length($p);
+    }
+
+    my array @out = ();
+    my int $dir = substr($p, $n - 1, 1) eq "/" ? 1 : 0;
+    my array @segs = split("/", $p);
+    my int $k = 0;
+    my int $count = scalar(@segs);
+    while ($k < $count) {
+        my str $seg = $segs[$k];
+        if ($seg eq "." || $seg eq "..") {
+            if ($seg eq ".." && scalar(@out) > 0) { pop(@out); }
+            if ($k == $count - 1) { $dir = 1; }
+        } elsif (length($seg) > 0) {
+            push(@out, $seg);
+        }
+        $k = $k + 1;
+    }
+    my str $r = "/" . join("/", @out);
+    if ($dir == 1 && $r ne "/") { $r = $r . "/"; }
+    return $r;
+}
+
 # Parse an HTTP request from raw data
 func Cannoli_Request_parse(str $data) hash {
     my hash %req = ::new();
@@ -79,6 +135,10 @@ func Cannoli_Request_parse(str $data) hash {
         } else {
             $req{"path"} = $uri;
         }
+        # Routing, prefix checks and handlers all see one spelling of a
+        # path; the spelling the client sent stays in raw_path.
+        $req{"raw_path"} = $req{"path"};
+        $req{"path"} = ::normalize_path($req{"path"});
     }
 
     # Parse headers

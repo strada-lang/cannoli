@@ -172,6 +172,9 @@ func Cannoli_FastCGI_params_to_request(hash %params) hash {
     } elsif (exists(%params, "SCRIPT_NAME")) {
         $req{"path"} = $params{"SCRIPT_NAME"};
     }
+    # one spelling per path, as for HTTP requests
+    $req{"raw_path"} = $req{"path"};
+    $req{"path"} = Cannoli::Request::normalize_path("" . $req{"path"});
     if (exists(%params, "QUERY_STRING")) {
         $req{"query_string"} = $params{"QUERY_STRING"};
         $req{"params"} = Cannoli::Request::parse_query($params{"QUERY_STRING"});
@@ -452,6 +455,7 @@ func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
 
     # Dispatch to router
     my hash %res = ();
+    Cannoli::Server::sb_watch(1);     # stuck-handler watchdog, as in HTTP workers
     try {
         if (defined($router)) {
             %res = Cannoli::Router::dispatch($router, %req);
@@ -462,6 +466,7 @@ func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
         Cannoli::Log::error("FastCGI " . $req{"method"} . " " . $req{"path"} . " failed: " . $fcgi_err);
         %res = Cannoli::Response::error_page(500, "Internal Server Error");
     }
+    Cannoli::Server::sb_watch(0);
     if (!exists(%{$res{"headers"} // {}}, "Date")) {
         Cannoli::Response::header(%res, "Date", Cannoli::Server::http_date());
     }
@@ -512,6 +517,7 @@ func Cannoli_FastCGI_spawn(scalar $listener, scalar $router, scalar $pids) void 
         core::setproctitle("cannoli [fastcgi worker]");
         core::signal("TERM", \&Cannoli_FastCGI_on_term);
         core::signal("INT", "IGNORE");
+        Cannoli::Server::sb_claim();
         ::worker_loop($listener, $router, 1000);
         exit(0);
     }
@@ -602,6 +608,10 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int
         say("Error: Could not create FastCGI socket on " . $where);
         return 1;
     }
+    # Several workers wait on this socket; when two wake for one connection
+    # the loser's accept() must return, not block (it would then miss
+    # SIGTERM until the next connection arrives).
+    core::socket_set_nonblocking($listener, 1);
 
     # pid file + server.user/group, as in HTTP mode
     if (defined($server_ref) && Cannoli::Server::prepare_master($server_ref) == 0) {
@@ -617,6 +627,10 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int
     core::signal("INT", \&Cannoli_FastCGI_on_term);
     core::signal("PIPE", "IGNORE");
 
+    Cannoli::Server::sb_init();
+    my int $handler_timeout = defined($server_ref) ? $server_ref->{"handler_timeout"} : 60;
+    my int $rotate_next = 0;
+
     my scalar $pids = [];
     my int $i = 0;
     while ($i < $num_workers) {
@@ -628,9 +642,18 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int
     while ($g_fcgi_stop == 0) {
         my array @alive = ();
         my int $dead = 0;
+        foreach my int $stuck (Cannoli::Server::sb_stuck($handler_timeout)) {
+            Cannoli::Log::error("FastCGI worker " . $stuck . " made no progress for " . $handler_timeout
+                . "s (server.handler_timeout): killing it");
+            core::kill($stuck, 9);
+        }
+        if (core::mono_ms() >= $rotate_next) {
+            $rotate_next = core::mono_ms() + 10000;
+            Cannoli::Log::check_rotation();
+        }
         foreach my int $p (@{$pids}) {
             core::waitpid($p, 1);
-            if (core::kill($p, 0) == 0) { push(@alive, $p); } else { $dead = $dead + 1; }
+            if (core::kill($p, 0) == 0) { push(@alive, $p); } else { $dead = $dead + 1; Cannoli::Server::sb_release($p); }
         }
         $pids = \@alive;
         while ($dead > 0 && $g_fcgi_stop == 0) {
