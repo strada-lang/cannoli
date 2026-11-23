@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -22,8 +22,10 @@ jobs:
       - name: Build and install Strada
         run: |
           git clone --depth 1 https://github.com/strada-lang/strada-lang.git "$RUNNER_TEMP/strada"
-          make -C "$RUNNER_TEMP/strada" -j"$(nproc)"
-          sudo make -C "$RUNNER_TEMP/strada" install
+          cd "$RUNNER_TEMP/strada"
+          ./configure          # a plain "make" from a clean clone fails to link Strada's tools
+          make                 # not -j: the Strada Makefile is not parallel-safe
+          sudo make install
 
       - name: Build Cannoli
         run: make
