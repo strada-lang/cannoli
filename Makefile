@@ -33,6 +33,7 @@ SOURCES := \
 	$(SRC_DIR)/cannoli_obj.strada \
 	$(SRC_DIR)/router.strada \
 	$(SRC_DIR)/static.strada \
+	$(SRC_DIR)/vmapp.strada \
 	$(SRC_DIR)/server.strada \
 	$(SRC_DIR)/fastcgi.strada \
 	$(SRC_DIR)/app.strada \

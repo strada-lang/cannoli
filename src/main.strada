@@ -83,6 +83,9 @@ func Cannoli_Main_print_help() void {
     say("  - $c: Cannoli object with all request data");
     say("  - Use $c->method(), $c->path(), $c->body(), $c->param(), etc.");
     say("");
+    say("  A .strada file instead of a .so is run by the built-in VM (no build step):");
+    say("    cannoli --library ./app.strada --dev");
+    say("");
     say("  Build the response on $c ($c->status(), set_header(), render_json(),");
     say("  redirect(), ...) and return $c->done(); return \"\" to decline (404).");
     say("  A string returned without touching $c is sent as the body (JSON when it");

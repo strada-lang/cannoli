@@ -175,7 +175,7 @@ if strada --shared boom.strada -o boom.so > boom_build.log 2>&1; then
   LPORT=$((PORT + 2))
   $BIN -h 127.0.0.1 -p $LPORT -w 1 -l $S/boom.so > boom.log 2>&1 &
   LPID=$!
-  for _ in $(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:$LPORT/ok && break; sleep 0.1; done
+  for _ in $(seq 1 150); do curl -s -o /dev/null http://127.0.0.1:$LPORT/ok && break; sleep 0.1; done
   W1=$(pgrep -P $LPID)
   C1=$(curl -s -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:$LPORT/boom)
   C2=$(curl -s -m 5 http://127.0.0.1:$LPORT/ok)

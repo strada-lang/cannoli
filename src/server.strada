@@ -229,6 +229,25 @@ func Cannoli_Server_new(hash %config) scalar {
                     say("  Config: " . $lib_config);
                 }
 
+                # A .strada file is an application for the built-in VM
+                if (Cannoli::VMApp::is_script($lib_path) == 1) {
+                    my scalar $vm_app = Cannoli::VMApp::load($lib_path, $lib_config);
+                    if (!defined($vm_app)) {
+                        $server{"library_failed"} = $server{"library_failed"} + 1;
+                    } else {
+                        push(@{$server{"dispatch_funcs"}}, $vm_app);
+                        push(@{$server{"after_funcs"}}, Cannoli::VMApp::has($vm_app, "cannoli_after_request") == 1 ? $vm_app : undef);
+                        push(@{$_g_exit_funcs}, {"vm" => $vm_app, "hook" => "cannoli_worker_exit"});
+                        if (Cannoli::VMApp::has($vm_app, "cannoli_tick") == 1) {
+                            push(@{$_g_tick_funcs}, {"vm" => $vm_app, "hook" => "cannoli_tick"});
+                            say("  Loaded: cannoli_tick");
+                        }
+                        say("  Loaded: cannoli_dispatch (interpreted)");
+                    }
+                    $i = $i + 1;
+                    next;
+                }
+
                 my scalar $lib = core::dl_open($lib_path);
                 if (defined($lib)) {
                     # Call cannoli_init if it exists (for libraries that need configuration)
@@ -309,6 +328,27 @@ func Cannoli_Server_new(hash %config) scalar {
             say("  " . $prefix . " -> " . $lib_path);
             if (length($lib_config) > 0) {
                 say("    Config: " . $lib_config);
+            }
+
+            if (Cannoli::VMApp::is_script($lib_path) == 1) {
+                my scalar $vm_app = Cannoli::VMApp::load($lib_path, $lib_config);
+                if (!defined($vm_app)) {
+                    $server{"library_failed"} = $server{"library_failed"} + 1;
+                } else {
+                    my hash %vm_route = ();
+                    $vm_route{"prefix"} = $prefix;
+                    $vm_route{"dispatch"} = $vm_app;
+                    $vm_route{"after"} = Cannoli::VMApp::has($vm_app, "cannoli_after_request") == 1 ? $vm_app : undef;
+                    push(@{$_g_exit_funcs}, {"vm" => $vm_app, "hook" => "cannoli_worker_exit"});
+                    if (Cannoli::VMApp::has($vm_app, "cannoli_tick") == 1) {
+                        push(@{$_g_tick_funcs}, {"vm" => $vm_app, "hook" => "cannoli_tick"});
+                        say("    Loaded: cannoli_tick");
+                    }
+                    push(@{$server{"library_routes"}}, \%vm_route);
+                    say("    Loaded: cannoli_dispatch (interpreted)");
+                }
+                $j = $j + 1;
+                next;
             }
 
             my scalar $lib = core::dl_open($lib_path);
@@ -539,6 +579,23 @@ func Cannoli_Server_parse_response(str $response_body) hash {
     }
 
     return %res;
+}
+
+# Calls into a library: a symbol of a shared object, or an application
+# running in the VM (Cannoli::VMApp, a hash).
+func Cannoli_Server_lib_dispatch(scalar $fn, scalar $c) scalar {
+    if (ref($fn) eq "HASH") { return Cannoli::VMApp::dispatch($fn, $c); }
+    return core::dl_call_sv($fn, [$c]);
+}
+
+func Cannoli_Server_lib_after(scalar $fn, scalar $c, int $elapsed_ms) void {
+    if (ref($fn) eq "HASH") { Cannoli::VMApp::after($fn, $c, $elapsed_ms); return; }
+    core::dl_call_void_sv($fn, [$c, $elapsed_ms]);
+}
+
+func Cannoli_Server_lib_hook(scalar $fn) void {
+    if (ref($fn) eq "HASH") { Cannoli::VMApp::hook($fn->{"vm"}, $fn->{"hook"}); return; }
+    core::dl_call_void_sv($fn, []);
 }
 
 # The response of a library handler that returned the non-empty $ret.
@@ -2273,7 +2330,7 @@ func Cannoli_Server_dispatch(scalar $server_ref, scalar $req_ref) scalar {
                 $req{"path_info"} = $path_info;
                 $c = Cannoli::new(%req);
 
-                my scalar $result = core::dl_call_sv($route->{"dispatch"}, [$c]);
+                my scalar $result = ::lib_dispatch($route->{"dispatch"}, $c);
                 my str $response_body = defined($result) ? ("" . $result) : "";
                 if (core::byte_length($response_body) > 0) {
                     %res = ::library_response($server_ref, $c, $response_body, $req{"method"});
@@ -2292,7 +2349,7 @@ func Cannoli_Server_dispatch(scalar $server_ref, scalar $req_ref) scalar {
         $c = Cannoli::new(%req);
         my int $i = 0;
         while ($i < $num_funcs && $handled == 0) {
-            my scalar $result = core::dl_call_sv($dispatch_funcs->[$i], [$c]);
+            my scalar $result = ::lib_dispatch($dispatch_funcs->[$i], $c);
             my str $response_body = defined($result) ? ("" . $result) : "";
             if (core::byte_length($response_body) > 0) {
                 %res = ::library_response($server_ref, $c, $response_body, $req{"method"});
@@ -2496,7 +2553,7 @@ func Cannoli_Server_serve_connection(scalar $server_ref, scalar $conn) void {
 
         if (defined($after_func) && defined($c)) {
             try {
-                core::dl_call_void_sv($after_func, [$c, $elapsed_ms]);
+                ::lib_after($after_func, $c, $elapsed_ms);
             } catch ($after_err) {
                 Cannoli::Log::error("cannoli_after_request: " . $after_err);
             }
@@ -2886,7 +2943,7 @@ func Cannoli_Server_ticker_loop(scalar $server_ref) void {
     while ($max <= 0 || $n < $max) {
         $_g_worker_busy = 1;
         foreach my scalar $fn (@{$_g_tick_funcs}) {
-            try { core::dl_call_void_sv($fn, []); } catch ($e) { Cannoli::Log::error("cannoli_tick: " . $e); }
+            try { ::lib_hook($fn); } catch ($e) { Cannoli::Log::error("cannoli_tick: " . $e); }
         }
         $_g_worker_busy = 0;
         if ($_g_exit_requested == 1) { return; }
@@ -3002,7 +3059,7 @@ func Cannoli_Server_worker_exit() void {
     if ($_g_exiting == 0) {
         $_g_exiting = 1;
         foreach my scalar $fn (@{$_g_exit_funcs}) {
-            try { core::dl_call_void_sv($fn, []); } catch ($e) { Cannoli::Log::error("cannoli_worker_exit: " . $e); }
+            try { ::lib_hook($fn); } catch ($e) { Cannoli::Log::error("cannoli_worker_exit: " . $e); }
         }
     }
     exit(0);
@@ -3550,6 +3607,7 @@ func Cannoli_Server_run(scalar $server_ref) int {
 # Run the server in single-process mode (for development)
 func Cannoli_Server_run_single(scalar $server_ref) int {
     $server_ref->{"single_process"} = 1;
+    Cannoli::VMApp::set_dev_reload(1);
     if (::libraries_ok($server_ref) == 0) { return 1; }
 
     # Create HTTP listening socket (unless ssl_only mode)

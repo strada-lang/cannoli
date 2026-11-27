@@ -52,7 +52,7 @@ func cannoli_dispatch(scalar $c) str {
     # GET / - an HTML page
     if ($c->is_get() && $path eq "/") {
         $c->render_html("<!DOCTYPE html>\n<html><head><title>My Strada App</title></head>\n<body>\n"
-            . "<h1>" . Cannoli::Response::html_escape($g_greeting) . " from a Strada library</h1>\n<ul>\n"
+            . "<h1>" . $c->html_escape($g_greeting) . " from a Strada library</h1>\n<ul>\n"
             . "<li><a href=\"hello?name=World\">hello?name=World</a> - text</li>\n"
             . "<li><a href=\"api/status\">api/status</a> - JSON</li>\n"
             . "<li><a href=\"user/42\">user/42</a> - a path parameter</li>\n"

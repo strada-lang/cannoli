@@ -1,0 +1,278 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+use Eval;
+
+package Cannoli::VMApp;
+
+# cannoli/src/vmapp.strada - handler applications run by the Strada VM
+#
+# A library given as a .strada file is not dlopen'ed: it is loaded into the
+# bytecode VM that is linked into Cannoli (Strada's Eval module) and its
+# cannoli_dispatch($c) is called there. The server itself stays compiled;
+# only the application is interpreted, so it needs no build step:
+#
+#   ./cannoli --library ./app.strada
+#   ./cannoli --library "./app.strada:reload=1;lib=./lib;greeting=Ciao"
+#
+# The script uses the same interface as a compiled library
+# (cannoli_dispatch, and optionally cannoli_init, cannoli_after_request,
+# cannoli_worker_exit, cannoli_tick, all in package main), with these
+# differences:
+#   - the Cannoli object is used through its methods ($c->path(),
+#     $c->render_json(...)); its fields ($c->{"_path"}) cannot be read from
+#     interpreted code;
+#   - Cannoli's own package functions (Cannoli::Response::...) are not
+#     visible; everything a handler needs is a method of $c;
+#   - all scripts share one VM: give each application its own package for
+#     its helper functions;
+#   - the VM runs one handler at a time per worker. In a classic worker
+#     that is how every handler runs. In a loop worker a handler that waits
+#     inside the VM (a slow client reading a stream, a WebSocket) makes the
+#     worker's other requests for interpreted applications wait for it, so
+#     use classic workers, or a compiled library, for long-lived handlers.
+#
+# Options (in the text after "app.strada:"):
+#   reload=1|0   reread the file when it changes (default: on with --dev)
+#   lib=DIR      a directory for the script's own `use` (may be repeated)
+# The whole option text is also passed to the script's cannoli_init().
+
+my int $g_vm_inited = 0;
+my int $g_vm_dev_reload = 0;
+my array @g_vm_hooks = ("cannoli_dispatch", "cannoli_init", "cannoli_after_request", "cannoli_worker_exit", "cannoli_tick");
+
+# 1 if a library path names a script for the VM rather than a shared object
+func Cannoli_VMApp_is_script(str $path) int {
+    my int $n = length($path);
+    if ($n > 7 && substr($path, $n - 7, 7) eq ".strada") { return 1; }
+    return 0;
+}
+
+# --dev: scripts that do not say reload=0 are reread when they change
+func Cannoli_VMApp_set_dev_reload(int $on) void {
+    $g_vm_dev_reload = $on;
+}
+
+func Cannoli_VMApp_option(str $config, str $key) str {
+    my int $kl = length($key);
+    foreach my str $part (split(";", $config)) {
+        my str $p = trim($part);
+        if (length($p) > $kl && substr($p, 0, $kl) eq $key && substr($p, $kl, 1) eq "=") {
+            return substr($p, $kl + 1, length($p) - $kl - 1);
+        }
+    }
+    return "";
+}
+
+func Cannoli_VMApp_lib_dirs(str $path, str $config) scalar {
+    my array @dirs = ();
+    foreach my str $part (split(";", $config)) {
+        my str $p = trim($part);
+        if (length($p) > 4 && substr($p, 0, 4) eq "lib=") { push(@dirs, substr($p, 4, length($p) - 4)); }
+    }
+    # the script's own directory, then the installed Strada library
+    my int $slash = rindex($path, "/");
+    push(@dirs, $slash > 0 ? substr($path, 0, $slash) : ".");
+    foreach my str $std ("/usr/local/lib/strada/lib", "/usr/lib/strada/lib") {
+        if (core::is_dir($std)) { push(@dirs, $std); }
+    }
+    return \@dirs;
+}
+
+# Modules with inline C (`__C__` blocks: Strada's JSON, for one) are
+# compiled by the VM when they are loaded, against strada_runtime.h. The VM
+# looks for that header under $STRADA_HOME/runtime or next to the running
+# executable, which for Cannoli is neither: point it at the installed
+# Strada unless the environment already says where it is.
+func Cannoli_VMApp_find_strada_home() void {
+    my str $have = core::getenv("STRADA_HOME");
+    if (defined($have) && length($have) > 0) { return; }
+    foreach my str $home ("/usr/local/lib/strada", "/usr/lib/strada") {
+        if (core::is_file($home . "/runtime/strada_runtime.h")) {
+            core::setenv("STRADA_HOME", $home);
+            return;
+        }
+    }
+}
+
+func Cannoli_VMApp_stamp(str $path) str {
+    my hash %st = core::stat($path);
+    if (!exists(%st, "mtime")) { return ""; }
+    return $st{"mtime"} . ":" . $st{"size"};
+}
+
+# (Re)read the script into the VM and collect references to its hooks.
+# Returns "" on success, or the error.
+func Cannoli_VMApp_compile(scalar $app) str {
+    my str $path = $app->{"path"};
+    if (core::is_file($path) == 0) { return "cannot read " . $path; }
+    my str $code = slurp($path);
+    my hash %fns = ();
+    try {
+        if ($g_vm_inited == 0) {
+            ::find_strada_home();
+            Strada::Interpreter::init();
+            $g_vm_inited = 1;
+        }
+        # (not the "load only" mode: that skips file-level `my` variables)
+        my scalar $dirs = ::lib_dirs($path, $app->{"config"});
+        Strada::Interpreter::set_eval_lib_paths($dirs);   # where the script's own `use` looks
+        Strada::Interpreter::eval_string("package main;");
+        Strada::Interpreter::eval_string_vm_ex($code, $path, $dirs, 0);
+        foreach my str $hook (@g_vm_hooks) {
+            # the VM is shared by every script: only take the hooks this
+            # one defines
+            if ($code =~ /(^|\n)\s*func\s+$hook\s*\(/) {
+                $fns{$hook} = Strada::Interpreter::eval_string("package main; \\&" . $hook);
+            }
+        }
+    } catch ($e) {
+        return "" . $e;
+    }
+    if (!exists(%fns, "cannoli_dispatch")) {
+        return $path . " does not define cannoli_dispatch(scalar \$c) in package main";
+    }
+    $app->{"fns"} = \%fns;
+    $app->{"stamp"} = ::stamp($path);
+    if (exists(%fns, "cannoli_init")) {
+        my scalar $ok = 0;
+        try {
+            $ok = $fns{"cannoli_init"}->("" . $app->{"config"});
+        } catch ($ie) {
+            return "cannoli_init: " . $ie;
+        }
+        if (!defined($ok) || !$ok) { return "cannoli_init returned 0"; }
+    }
+    return "";
+}
+
+# Load a script. Returns the application (a hash ref) or undef after
+# printing why not.
+func Cannoli_VMApp_load(str $path, str $config) scalar {
+    my hash %app = ();
+    $app{"vm"} = 1;
+    $app{"path"} = $path;
+    $app{"config"} = $config;
+    my str $reload = ::option($config, "reload");
+    $app{"reload"} = length($reload) > 0 ? ($reload + 0 != 0 || $reload eq "true" || $reload eq "yes" || $reload eq "on" ? 1 : 0) : -1;
+    $app{"checked"} = 0;
+    $app{"fns"} = {};
+    my str $err = ::compile(\%app);
+    if (length($err) > 0) {
+        say("  Error: " . $err);
+        return undef;
+    }
+    return \%app;
+}
+
+func Cannoli_VMApp_has(scalar $app, str $hook) int {
+    return exists(%{$app->{"fns"}}, $hook) ? 1 : 0;
+}
+
+# Reread a changed script (checked at most once a second). A script that no
+# longer loads keeps running in its last good version and the error is
+# logged.
+func Cannoli_VMApp_check_reload(scalar $app) void {
+    my int $want = $app->{"reload"};
+    if ($want < 0) { $want = $g_vm_dev_reload; }
+    if ($want != 1) { return; }
+    my int $now = core::time();
+    if ($now == $app->{"checked"}) { return; }
+    $app->{"checked"} = $now;
+    my str $stamp = ::stamp($app->{"path"});
+    if (length($stamp) == 0 || $stamp eq $app->{"stamp"}) { return; }
+    my scalar $old = $app->{"fns"};
+    my str $err = ::compile($app);
+    if (length($err) > 0) {
+        $app->{"fns"} = $old;
+        $app->{"stamp"} = $stamp;     # do not retry until it changes again
+        Cannoli::Log::error("reload of " . $app->{"path"} . " failed, keeping the previous version: " . $err);
+        return;
+    }
+    Cannoli::Log::info("reloaded " . $app->{"path"});
+}
+
+# One task in the VM at a time. The VM is not re-entrant across green
+# tasks: in a loop worker, a second request entering it while the first is
+# parked inside (waiting on its client) corrupts both. A task that finds
+# the VM occupied sleeps until it is free, for at most $g_vm_wait_ms.
+my int $g_vm_busy = 0;
+my int $g_vm_wait_ms = 30000;
+
+func Cannoli_VMApp_enter() int {
+    if ($g_vm_busy == 0) {
+        $g_vm_busy = 1;
+        return 1;
+    }
+    my int $deadline = core::mono_ms() + $g_vm_wait_ms;
+    while ($g_vm_busy == 1) {
+        if (core::mono_ms() >= $deadline) { return 0; }
+        Async::Task::sleep(2);
+    }
+    $g_vm_busy = 1;
+    return 1;
+}
+
+func Cannoli_VMApp_leave() void {
+    $g_vm_busy = 0;
+}
+
+func Cannoli_VMApp_dispatch(scalar $app, scalar $c) scalar {
+    if (::enter() == 0) {
+        Cannoli::Log::warn("interpreted application busy for " . ($g_vm_wait_ms / 1000) . "s: answering 503 for " . $c->path());
+        $c->status(503);
+        $c->set_header("Retry-After", "1");
+        $c->render_text("Service Unavailable\n");
+        return $c->done();
+    }
+    my scalar $ret = undef;
+    try {
+        ::check_reload($app);
+        $ret = $app->{"fns"}->{"cannoli_dispatch"}->($c);
+    } catch ($e) {
+        ::leave();
+        throw $e;
+    }
+    ::leave();
+    return $ret;
+}
+
+func Cannoli_VMApp_after(scalar $app, scalar $c, int $elapsed_ms) void {
+    my scalar $fns = $app->{"fns"};
+    if (!exists(%{$fns}, "cannoli_after_request")) { return; }
+    if (::enter() == 0) { return; }
+    try {
+        $fns->{"cannoli_after_request"}->($c, $elapsed_ms);
+    } catch ($e) {
+        ::leave();
+        throw $e;
+    }
+    ::leave();
+}
+
+# cannoli_worker_exit / cannoli_tick
+func Cannoli_VMApp_hook(scalar $app, str $hook) void {
+    if (::enter() == 0) { return; }
+    try {
+        ::check_reload($app);
+        my scalar $fns = $app->{"fns"};
+        if (exists(%{$fns}, $hook)) { $fns->{$hook}->(); }
+    } catch ($e) {
+        ::leave();
+        throw $e;
+    }
+    ::leave();
+}

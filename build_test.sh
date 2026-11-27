@@ -32,6 +32,7 @@ cat "$CANNOLI_DIR/src/config.strada" \
     "$CANNOLI_DIR/src/cannoli_obj.strada" \
     "$CANNOLI_DIR/src/router.strada" \
     "$CANNOLI_DIR/src/static.strada" \
+    "$CANNOLI_DIR/src/vmapp.strada" \
     "$CANNOLI_DIR/src/server.strada" \
     "$CANNOLI_DIR/src/fastcgi.strada" \
     "$CANNOLI_DIR/src/app.strada" \

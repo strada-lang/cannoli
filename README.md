@@ -671,6 +671,57 @@ server from starting.
 Other optional exports: `cannoli_after_request($c, $elapsed_ms)`,
 `cannoli_worker_exit()`, `cannoli_tick()`.
 
+### Interpreted applications (no build step)
+
+Give `--library` (or `library =`, or a `[library]` mount) a `.strada` file
+instead of a `.so` and Cannoli runs it in the Strada bytecode VM that is
+linked into the server. Cannoli itself is always compiled; only the
+application is interpreted.
+
+```bash
+./cannoli --library ./examples/myapp.strada --dev      # edit the file, reload the page
+./cannoli --library "./app.strada:reload=1;lib=./lib;greeting=Ciao"
+strada --shared app.strada -o app.so && ./cannoli --library ./app.so   # the same file, compiled
+```
+
+The script is an ordinary handler library: `cannoli_dispatch($c)` and,
+optionally, `cannoli_init`, `cannoli_after_request`, `cannoli_worker_exit`
+and `cannoli_tick`, in package `main`. `examples/myapp.strada` runs both
+ways unchanged.
+
+| Option (after `app.strada:`) | Meaning |
+|---|---|
+| `reload=1` / `reload=0` | Reread the file when it changes (checked once a second). On by default with `--dev`, off otherwise. A version that fails to load is logged and the last good one keeps serving. |
+| `lib=DIR` | A directory for the script's own `use` (repeatable). The script's directory is searched too. |
+
+The whole option text is passed to the script's `cannoli_init`.
+
+What is different from a compiled library:
+
+- **Use `$c`'s methods.** Interpreted code cannot read the object's fields
+  (`$c->{"_path"}`) or call Cannoli's package functions
+  (`Cannoli::Response::...`). `$c->html_escape($text)` exists for that
+  reason.
+- **One VM for all scripts.** Put each application's helper functions in
+  its own `package`; file-level `my` variables are per worker and are reset
+  when the script reloads.
+- **One handler at a time per worker.** That is how classic workers (the
+  default) run anyway. With `--loop-workers`, a handler that waits inside
+  the VM (a slow client on a chunked stream, a WebSocket) makes the
+  worker's other interpreted requests queue behind it, for up to 30 seconds
+  before they get a 503. Use classic workers, or compile the application,
+  for long-lived connections.
+- **Speed.** The example's text route measured about 86% of the compiled
+  library's throughput; code that computes more itself will be further
+  behind. Memory per worker is about 13 MB higher.
+- **Modules with inline C** (`__C__` blocks, as in Strada's `JSON` module)
+  work: the VM compiles those blocks with `gcc` the first time and caches
+  the result under `~/.cache/strada/cblocks`. That needs `gcc` and the
+  Strada runtime header on the machine; Cannoli finds the header in
+  `/usr/local/lib/strada` (or wherever `STRADA_HOME` points).
+- A script that does not load, or whose `cannoli_init` returns 0, stops the
+  server from starting, like any other library.
+
 ### Perl handlers
 
 `lib/perl` embeds a Perl interpreter (`cd lib/perl && make`, then
@@ -713,8 +764,9 @@ See the `examples/` directory:
 - `perl/` - a Perl application (`examples/perl/run.sh`)
 
 - `myapp.strada` - a handler library (`cannoli_dispatch($c)`): text, JSON,
-  redirect, cookie, chunked stream; `myapp.conf` loads it, `multi_lib.conf`
-  mounts it under a prefix
+  redirect, cookie, chunked stream. Run it interpreted
+  (`--library examples/myapp.strada`) or compiled; `myapp.conf` loads the
+  compiled one, `multi_lib.conf` mounts it under a prefix
 
 ## Architecture
 

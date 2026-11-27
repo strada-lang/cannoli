@@ -255,6 +255,19 @@ string is never parsed for `STATUS:` / `REDIRECT:` / `RESPONSE:` unless
 `app.library_prefixes = 1` (the old interface: user-controlled text could
 steer the response). A library that fails to load or init stops startup.
 
+**Interpreted applications** (`src/vmapp.strada`, `Cannoli::VMApp`). A
+library path ending in `.strada` is loaded into the Strada VM linked into
+the binary (`use Eval;`): the script is evaluated once, code references to
+its hooks (`\&cannoli_dispatch`, ...) are fetched and called directly
+(about 3.5 us per call; evaluating a string per request would cost 1.5 ms).
+In the server a VM application is a hash where a shared object has a symbol
+(`lib_dispatch` / `lib_after` / `lib_hook`). `reload=1` (default with
+`--dev`) re-evaluates a changed file. `enter()` / `leave()` admit one task
+at a time: the VM is not re-entrant across green tasks (two handlers parked
+inside it in a loop worker corrupt each other). Interpreted code can call
+`$c`'s methods but cannot read its fields or call Cannoli package
+functions. Test: `t/test_vm.sh`.
+
 **Watchdog.** `sb_watch` / `touch` / `sb_stuck`: a classic worker is watched
 from the start of a handler to its end, a loop worker always (heartbeat
 from its watchdog task); the master SIGKILLs a watched worker with no
@@ -764,6 +777,7 @@ Test files:
 - `test_request.strada` - Request parsing
 - `test_hardening.strada` - Framing/strictness, chunked decoding, cookies, templates, middleware, ranges
 - `test_review.strada` / `test_review.sh` - path normalisation, config comments, session merging, template reload, log rotation, shared rate counter / library return values, stuck-worker watchdog, streaming to a stalled client, keep-alive fairness, rejected-request logging
+- `test_vm.sh` - interpreted applications (`--library app.strada`): requests, reload, errors, loop workers, memory
 - `test_perl.sh` - the Perl library (skipped until `cd lib/perl && make`)
 - `test_hardening.sh` / `test_hardening_loop.sh` - Live timeouts, smuggling inputs, 100-continue, pid file (classic / loop workers)
 - `test_tls.sh` - classic+loop x HTTP+HTTPS smoke test (skips without openssl / SSL lib)

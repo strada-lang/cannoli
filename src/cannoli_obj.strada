@@ -107,6 +107,12 @@ func Cannoli_body_file(scalar $self) str {
     return "";
 }
 
+# Escape text for HTML (& < > " '), as a method: interpreted applications
+# reach Cannoli only through $c.
+func Cannoli_html_escape(scalar $self, str $text) str {
+    return Cannoli::Response::html_escape($text);
+}
+
 func Cannoli_method(scalar $self) str {
     return $self->{"_method"};
 }
