@@ -46,4 +46,13 @@ jobs:
         run: make -C lib/perl PERL=/usr/bin/perl
 
       - name: Test
-        run: ./t/run_tests.sh
+        run: |
+          # On failure the failing tests' output becomes an error annotation,
+          # so the cause shows on the run's summary page.
+          if ! ./t/run_tests.sh > "$RUNNER_TEMP/tests.log" 2>&1; then
+            cat "$RUNNER_TEMP/tests.log"
+            msg=$(grep -E '^Running |FAIL|rror|^Tests:' "$RUNNER_TEMP/tests.log" | grep -B1 -E 'FAIL|rror|^Tests:' | grep -v '^--$' | tail -n 40 | cut -c1-300 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=Tests failed::$msg"
+            exit 1
+          fi
+          tail -n 4 "$RUNNER_TEMP/tests.log"
