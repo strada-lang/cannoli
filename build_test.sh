@@ -35,6 +35,7 @@ cat "$CANNOLI_DIR/src/config.strada" \
     "$CANNOLI_DIR/src/vmapp.strada" \
     "$CANNOLI_DIR/src/server.strada" \
     "$CANNOLI_DIR/src/fastcgi.strada" \
+    "$CANNOLI_DIR/src/cgi.strada" \
     "$CANNOLI_DIR/src/app.strada" \
     "$TEST_FILE" \
     "$CANNOLI_DIR/lib/compress.strada" > "$COMBINED"

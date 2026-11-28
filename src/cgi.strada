@@ -1,0 +1,208 @@
+/*
+ This file is part of the Strada Language (https://github.com/mjflick/strada-lang).
+ Copyright (c) 2026 Michael J. Flickinger
+ 
+ This program is free software: you can redistribute it and/or modify  
+ it under the terms of the GNU General Public License as published by  
+ the Free Software Foundation, version 2.
+
+ This program is distributed in the hope that it will be useful, but 
+ WITHOUT ANY WARRANTY; without even the implied warranty of 
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
+ General Public License for more details.
+
+ You should have received a copy of the GNU General Public License 
+ along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+package Cannoli::CGI;
+
+# cannoli/src/cgi.strada - run as a CGI program
+#
+# In CGI the web server (Apache, or anything that speaks RFC 3875) starts
+# one process per request: the request arrives in environment variables and
+# on standard input, the response leaves on standard output, and the
+# process exits. `cannoli --cgi` does exactly that for one request, through
+# the same libraries and router as the standalone server, so one
+# application runs standalone, behind FastCGI, or as a plain CGI program:
+#
+#   #!/bin/sh
+#   exec /usr/local/bin/cannoli --cgi --library /srv/app/myapp.so
+#
+# saved as cgi-bin/app.cgi. A program built on Cannoli::App takes --cgi the
+# same way, and both switch to CGI by themselves when the environment has
+# GATEWAY_INTERFACE=CGI/x (which is how Apache runs them).
+#
+# The application sees the path after the script's own URL (PATH_INFO):
+# /cgi-bin/app.cgi/users/7 is "/users/7"; the script's URL is in
+# $req{"script_name"}.
+#
+# What CGI cannot do: WebSockets, and keeping anything in memory between
+# requests (every request is a new process).
+
+__C__ {
+#include <unistd.h>
+#include <errno.h>
+static int cgi_out_fd = -1;
+}
+
+# Everything Cannoli prints while it starts ("Loading library: ...") must
+# stay out of the response: keep the real standard output aside for the
+# response and point fd 1 at standard error (the web server's error log).
+func Cannoli_CGI_capture_stdout() void {
+    __C__ {
+        if (cgi_out_fd < 0) {
+            fflush(stdout);
+            int saved = dup(1);
+            if (saved >= 0) {
+                cgi_out_fd = saved;
+                dup2(2, 1);
+            }
+        }
+    }
+}
+
+func Cannoli_CGI_out_fd() int {
+    my scalar $fd = 1;
+    __C__ {
+        fd = strada_new_int(cgi_out_fd >= 0 ? cgi_out_fd : 1);
+    }
+    return $fd;
+}
+
+# 1 when the environment says a web server started us as a CGI program
+func Cannoli_CGI_detected() int {
+    my str $gi = core::getenv("GATEWAY_INTERFACE");
+    if (defined($gi) && length($gi) >= 4 && substr($gi, 0, 4) eq "CGI/") { return 1; }
+    return 0;
+}
+
+# Read exactly $want bytes of the request body from standard input (fewer
+# if the web server sends less).
+func Cannoli_CGI_read_stdin(int $want) str {
+    my scalar $out = "";
+    __C__ {
+        long long n = strada_to_int(want);
+        if (n > 0) {
+            char *buf = malloc((size_t)n);
+            size_t got = 0;
+            while (buf && got < (size_t)n) {
+                ssize_t r = read(0, buf + got, (size_t)n - got);
+                if (r > 0) { got += (size_t)r; continue; }
+                if (r < 0 && errno == EINTR) continue;
+                break;
+            }
+            if (buf) {
+                strada_decref(out);
+                out = strada_new_str_len(buf, got);
+                free(buf);
+            }
+        }
+    }
+    return $out;
+}
+
+func Cannoli_CGI_write(str $data) int {
+    my int $n = core::byte_length($data);
+    if ($n == 0) { return 1; }
+    return Cannoli::Server::spool_write(::out_fd(), $data, 0, $n);
+}
+
+# The CGI form of a response's status line and headers: "Status: 200 OK"
+# in place of "HTTP/1.1 200 OK", and without the headers that describe the
+# connection to the client, which is the web server's business.
+func Cannoli_CGI_head(str $http_head) str {
+    my int $split = index($http_head, "\r\n\r\n");
+    my str $head = $split >= 0 ? substr($http_head, 0, $split) : $http_head;
+    my str $rest = $split >= 0 ? substr($http_head, $split, length($http_head) - $split) : "";
+    my str $out = "";
+    foreach my str $line (split("\r\n", $head)) {
+        if (length($out) == 0 && substr($line, 0, 5) eq "HTTP/") {
+            my int $sp = index($line, " ");
+            $out = "Status: " . substr($line, $sp + 1, length($line) - $sp - 1);
+            next;
+        }
+        my str $name = lc($line);
+        if (index($name, "connection:") == 0 || index($name, "keep-alive:") == 0
+            || index($name, "transfer-encoding:") == 0 || index($name, "server:") == 0) {
+            next;
+        }
+        $out = $out . (length($out) > 0 ? "\r\n" : "") . $line;
+    }
+    return $out . $rest;
+}
+
+# Serve the one request this process was started for. Returns the exit code.
+func Cannoli_CGI_run(scalar $server_ref, int $max_body) int {
+    ::capture_stdout();
+    my int $t0 = core::mono_ms();
+    my hash %env = core::environ();
+    my hash %req = Cannoli::FastCGI::params_to_request(%env);
+
+    # The application's paths are relative to the script
+    my str $path_info = exists(%env, "PATH_INFO") ? ("" . $env{"PATH_INFO"}) : "";
+    if (length($path_info) == 0) { $path_info = "/"; }
+    $req{"raw_path"} = $path_info;
+    $req{"path"} = Cannoli::Request::normalize_path($path_info);
+    $req{"script_name"} = exists(%env, "SCRIPT_NAME") ? ("" . $env{"SCRIPT_NAME"}) : "";
+    if (!exists(%req, "uri") || length("" . $req{"uri"}) == 0) {
+        my str $qs = exists(%env, "QUERY_STRING") ? ("" . $env{"QUERY_STRING"}) : "";
+        $req{"uri"} = $path_info . (length($qs) > 0 ? "?" . $qs : "");
+    }
+    $req{"http_version"} = exists(%env, "SERVER_PROTOCOL") ? ("" . $env{"SERVER_PROTOCOL"}) : "HTTP/1.1";
+    $req{"peer_addr"} = $req{"remote_addr"};
+    my str $https = exists(%env, "HTTPS") ? lc("" . $env{"HTTPS"}) : "";
+    $req{"scheme"} = ($https eq "on" || $https eq "1") ? "https" : "http";
+    $req{"_cgi"} = 1;
+    $req{"_fd"} = ::out_fd();
+
+    my hash %res = ();
+    my scalar $c = undef;
+    my scalar $after = undef;
+    my str $request_id = Cannoli::Server::request_id($server_ref, \%req);
+    $req{"request_id"} = $request_id;
+
+    my str $cl_raw = exists(%env, "CONTENT_LENGTH") ? trim("" . $env{"CONTENT_LENGTH"}) : "";
+    my int $content_len = ($cl_raw =~ /^[0-9]+$/) ? $cl_raw + 0 : 0;
+    if ($content_len > $max_body) {
+        %res = Cannoli::Response::payload_too_large($max_body);
+    } else {
+        Cannoli::FastCGI::request_body(%req, ::read_stdin($content_len));
+        try {
+            my scalar $d = Cannoli::Server::dispatch($server_ref, \%req);
+            %res = %{$d->{"res"}};
+            $c = $d->{"c"};
+            $after = $d->{"after"};
+        } catch ($err) {
+            Cannoli::Log::error("CGI " . $req{"method"} . " " . $req{"path"} . " failed: " . $err);
+            %res = Cannoli::Response::error_page(500, "Internal Server Error");
+        }
+    }
+
+    if ($res{"sent"} != 1) {
+        if ($req{"method"} eq "HEAD") { $res{"body"} = ""; }
+        Cannoli::Server::finish_headers($server_ref, %res, $request_id);
+        if (exists(%res, "_file") && $req{"method"} ne "HEAD") {
+            # a file the server would stream: headers, then the bytes
+            ::write(::head(Cannoli::Response::build(%res)));
+            my int $off = $res{"_file_offset"};
+            my int $left = $res{"_file_length"};
+            while ($left > 0) {
+                my str $piece = Cannoli::Server::file_chunk("" . $res{"_file"}, $off, $left > 262144 ? 262144 : $left);
+                my int $got = core::byte_length($piece);
+                if ($got == 0 || ::write($piece) == 0) { last; }
+                $off = $off + $got;
+                $left = $left - $got;
+            }
+        } else {
+            ::write(::head(Cannoli::Response::build(%res)));
+        }
+    }
+
+    my int $elapsed = core::mono_ms() - $t0;
+    Cannoli::Log::request_timed(%req, %res, $elapsed);
+    if (defined($after) && defined($c)) {
+        try { Cannoli::Server::lib_after($after, $c, $elapsed); } catch ($ae) { Cannoli::Log::error("cannoli_after_request: " . $ae); }
+    }
+    Cannoli::Server::worker_hooks_exit();
+    return 0;
+}

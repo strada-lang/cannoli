@@ -121,12 +121,27 @@ func Cannoli_App_run(scalar $app) int {
     foreach my str $ra (core::argv()) { push(@run_av, $ra); }
     %config = Cannoli::Config::merge_args(%config, size(@run_av), @run_av);
 
+    # CGI: one request from the environment, the response on standard
+    # output (asked for with --cgi, or because a web server started us as
+    # a CGI program). Nothing else may reach standard output.
+    my int $cgi = Cannoli::Config::get_bool(%config, "cgi.enabled", 0);
+    if ($cgi == 0 && Cannoli::Config::get_bool(%config, "fastcgi.enabled", 0) == 0 && Cannoli::CGI::detected() == 1) { $cgi = 1; }
+    if ($cgi == 1) { Cannoli::CGI::capture_stdout(); }
+
     # Initialize logging
     Cannoli::Log::init(%config);
 
     my scalar $server_ref = Cannoli::Server::new(%config);
 
     Cannoli::Server::set_router($server_ref, $app->{"router"});
+
+    if ($cgi == 1) {
+        if (Cannoli::Server::libraries_ok($server_ref) == 0) {
+            Cannoli::CGI::write("Status: 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nInternal Server Error\n");
+            return 1;
+        }
+        return Cannoli::CGI::run($server_ref, Cannoli::Config::get_int(%config, "server.max_body_size", 10485760));
+    }
 
     # Check for FastCGI mode
     my int $fastcgi = Cannoli::Config::get_bool(%config, "fastcgi.enabled", 0);

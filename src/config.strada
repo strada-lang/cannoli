@@ -305,7 +305,7 @@ func Cannoli_Config_validate(hash %config) scalar {
         push(@{$errors}, "ssl.min_version must be 1.2 or 1.3");
     }
 
-    foreach my str $key ("server.http", "server.keep_alive", "server.loop_workers", "server.request_id", "server.tokens", "app.library_prefixes", "server.body_in_memory", "ssl.enabled", "ssl.only", "fastcgi.enabled", "admin.enabled", "static.listing") {
+    foreach my str $key ("server.http", "server.keep_alive", "server.loop_workers", "server.request_id", "server.tokens", "app.library_prefixes", "server.body_in_memory", "ssl.enabled", "ssl.only", "fastcgi.enabled", "cgi.enabled", "admin.enabled", "static.listing") {
         ::validate_bool(%config, $errors, $key);
     }
 
@@ -401,6 +401,8 @@ func Cannoli_Config_merge_args(hash %config, int $argc, array @argv) hash {
             }
         } elsif ($arg eq "--no-keep-alive") {
             $config{"server.keep_alive"} = "0";
+        } elsif ($arg eq "--cgi") {
+            $config{"cgi.enabled"} = "1";
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
         } elsif ($arg eq "--socket") {

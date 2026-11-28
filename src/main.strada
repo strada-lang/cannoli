@@ -64,6 +64,7 @@ func Cannoli_Main_print_help() void {
     say("  --ssl-cert FILE      SSL certificate file");
     say("  --ssl-key FILE       SSL private key file");
     say("  --fastcgi            Run in FastCGI mode");
+    say("  --cgi                Serve one request as a CGI program (also automatic under a web server)");
     say("  --socket HOST:PORT   FastCGI listen address (default: 127.0.0.1:9000)");
     say("  --pid-file FILE      Write the master PID to FILE (removed on exit)");
     say("  --user USER          Run as USER after binding (when started as root)");
@@ -303,6 +304,15 @@ func Cannoli_Main_create_demo_app() scalar {
 }
 
 func Cannoli_Main_main(int $argc, array @argv) int {
+    # CGI: from here on nothing but the response may reach standard output
+    # (see Cannoli::CGI). Decided before anything is printed.
+    my int $want_cgi = Cannoli::CGI::detected();
+    foreach my str $early (@argv) {
+        if ($early eq "--cgi") { $want_cgi = 1; }
+        if ($early eq "--fastcgi" || $early eq "--socket") { $want_cgi = 0; last; }
+    }
+    if ($want_cgi == 1) { Cannoli::CGI::capture_stdout(); }
+
     my hash %config = Cannoli::Config::defaults();
     my int $dev_mode = 0;
     my int $demo_mode = 0;
@@ -393,6 +403,8 @@ func Cannoli_Main_main(int $argc, array @argv) int {
             } else {
                 push(@{$cli_errors}, "option " . $arg . " requires an argument");
             }
+        } elsif ($arg eq "--cgi") {
+            $config{"cgi.enabled"} = "1";
         } elsif ($arg eq "--fastcgi") {
             $config{"fastcgi.enabled"} = "1";
         } elsif ($arg eq "--socket") {

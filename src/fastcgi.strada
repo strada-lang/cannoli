@@ -334,6 +334,40 @@ func Cannoli_FastCGI_read_exact(int $fd, int $needed) str {
 
 # Handle a single FastCGI connection
 my int $g_fcgi_max_body = 10485760;
+my scalar $g_fcgi_server = undef;     # the server (libraries + router) requests are dispatched through
+
+# Attach a request body that arrived apart from the headers (FastCGI STDIN,
+# CGI standard input) and parse it as Cannoli::Request::parse would.
+func Cannoli_FastCGI_request_body(hash %req, str $stdin_data) void {
+    $req{"body"} = $stdin_data;
+    my str $method = $req{"method"};
+    if (($method eq "POST" || $method eq "PUT" || $method eq "PATCH") && core::byte_length($stdin_data) > 0) {
+        my str $ct = $req{"content_type"};
+        if (index(lc($ct), "multipart/form-data") >= 0) {
+            my str $boundary = Cannoli::Request::extract_boundary($ct);
+            if (length($boundary) > 0) {
+                my hash %multipart = Cannoli::Request::parse_multipart($stdin_data, $boundary);
+                $req{"files"} = $multipart{"files"};
+                my hash %merged = %{$req{"params"}};
+                my scalar $mp_params = $multipart{"params"};
+                foreach my str $mk (keys(%{$mp_params})) {
+                    $merged{$mk} = $mp_params->{$mk};
+                }
+                $req{"params"} = \%merged;
+            }
+        } elsif (index($ct, "application/x-www-form-urlencoded") >= 0) {
+            my scalar $body_params = Cannoli::Request::parse_query($stdin_data);
+            my hash %merged = %{$req{"params"}};
+            foreach my str $bk (keys(%{$body_params})) {
+                $merged{$bk} = $body_params->{$bk};
+            }
+            $req{"params"} = \%merged;
+        }
+    }
+    if (!exists(%req, "files")) {
+        $req{"files"} = {};
+    }
+}
 
 # Serve FastCGI requests on one connection: several in a row when the web
 # server sets FCGI_KEEP_CONN (nginx: fastcgi_keep_conn on), then close.
@@ -422,42 +456,22 @@ func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
 
     # Build request from params
     my hash %req = ::params_to_request(%params);
-    $req{"body"} = $stdin_data;
+    ::request_body(%req, $stdin_data);
 
-    # Parse form/multipart body just like Cannoli::Request::parse
-    my str $method = $req{"method"};
-    if (($method eq "POST" || $method eq "PUT" || $method eq "PATCH") && core::byte_length($stdin_data) > 0) {
-        my str $ct = $req{"content_type"};
-        if (index(lc($ct), "multipart/form-data") >= 0) {
-            my str $boundary = Cannoli::Request::extract_boundary($ct);
-            if (length($boundary) > 0) {
-                my hash %multipart = Cannoli::Request::parse_multipart($stdin_data, $boundary);
-                $req{"files"} = $multipart{"files"};
-                my hash %merged = %{$req{"params"}};
-                my scalar $mp_params = $multipart{"params"};
-                foreach my str $mk (keys(%{$mp_params})) {
-                    $merged{$mk} = $mp_params->{$mk};
-                }
-                $req{"params"} = \%merged;
-            }
-        } elsif (index($ct, "application/x-www-form-urlencoded") >= 0) {
-            my scalar $body_params = Cannoli::Request::parse_query($stdin_data);
-            my hash %merged = %{$req{"params"}};
-            foreach my str $bk (keys(%{$body_params})) {
-                $merged{$bk} = $body_params->{$bk};
-            }
-            $req{"params"} = \%merged;
-        }
-    }
-    if (!exists(%req, "files")) {
-        $req{"files"} = {};
-    }
-
-    # Dispatch to router
+    # Dispatch: through the server (libraries, then the router) when there
+    # is one, as for HTTP and CGI requests
     my hash %res = ();
+    my scalar $fc_c = undef;
+    my scalar $fc_after = undef;
     Cannoli::Server::sb_watch(1);     # stuck-handler watchdog, as in HTTP workers
     try {
-        if (defined($router)) {
+        if (defined($g_fcgi_server)) {
+            $req{"peer_addr"} = $req{"remote_addr"};
+            my scalar $d = Cannoli::Server::dispatch($g_fcgi_server, \%req);
+            %res = %{$d->{"res"}};
+            $fc_c = $d->{"c"};
+            $fc_after = $d->{"after"};
+        } elsif (defined($router)) {
             %res = Cannoli::Router::dispatch($router, %req);
         } else {
             %res = Cannoli::Response::text(200, "Cannoli FastCGI server running");
@@ -476,6 +490,9 @@ func Cannoli_FastCGI_handle_request(int $fd, scalar $router) int {
     if (core::write_fd($fd, $response) <= 0) { return 0; }
 
     Cannoli::Log::request_timed(%req, %res, core::mono_ms() - $t0);
+    if (defined($fc_after) && defined($fc_c)) {
+        try { Cannoli::Server::lib_after($fc_after, $fc_c, core::mono_ms() - $t0); } catch ($ae) { Cannoli::Log::error("cannoli_after_request: " . $ae); }
+    }
     return $keep_conn;
 }
 
@@ -627,6 +644,7 @@ func Cannoli_FastCGI_run(str $socket_path, scalar $router, int $num_workers, int
     core::signal("INT", \&Cannoli_FastCGI_on_term);
     core::signal("PIPE", "IGNORE");
 
+    $g_fcgi_server = $server_ref;
     Cannoli::Server::sb_init();
     my int $handler_timeout = defined($server_ref) ? $server_ref->{"handler_timeout"} : 60;
     my int $rotate_next = 0;

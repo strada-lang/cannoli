@@ -37,4 +37,22 @@ kill -TERM $MPID
 for _ in $(seq 1 100); do kill -0 $MPID 2>/dev/null || break; sleep 0.05; done
 kill -0 $MPID 2>/dev/null && fail "master did not exit" || { MPID=""; pass "clean shutdown"; }
 [ ! -e "$SOCK" ] && pass "socket file removed" || fail "socket file left behind"
+echo "a library application over FastCGI"
+if command -v "${STRADA:-strada}" >/dev/null; then
+  printf 'func cannoli_dispatch(scalar $c) str {\n    if ($c->path() eq "/lib") { $c->render_text("from the library " . $c->method()); return $c->done(); }\n    return "";\n}\n' > "$S/lib.strada"
+  if ( cd "$S" && "${STRADA:-strada}" --shared lib.strada -o lib.so >/dev/null 2>&1 ); then
+    LSOCK="$S/l.sock"
+    "$BIN" --fastcgi --socket "unix:$LSOCK" --demo -w 1 -l "$S/lib.so" > "$S/lib.log" 2>&1 &
+    LPID=$!
+    wait_up "$LSOCK"
+    R=$(python3 "$C" "$LSOCK" /lib)
+    [ "$R" = "from the library GET" ] && pass "a loaded library answers FastCGI requests" || fail "library over FastCGI: $R"
+    R=$(python3 "$C" "$LSOCK" /hello)
+    [ "$R" = "Hello, World!" ] && pass "and the router still answers what the library declines" || fail "router after library: $R"
+    kill -TERM $LPID 2>/dev/null; for _ in $(seq 1 100); do kill -0 $LPID 2>/dev/null || break; sleep 0.05; done; kill -9 $LPID 2>/dev/null
+  else
+    echo "  SKIP: could not build the test library"
+  fi
+fi
+
 [ $FAILS -eq 0 ] && echo "All FastCGI tests passed!" || { echo "$FAILS failure(s)"; exit 1; }

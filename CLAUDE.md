@@ -199,6 +199,7 @@ cannoli_obj.strada (OOP wrapper)
 | `--ssl-cert` | Path to SSL certificate |
 | `--ssl-key` | Path to SSL private key |
 | `--fastcgi` | Enable FastCGI mode |
+| `--cgi` | Serve one request as a CGI program |
 | `--socket` | FastCGI socket path |
 | `--library, -l` | Dynamic library path(s) |
 
@@ -277,7 +278,19 @@ progress for `server.handler_timeout`. `$c->long_running()` (called by
 Keep-alive: `server.keep_alive_requests` per connection, and a classic
 worker closes after the response while `others_waiting()`.
 
-**FastCGI mode** (`fastcgi.strada`) shares the scoreboard: workers
+**CGI mode** (`src/cgi.strada`, `Cannoli::CGI`; `--cgi`, or automatic when
+`GATEWAY_INTERFACE=CGI/x`). One request per process: `capture_stdout()`
+moves the real stdout aside and points fd 1 at stderr before anything is
+printed (main does it first thing), the request is built from the
+environment with `FastCGI::params_to_request` + `request_body` (path =
+`PATH_INFO`), dispatched through `Server::dispatch` (libraries, VM apps,
+router) and written as `Status: ...` + headers + body. `$c` streaming
+writes raw bytes under CGI (`_cgi`). Test: `t/test_cgi.sh` (also under
+`python3 -m http.server --cgi`).
+
+**FastCGI mode** (`fastcgi.strada`) dispatches through `Server::dispatch`
+too (it used to call only the router, so loaded libraries were ignored).
+It shares the scoreboard: workers
 `sb_claim`, dispatch runs under `sb_watch`, the FastCGI master kills stuck
 workers and rotates logs; paths are normalised; the listener is
 non-blocking (two workers waking for one connection must not block in
@@ -777,6 +790,7 @@ Test files:
 - `test_request.strada` - Request parsing
 - `test_hardening.strada` - Framing/strictness, chunked decoding, cookies, templates, middleware, ranges
 - `test_review.strada` / `test_review.sh` - path normalisation, config comments, session merging, template reload, log rotation, shared rate counter / library return values, stuck-worker watchdog, streaming to a stalled client, keep-alive fairness, rejected-request logging
+- `test_cgi.sh` - CGI mode by hand and under a real CGI host
 - `test_vm.sh` - interpreted applications (`--library app.strada`): requests, reload, errors, loop workers, memory
 - `test_perl.sh` - the Perl library (skipped until `cd lib/perl && make`)
 - `test_hardening.sh` / `test_hardening_loop.sh` - Live timeouts, smuggling inputs, 100-continue, pid file (classic / loop workers)

@@ -3055,13 +3055,18 @@ func Cannoli_Server_worker_handle_term(int $sig) void {
 }
 
 # Run the libraries' cannoli_worker_exit hooks (once), then exit.
-func Cannoli_Server_worker_exit() void {
+# Run every library's cannoli_worker_exit (once per process)
+func Cannoli_Server_worker_hooks_exit() void {
     if ($_g_exiting == 0) {
         $_g_exiting = 1;
         foreach my scalar $fn (@{$_g_exit_funcs}) {
             try { ::lib_hook($fn); } catch ($e) { Cannoli::Log::error("cannoli_worker_exit: " . $e); }
         }
     }
+}
+
+func Cannoli_Server_worker_exit() void {
+    ::worker_hooks_exit();
     exit(0);
 }
 

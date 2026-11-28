@@ -36,6 +36,7 @@ SOURCES := \
 	$(SRC_DIR)/vmapp.strada \
 	$(SRC_DIR)/server.strada \
 	$(SRC_DIR)/fastcgi.strada \
+	$(SRC_DIR)/cgi.strada \
 	$(SRC_DIR)/app.strada \
 	$(SRC_DIR)/main.strada \
 	$(LIB_DIR)/compress.strada

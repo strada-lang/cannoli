@@ -70,6 +70,8 @@ func Cannoli_new(hash %req) scalar {
         $self{"_client"} = $req{"_client"};
     }
     if (exists(%req, "body_file")) { $self{"_body_file"} = $req{"body_file"}; }
+    if (exists(%req, "_cgi")) { $self{"_cgi"} = 1; }
+    if (exists(%req, "script_name")) { $self{"_script_name"} = $req{"script_name"}; }
     if (exists(%req, "_conn_buffer")) { $self{"_conn_buffer"} = $req{"_conn_buffer"}; }
     if (exists(%req, "_conn")) {
         $self{"_conn"} = $req{"_conn"};
@@ -111,6 +113,13 @@ func Cannoli_body_file(scalar $self) str {
 # reach Cannoli only through $c.
 func Cannoli_html_escape(scalar $self, str $text) str {
     return Cannoli::Response::html_escape($text);
+}
+
+# Under CGI, the URL of the script itself (/cgi-bin/app.cgi): prefix it to
+# links back into the application. "" in every other mode.
+func Cannoli_script_name(scalar $self) str {
+    if (exists(%{$self}, "_script_name")) { return "" . $self->{"_script_name"}; }
+    return "";
 }
 
 func Cannoli_method(scalar $self) str {
@@ -787,6 +796,15 @@ func Cannoli_start_chunked(scalar $self) scalar {
         $i = $i + 1;
     }
 
+    if (exists(%{$self}, "_cgi")) {
+        # CGI: headers in CGI form, then the body as plain bytes; the web
+        # server does the framing towards the client.
+        Cannoli::Response::remove_header(%res, "Content-Length");
+        $self->{"_chunked"} = 1;
+        Cannoli::CGI::write(Cannoli::CGI::head(Cannoli::Response::build_headers(%res)));
+        return $self;
+    }
+
     Cannoli::Response::header(%res, "Transfer-Encoding", "chunked");
     Cannoli::Response::remove_header(%res, "Content-Length");
     $self->{"_chunked"} = 1;
@@ -814,6 +832,10 @@ func Cannoli_write_chunk(scalar $self, str $data) int {
         return 0;
     }
 
+    if (exists(%{$self}, "_cgi")) {
+        return Cannoli::CGI::write($data) == 1 ? $byte_len : -1;
+    }
+
     # Format chunk: hex_length\r\n data \r\n
     my str $hex_len = Cannoli::Response::to_hex($byte_len);
     my str $chunk = $hex_len . "\r\n" . $data . "\r\n";
@@ -830,6 +852,7 @@ func Cannoli_write_chunk(scalar $self, str $data) int {
 
 # End the chunked response - sends terminating chunk
 func Cannoli_end_chunked(scalar $self) scalar {
+    if (exists(%{$self}, "_cgi")) { return $self; }
     my str $terminator = "0\r\n\r\n";
 
     if (exists(%{$self}, "_conn")) {

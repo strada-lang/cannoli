@@ -87,6 +87,42 @@ replaced, a live one is refused -- or `host:port` for TCP (default
 `127.0.0.1:9000`). Keep TCP on loopback or a private network: FastCGI
 parameters such as `REMOTE_ADDR` and `HTTPS` are trusted as sent.
 
+### CGI Mode (Apache and friends)
+
+`cannoli --cgi` serves exactly one request the old-fashioned way: the
+request comes from the CGI environment variables and standard input, the
+response goes to standard output, and the process exits. The same
+application (a compiled `.so`, an interpreted `.strada`, or routes built
+with `Cannoli::App`) therefore runs standalone, behind FastCGI, or as a
+plain CGI program.
+
+```sh
+#!/bin/sh
+# /usr/lib/cgi-bin/app.cgi   (chmod +x)
+exec /usr/local/bin/cannoli --cgi --library /srv/app/myapp.so
+```
+
+```apache
+ScriptAlias /app /usr/lib/cgi-bin/app.cgi      # needs mod_cgi or mod_cgid
+# http://host/app/users/7  ->  the application sees the path /users/7
+```
+
+- The application sees the path after the script's URL (`PATH_INFO`);
+  `$c->script_name()` is the script's own URL, for building links.
+- `--cgi` is implied when the environment has `GATEWAY_INTERFACE=CGI/...`,
+  which is how a web server runs CGI programs, so a program built on
+  `Cannoli::App` can be dropped into `cgi-bin` as it is.
+- Everything Cannoli prints while starting goes to standard error (the web
+  server's error log); only the response reaches standard output. A handler
+  that throws, or a library that fails to load, produces a `500`.
+- A config file works as usual (`--cgi -c /etc/cannoli.conf`):
+  `max_body_size`, `[headers]`, logging, sessions and templates apply.
+- `$c->start_chunked()` / `write_chunk()` send the body as it is produced.
+- Not possible under CGI: WebSockets, and keeping anything in memory
+  between requests. Each request starts a process and loads the
+  application (about 15 ms for a small library here); use FastCGI or the
+  standalone server when that matters.
+
 ### Dynamic Library Mode
 
 ```bash
